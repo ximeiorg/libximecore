@@ -1,0 +1,18 @@
+[package]
+name = "librime-sys2"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Raw FFI bindings to librime (cross-platform)"
+repository = "https://github.com/ximeiorg/libximecore"
+links = "rime"
+exclude = ["/target"]
+
+[lib]
+name = "librime_sys2"
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_LibraryLoader"] }

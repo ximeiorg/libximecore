@@ -1,0 +1,106 @@
+wubi_radicals:
+  hotkeys:
+    show_key: "Ctrl"
+  schema_radicals:
+    wubi86:
+      g: "王龶五一戋"
+      f: "土士二干十寸雨"
+      d: "大犬三古石厂"
+      s: "木丁西"
+      a: "工匚戈艹廿龷七弋戈"
+      h: "目丨上止卜"
+      j: "日曰早虫"
+      k: "口"
+      l: "田甲车口四皿罒"
+      m: "山由贝"
+      t: "禾丿竹彳"
+      r: "白手扌斤"
+      e: "月彡乃用豕"
+      w: "人亻八"
+      q: "金钅勹儿"
+      y: "言讠文方亠"
+      u: "立辛丬六疒门"
+      i: "水氵小"
+      o: "火丷米"
+      p: "之辶冖"
+      n: "已巳己尸心忄羽"
+      b: "子孑了耳阝卩"
+      v: "女刀九臼彐"
+      c: "又巴马"
+      x: "母弓匕纟糸"
+    wubi98:
+      g: "王旁青头五夫"
+      f: "土干十寸雨未"
+      d: "大犬戊其古石厂"
+      s: "木丁西南"
+      a: "工戈草头右框七"
+      h: "目止卜虎皮"
+      j: "日早两竖虫曰"
+      k: "口"
+      l: "田甲车方框四皿罒"
+      m: "山由贝骨几"
+      t: "禾竹反文双人"
+      r: "白手斤气丘"
+      e: "月用力豕毛衣"
+      w: "人八登几"
+      q: "金夕狗儿"
+      y: "言文方点谁人去"
+      u: "立辛六羊病"
+      i: "水族三点鳖头小"
+      o: "火业广鹿四点米"
+      p: "之字宝盖补礻"
+      n: "己类左框心尸羽"
+      b: "子耳了也乃齿"
+      v: "女刀九艮录巡"
+      c: "又巴牛马"
+      x: "母弓匕纟糸"
+
+style:
+  font_family: ""
+  font_size: 14.0
+  candidate_count: 5
+  horizontal: true
+  corner_radius: 8.0
+  color_scheme: lavender_purple
+
+color_schemes:
+  lavender_purple:
+    name: "薰衣草紫"
+    primary_color: 0x8F73E2
+  ocean_blue:
+    name: "海洋蔚蓝"
+    primary_color: 0x1A73E8
+  forest_green:
+    name: "森林翠绿"
+    primary_color: 0x2E7D32
+  sunset_orange:
+    name: "落日橙黄"
+    primary_color: 0xE65100
+  coral_red:
+    name: "珊瑚红"
+    primary_color: 0xC62828
+  slate_gray:
+    name: "石板灰"
+    primary_color: 0x424242
+  rose_pink:
+    name: "玫瑰粉"
+    primary_color: 0xAD1457
+  teal_cyan:
+    name: "青蓝"
+    primary_color: 0x00796B
+
+smart_suggestion:
+  enabled: true
+  suggestion_count: 5
+  learning_threshold: 3
+  model:
+    provider: modelscope
+    name: predictive-text-small
+    auto_download: false
+    files:
+      - url: "https://modelscope.cn/models/Kor1/predictive-text-small/resolve/main/vocab.json"
+        filename: vocab.json
+      - url: "https://modelscope.cn/models/Kor1/predictive-text-small/resolve/main/model.onnx"
+        filename: model.onnx
+      - url: "https://modelscope.cn/models/Kor1/predictive-text-small/resolve/main/model.onnx.data"
+        filename: model.onnx.data
