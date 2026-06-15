@@ -6,6 +6,7 @@ members = [
     "crates/xime-config",
     "crates/xime-rime",
     "crates/xime-ipc",
+    "crates/xime-setup",
 ]
 
 [workspace.dependencies]
