@@ -1,0 +1,26 @@
+meta {
+  name: Clipboard Write
+  type: http
+  seq: 8
+}
+
+post {
+  url: http://localhost:5023/clipboard/write
+  body: json
+  auth: bearer
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "content": "Hello from paired device!",
+    "hash": "base64-sha256-hash-of-content"
+  }
+}
+
+auth:bearer {
+  token: your-auth-token-here
+}

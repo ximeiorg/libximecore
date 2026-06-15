@@ -1,0 +1,23 @@
+meta {
+  name: Pair Confirm
+  type: http
+  seq: 4
+}
+
+post {
+  url: http://localhost:5023/pair/confirm
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "code": "123456",
+    "approve": true,
+    "device_name": "My Desktop"
+  }
+}

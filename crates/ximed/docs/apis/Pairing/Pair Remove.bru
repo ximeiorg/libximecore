@@ -1,0 +1,16 @@
+meta {
+  name: Pair Remove
+  type: http
+  seq: 6
+}
+
+post {
+  url: http://localhost:5023/pair/remove/{device_id}
+  body: none
+  auth: bearer
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {token}
+}
