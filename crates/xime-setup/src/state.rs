@@ -1,49 +1,35 @@
 use crate::theme::{SystemTheme, ThemeColors};
 use gpui::*;
+use std::sync::OnceLock;
 use xime_config::{
     deploy_all, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager,
     XimeConfig,
 };
 
-#[cfg(target_os = "linux")]
+static NOTIFY_DEPLOY: OnceLock<fn()> = OnceLock::new();
+static NOTIFY_RELOAD_STYLE: OnceLock<fn()> = OnceLock::new();
+
+pub fn set_notify_deploy(f: fn()) {
+    let _ = NOTIFY_DEPLOY.set(f);
+}
+
+pub fn set_notify_reload_style(f: fn()) {
+    let _ = NOTIFY_RELOAD_STYLE.set(f);
+}
+
 fn notify_daemon_reload() -> bool {
-    zbus::blocking::Connection::session()
-        .ok()
-        .and_then(|conn| {
-            conn.call_method(
-                Some("org.xime.Xime"),
-                "/org/xime/Xime",
-                Some("org.xime.Xime.Controller"),
-                "Deploy",
-                &(),
-            )
-            .ok()
-        })
-        .is_some()
+    if let Some(f) = NOTIFY_DEPLOY.get() {
+        f();
+        true
+    } else {
+        false
+    }
 }
 
-#[cfg(target_os = "linux")]
 fn notify_daemon_reload_style() {
-    zbus::blocking::Connection::session().ok().and_then(|conn| {
-        conn.call_method(
-            Some("org.xime.Xime"),
-            "/org/xime/Xime",
-            Some("org.xime.Xime.Controller"),
-            "ReloadStyle",
-            &(),
-        )
-        .ok()
-    });
-}
-
-#[cfg(target_os = "windows")]
-fn notify_daemon_reload() -> bool {
-    // Windows: notify via xime-ipc DaemonClient from the binary wrapper
-    false
-}
-
-#[cfg(target_os = "windows")]
-fn notify_daemon_reload_style() {
+    if let Some(f) = NOTIFY_RELOAD_STYLE.get() {
+        f();
+    }
 }
 
 pub struct SettingsState {
