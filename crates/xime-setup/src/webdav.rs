@@ -32,8 +32,7 @@ impl WebdavConfig {
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create dir: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {}", e))?;
         }
         let content =
             serde_yaml::to_string(self).map_err(|e| format!("Failed to serialize: {}", e))?;

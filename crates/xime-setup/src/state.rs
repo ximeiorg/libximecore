@@ -2,8 +2,7 @@ use crate::theme::{SystemTheme, ThemeColors};
 use gpui::*;
 use std::sync::OnceLock;
 use xime_config::{
-    deploy_all, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager,
-    XimeConfig,
+    deploy_all, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager, XimeConfig,
 };
 
 static NOTIFY_DEPLOY: OnceLock<fn()> = OnceLock::new();
@@ -260,8 +259,7 @@ impl SettingsState {
         config.smart_suggestion.enabled = Some(self.smart_suggestion.enabled);
         config.smart_suggestion.suggestion_count = self.smart_suggestion.suggestion_count;
         config.smart_suggestion.record_user_frequency = self.smart_suggestion.record_user_frequency;
-        config.smart_suggestion.auto_adjust_frequency =
-            self.smart_suggestion.auto_adjust_frequency;
+        config.smart_suggestion.auto_adjust_frequency = self.smart_suggestion.auto_adjust_frequency;
         config.smart_suggestion.learning_threshold = self.smart_suggestion.learning_threshold;
         config.save()?;
         notify_daemon_reload_style();
@@ -281,13 +279,11 @@ pub struct SmartSuggestionState {
 
 #[cfg(feature = "pair-page")]
 #[derive(Clone, Default)]
-pub struct PairState {
-}
+pub struct PairState {}
 
 #[cfg(feature = "clipboard-page")]
 #[derive(Clone, Default)]
-pub struct ClipboardState {
-}
+pub struct ClipboardState {}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Default)]

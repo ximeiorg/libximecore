@@ -29,11 +29,21 @@ impl Default for StyleConfig {
     }
 }
 
-fn default_font_size() -> f32 { 14.0 }
-fn default_candidate_count() -> i32 { 5 }
-fn default_horizontal() -> bool { true }
-fn default_corner_radius() -> f32 { 8.0 }
-fn default_color_scheme() -> String { "lavender_purple".to_string() }
+fn default_font_size() -> f32 {
+    14.0
+}
+fn default_candidate_count() -> i32 {
+    5
+}
+fn default_horizontal() -> bool {
+    true
+}
+fn default_corner_radius() -> f32 {
+    8.0
+}
+fn default_color_scheme() -> String {
+    "lavender_purple".to_string()
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ColorScheme {
@@ -56,7 +66,9 @@ impl Default for ColorScheme {
     }
 }
 
-fn default_primary_color() -> u32 { 0x8F73E2 }
+fn default_primary_color() -> u32 {
+    0x8F73E2
+}
 
 fn deserialize_hex_color<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
@@ -64,9 +76,7 @@ where
 {
     let value: serde_yaml::Value = serde::Deserialize::deserialize(deserializer)?;
     match value {
-        serde_yaml::Value::Number(n) => {
-            Ok(n.as_u64().unwrap_or(0x8F73E2) as u32)
-        }
+        serde_yaml::Value::Number(n) => Ok(n.as_u64().unwrap_or(0x8F73E2) as u32),
         serde_yaml::Value::String(s) => {
             let s = s.trim();
             if s.starts_with("0x") || s.starts_with("0X") {

@@ -4,12 +4,12 @@ pub mod dictionary;
 pub mod hotkeys;
 pub mod input_schema;
 
-#[cfg(feature = "smart-suggestion-page")]
-pub mod smart_suggestion;
-#[cfg(feature = "pair-page")]
-pub mod pair;
 #[cfg(feature = "clipboard-page")]
 pub mod clipboard;
+#[cfg(feature = "pair-page")]
+pub mod pair;
+#[cfg(feature = "smart-suggestion-page")]
+pub mod smart_suggestion;
 #[cfg(target_os = "linux")]
 pub mod sync;
 

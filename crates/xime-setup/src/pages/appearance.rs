@@ -3,14 +3,9 @@ use crate::state::SettingsState;
 use crate::theme::ThemeColors;
 use gpui::*;
 
-pub fn render(
-    settings: &Entity<SettingsState>,
-    colors: &ThemeColors,
-) -> impl IntoElement {
+pub fn render(settings: &Entity<SettingsState>, colors: &ThemeColors) -> impl IntoElement {
     SettingsPage::new("外观", colors.clone())
-        .group(
-            SettingsGroup::new("显示", colors.clone())
-                .items(vec![
+        .group(SettingsGroup::new("显示", colors.clone()).items(vec![
                     SettingsItem::new(
                         "字号",
                         SettingsControl::number_input_with(
@@ -59,27 +54,24 @@ pub fn render(
                         ),
                     )
                     .description("候选窗口圆角半径"),
-                ]),
-        )
+                ]))
         .group(
-            SettingsGroup::new("操作", colors.clone()).items(vec![
-                SettingsItem::new(
-                    "保存外观设置",
-                    SettingsControl::button_with("保存外观设置", {
-                        let settings = settings.clone();
-                        move |_window, cx| {
-                            cx.update_entity(&settings, |state, cx| {
-                                if let Err(e) = state.save_appearance() {
-                                    state.deploy_message = Some(format!("保存失败: {}", e));
-                                    cx.notify();
-                                } else {
-                                    state.deploy_message = Some("外观设置已保存并重载".to_string());
-                                    cx.notify();
-                                }
-                            });
-                        }
-                    }),
-                ),
-            ]),
+            SettingsGroup::new("操作", colors.clone()).items(vec![SettingsItem::new(
+                "保存外观设置",
+                SettingsControl::button_with("保存外观设置", {
+                    let settings = settings.clone();
+                    move |_window, cx| {
+                        cx.update_entity(&settings, |state, cx| {
+                            if let Err(e) = state.save_appearance() {
+                                state.deploy_message = Some(format!("保存失败: {}", e));
+                                cx.notify();
+                            } else {
+                                state.deploy_message = Some("外观设置已保存并重载".to_string());
+                                cx.notify();
+                            }
+                        });
+                    }
+                }),
+            )]),
         )
 }

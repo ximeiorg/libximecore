@@ -160,7 +160,10 @@ impl XimeConfig {
                 over.color_schemes
             },
             smart_suggestion: SmartSuggestionConfig {
-                enabled: over.smart_suggestion.enabled.or(base.smart_suggestion.enabled),
+                enabled: over
+                    .smart_suggestion
+                    .enabled
+                    .or(base.smart_suggestion.enabled),
                 suggestion_count: over.smart_suggestion.suggestion_count,
                 record_user_frequency: over.smart_suggestion.record_user_frequency,
                 auto_adjust_frequency: over.smart_suggestion.auto_adjust_frequency,
@@ -181,8 +184,8 @@ impl XimeConfig {
 
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_path();
-        let content =
-            serde_yaml::to_string(self).map_err(|e| format!("Failed to serialize config: {}", e))?;
+        let content = serde_yaml::to_string(self)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -205,20 +208,28 @@ impl XimeConfig {
             (0x8F, 0x73, 0xE2)
         }
     }
+
+    /// Get wubi root text for a key press in the given schema.
+    /// Delegates to `wubi_radicals`.
+    pub fn get_root_for_key(&self, schema: &str, key: char) -> Option<String> {
+        self.wubi_radicals.get_root_for_key(schema, key)
+    }
+
+    /// Get the key binding that triggers the wubi radicals overlay.
+    /// Returns e.g. "Ctrl" or "Shift" from `wubi_radicals.hotkeys.show_key`.
+    pub fn get_last_key_root_binding(&self) -> String {
+        self.wubi_radicals.hotkeys.show_key.clone()
+    }
 }
 
 // Logging support (cross-platform)
-static LOG_GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> =
-    Mutex::new(None);
+static LOG_GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
 
 pub fn init_logging(component: &str) {
     let log_dir = get_log_dir();
     fs::create_dir_all(&log_dir).ok();
 
-    let file_appender = tracing_appender::rolling::never(
-        &log_dir,
-        format!("{}.log", component),
-    );
+    let file_appender = tracing_appender::rolling::never(&log_dir, format!("{}.log", component));
 
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -243,10 +254,7 @@ pub fn init_logging_with_console(component: &str) {
     let log_dir = get_log_dir();
     fs::create_dir_all(&log_dir).ok();
 
-    let file_appender = tracing_appender::rolling::never(
-        &log_dir,
-        format!("{}.log", component),
-    );
+    let file_appender = tracing_appender::rolling::never(&log_dir, format!("{}.log", component));
 
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 

@@ -46,8 +46,8 @@ impl SystemTheme {
 
         #[cfg(target_os = "windows")]
         {
-            use windows::Win32::UI::WindowsAndMessaging::*;
             use windows::core::PCWSTR;
+            use windows::Win32::UI::WindowsAndMessaging::*;
             unsafe {
                 let mut key: u32 = 0;
                 let mut size = std::mem::size_of::<u32>() as u32;
@@ -59,7 +59,12 @@ impl SystemTheme {
                             .collect::<Vec<_>>()
                             .as_ptr(),
                     ),
-                    PCWSTR("AppsUseLightTheme\0".encode_utf16().collect::<Vec<_>>().as_ptr()),
+                    PCWSTR(
+                        "AppsUseLightTheme\0"
+                            .encode_utf16()
+                            .collect::<Vec<_>>()
+                            .as_ptr(),
+                    ),
                     RRF_RT_DWORD,
                     None,
                     Some(&mut key as *mut _ as _),

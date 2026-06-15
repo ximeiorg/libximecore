@@ -29,8 +29,12 @@ impl Default for SmartSuggestionConfig {
     }
 }
 
-fn default_suggestion_count() -> i32 { 5 }
-fn default_learning_threshold() -> i32 { 3 }
+fn default_suggestion_count() -> i32 {
+    5
+}
+fn default_learning_threshold() -> i32 {
+    3
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SmartSuggestionModelConfig {
@@ -55,8 +59,12 @@ impl Default for SmartSuggestionModelConfig {
     }
 }
 
-fn default_model_provider() -> String { "modelscope".to_string() }
-fn default_model_name() -> String { "predictive-text-small".to_string() }
+fn default_model_provider() -> String {
+    "modelscope".to_string()
+}
+fn default_model_name() -> String {
+    "predictive-text-small".to_string()
+}
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct SmartSuggestionModelFile {

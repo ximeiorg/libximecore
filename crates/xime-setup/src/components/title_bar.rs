@@ -5,10 +5,7 @@ use gpui::*;
 pub struct TitleBar;
 
 impl TitleBar {
-    pub fn render(
-        _settings: &Entity<SettingsState>,
-        colors: &ThemeColors,
-    ) -> impl IntoElement {
+    pub fn render(_settings: &Entity<SettingsState>, colors: &ThemeColors) -> impl IntoElement {
         div()
             .w_full()
             .h(px(52.0))

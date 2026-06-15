@@ -3,7 +3,10 @@ use crate::components::{SettingsControl, SettingsGroup, SettingsItem, SettingsPa
 use crate::state::SettingsState;
 use gpui::*;
 
-pub fn render(settings: Entity<SettingsState>, cx: &mut Context<SettingsState>) -> impl IntoElement {
+pub fn render(
+    settings: Entity<SettingsState>,
+    cx: &mut Context<SettingsState>,
+) -> impl IntoElement {
     let colors = cx.read_entity(&settings, |state, _| state.colors());
 
     SettingsPage::new("智能联想", colors.clone())
@@ -17,18 +20,16 @@ pub fn render(settings: Entity<SettingsState>, cx: &mut Context<SettingsState>) 
                         .description("每次显示的建议数量"),
                 ]),
         )
-        .group(
-            SettingsGroup::new("操作", colors.clone()).items(vec![
-                SettingsItem::button("保存设置").on_click({
-                    let settings = settings.clone();
-                    move |_window, cx| {
-                        cx.update_entity(&settings, |state, cx| {
-                            // TODO: implement save
-                            state.deploy_message = Some("功能开发中".to_string());
-                            cx.notify();
-                        });
-                    }
-                }),
-            ]),
-        )
+        .group(SettingsGroup::new("操作", colors.clone()).items(vec![
+            SettingsItem::button("保存设置").on_click({
+                let settings = settings.clone();
+                move |_window, cx| {
+                    cx.update_entity(&settings, |state, cx| {
+                        // TODO: implement save
+                        state.deploy_message = Some("功能开发中".to_string());
+                        cx.notify();
+                    });
+                }
+            }),
+        ]))
 }

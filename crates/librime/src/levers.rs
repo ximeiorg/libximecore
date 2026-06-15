@@ -154,9 +154,7 @@ impl CustomSettings {
                 .customize_string
                 .ok_or(Error::FunctionNotAvailable("customize_string"))?;
             if func(self.settings, key_c.as_ptr(), value_c.as_ptr()) == 0 {
-                return Err(Error::FunctionNotAvailable(
-                    "customize_string returned 0",
-                ));
+                return Err(Error::FunctionNotAvailable("customize_string returned 0"));
             }
         }
         Ok(())
@@ -222,8 +220,7 @@ pub struct SwitcherSettings {
 
 impl SwitcherSettings {
     pub fn new() -> Result<Self> {
-        let api =
-            get_levers_api().ok_or(Error::FunctionNotAvailable("rime_get_levers_api"))?;
+        let api = get_levers_api().ok_or(Error::FunctionNotAvailable("rime_get_levers_api"))?;
 
         unsafe {
             let init = (*api)
@@ -259,9 +256,7 @@ impl SwitcherSettings {
             let mut schemas = Vec::new();
             for i in 0..list.size {
                 let item = &*list.list.add(i);
-                let id = CStr::from_ptr(item.schema_id)
-                    .to_string_lossy()
-                    .to_string();
+                let id = CStr::from_ptr(item.schema_id).to_string_lossy().to_string();
                 schemas.push(id);
             }
 
@@ -278,8 +273,7 @@ impl SwitcherSettings {
             .iter()
             .map(|id| CString::new(*id).unwrap())
             .collect();
-        let mut ptrs: Vec<*const std::ffi::c_char> =
-            c_strings.iter().map(|c| c.as_ptr()).collect();
+        let mut ptrs: Vec<*const std::ffi::c_char> = c_strings.iter().map(|c| c.as_ptr()).collect();
 
         unsafe {
             let func = (*self.api)

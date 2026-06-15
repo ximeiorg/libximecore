@@ -34,8 +34,7 @@ pub fn render(
                         .description("候选词翻到上一页"),
                 ]),
         )
-        .group(
-            SettingsGroup::new("操作", colors.clone()).items(vec![
+        .group(SettingsGroup::new("操作", colors.clone()).items(vec![
                 SettingsItem::new("显示字根", SettingsControl::kbd("Ctrl"))
                     .description("按住 Ctrl 键显示当前按键对应的五笔字根"),
                 SettingsItem::new(
@@ -52,6 +51,5 @@ pub fn render(
                         }
                     }),
                 ),
-            ]),
-        )
+            ]))
 }
