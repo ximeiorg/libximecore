@@ -1,0 +1,15 @@
+meta {
+  name: Health Check
+  type: http
+  seq: 1
+}
+
+get {
+  url: http://localhost:5023/health
+  body: none
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}

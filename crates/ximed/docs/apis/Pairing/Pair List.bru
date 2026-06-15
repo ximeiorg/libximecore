@@ -1,0 +1,16 @@
+meta {
+  name: Pair List
+  type: http
+  seq: 5
+}
+
+get {
+  url: {host}/pair/list
+  body: none
+  auth: bearer
+}
+
+headers {
+  Content-Type: application/json
+  Authorization: Bearer {token}
+}

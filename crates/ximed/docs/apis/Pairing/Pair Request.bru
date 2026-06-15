@@ -1,0 +1,21 @@
+meta {
+  name: Pair Request
+  type: http
+  seq: 2
+}
+
+post {
+  url: http://localhost:5023/pair/request
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "device_name": "My Phone"
+  }
+}
