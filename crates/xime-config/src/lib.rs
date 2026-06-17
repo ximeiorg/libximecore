@@ -1,7 +1,6 @@
 pub mod rime_deploy;
 pub mod schema_config;
 pub mod schema_manager;
-pub mod smart_suggestion;
 pub mod style;
 pub mod wubi_radicals;
 
@@ -20,9 +19,6 @@ pub use schema_config::{
     TranslatorConfig,
 };
 pub use schema_manager::SchemaManager;
-pub use smart_suggestion::{
-    SmartSuggestionConfig, SmartSuggestionModelConfig, SmartSuggestionModelFile,
-};
 pub use style::ColorScheme;
 pub use style::StyleConfig;
 pub use wubi_radicals::{KeyRadicalsConfig, WubiRadicalsConfig};
@@ -35,8 +31,6 @@ pub struct XimeConfig {
     pub style: StyleConfig,
     #[serde(default)]
     pub color_schemes: HashMap<String, ColorScheme>,
-    #[serde(default)]
-    pub smart_suggestion: SmartSuggestionConfig,
     #[serde(default)]
     pub pair_secret: String,
 }
@@ -158,17 +152,6 @@ impl XimeConfig {
                 base.color_schemes
             } else {
                 over.color_schemes
-            },
-            smart_suggestion: SmartSuggestionConfig {
-                enabled: over
-                    .smart_suggestion
-                    .enabled
-                    .or(base.smart_suggestion.enabled),
-                suggestion_count: over.smart_suggestion.suggestion_count,
-                record_user_frequency: over.smart_suggestion.record_user_frequency,
-                auto_adjust_frequency: over.smart_suggestion.auto_adjust_frequency,
-                learning_threshold: over.smart_suggestion.learning_threshold,
-                model: over.smart_suggestion.model,
             },
             pair_secret: if over.pair_secret.is_empty() {
                 base.pair_secret
