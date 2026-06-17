@@ -89,18 +89,3 @@ color_schemes:
     name: "青蓝"
     primary_color: 0x00796B
 
-smart_suggestion:
-  enabled: true
-  suggestion_count: 5
-  learning_threshold: 3
-  model:
-    provider: modelscope
-    name: predictive-text-small
-    auto_download: false
-    files:
-      - url: "https://modelscope.cn/models/Kor1/predictive-text-small/resolve/main/vocab.json"
-        filename: vocab.json
-      - url: "https://modelscope.cn/models/Kor1/predictive-text-small/resolve/main/model.onnx"
-        filename: model.onnx
-      - url: "https://modelscope.cn/models/Kor1/predictive-text-small/resolve/main/model.onnx.data"
-        filename: model.onnx.data
