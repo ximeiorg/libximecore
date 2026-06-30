@@ -10,10 +10,13 @@ repository.workspace = true
 name = "xime_setup_lib"
 
 [dependencies]
-gpui = { version = "0.2.2", default-features = false, features = [
-    "wayland",
-    "font-kit",
-] }
+# gpui = { version = "0.2.2", default-features = false, features = [
+#     "wayland",
+#     "font-kit",
+# ] }
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit","wayland"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 xime-config = { path = "../xime-config" }
 serde = { workspace = true, features = ["derive"] }
 serde_yaml.workspace = true
