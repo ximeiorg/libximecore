@@ -1,12 +1,12 @@
 [package]
 name = "xime-rime"
-version = "0.1.0"
-edition = "2021"
-license = "GPL-3.0-or-later"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "High-level Rime engine wrapper"
-repository = "https://github.com/ximeiorg/libximecore"
+repository.workspace = true
 
 [dependencies]
-librime = { version = "0.1.0", path = "../librime" }
-librime-sys2 = { version = "0.1.0", path = "../librime-sys2" }
+librime = { path = "../librime" }
+librime-sys2 = { path = "../librime-sys2" }
 tracing.workspace = true
