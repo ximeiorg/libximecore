@@ -1,9 +1,28 @@
 use crate::theme::{SystemTheme, ThemeColors};
 use gpui::*;
-use std::sync::OnceLock;
+use serde::Deserialize;
+use std::sync::{Mutex, OnceLock};
 use xime_config::{
-    deploy_all, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager, XimeConfig,
+    deploy_all, get_data_dirs, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager,
+    XimeConfig,
 };
+
+static MARKET_TASK_RESULT: OnceLock<Mutex<Option<MarketTaskResult>>> = OnceLock::new();
+static MARKET_YAML_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
+
+fn market_task_result() -> &'static Mutex<Option<MarketTaskResult>> {
+    MARKET_TASK_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+fn market_yaml_result() -> &'static Mutex<Option<Result<String, String>>> {
+    MARKET_YAML_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+enum MarketTaskResult {
+    DownloadDone(String),
+    InstallDone(String),
+    Error(String),
+}
 
 static NOTIFY_DEPLOY: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_RELOAD_STYLE: OnceLock<fn()> = OnceLock::new();
@@ -31,12 +50,27 @@ fn notify_daemon_reload_style() {
     }
 }
 
+fn cache_dir() -> std::path::PathBuf {
+    let base = if cfg!(windows) {
+        std::env::var("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir())
+    } else {
+        std::path::PathBuf::from(
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()),
+        )
+        .join(".cache")
+    };
+    base.join("xime").join("market")
+}
+
 pub struct SettingsState {
     pub appearance: AppearanceState,
     pub input_schema: InputSchemaState,
     pub system_theme: SystemTheme,
     pub deploy_message: Option<String>,
     pub schemas_loaded: bool,
+    pub market_schema: MarketSchemaState,
     #[cfg(feature = "smart-suggestion-page")]
     pub smart_suggestion: SmartSuggestionState,
     #[cfg(feature = "pair-page")]
@@ -52,6 +86,7 @@ impl SettingsState {
         let mut state = Self {
             appearance: AppearanceState::default(),
             input_schema: InputSchemaState::default(),
+            market_schema: MarketSchemaState::default(),
             system_theme: SystemTheme::detect(),
             deploy_message: None,
             schemas_loaded: false,
@@ -223,6 +258,138 @@ impl SettingsState {
         Ok(())
     }
 
+    pub fn load_market_schemas(&mut self, cx: &mut Context<Self>) {
+        if self.market_schema.loaded || self.market_schema.loading {
+            return;
+        }
+        self.market_schema.loading = true;
+        cx.notify();
+
+        std::thread::spawn(|| {
+            let result = (|| -> Result<String, String> {
+                ureq::get("https://index.ximei.me/rimes/index.yaml")
+                    .call()
+                    .map_err(|e| format!("网络请求失败: {}", e))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| format!("读取响应失败: {}", e))
+            })();
+
+            *market_yaml_result().lock().unwrap() = Some(result);
+            if let Some(cb) = NOTIFY_DEPLOY.get() {
+                cb();
+            }
+        });
+    }
+
+    pub fn apply_market_yaml(&mut self, cx: &mut Context<Self>) {
+        if self.market_schema.loaded || !self.market_schema.loading {
+            return;
+        }
+        let mut guard = market_yaml_result().lock().unwrap();
+        let result = match guard.take() {
+            Some(r) => r,
+            None => return,
+        };
+        match result {
+            Ok(text) => {
+                match serde_yaml::from_str::<SchemaIndex>(&text) {
+                    Ok(index) => {
+                        self.market_schema.installed_ids = self.get_installed_schema_ids();
+                        self.market_schema.downloaded_ids = self.get_cached_schema_ids();
+                        self.market_schema.schemas = index.schemas;
+                        self.market_schema.loaded = true;
+                        self.market_schema.loading = false;
+                        self.market_schema.error = None;
+                    }
+                    Err(e) => {
+                        self.market_schema.loading = false;
+                        self.market_schema.error = Some(format!("解析失败: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                self.market_schema.loading = false;
+                self.market_schema.error = Some(e);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn check_market_task_result(&mut self, cx: &mut Context<Self>) {
+        let mut guard = market_task_result().lock().unwrap();
+        if let Some(result) = guard.take() {
+            match result {
+                MarketTaskResult::DownloadDone(id) => {
+                    if !self.market_schema.downloaded_ids.contains(&id) {
+                        self.market_schema.downloaded_ids.push(id);
+                    }
+                }
+                MarketTaskResult::InstallDone(id) => {
+                    if !self.market_schema.installed_ids.contains(&id) {
+                        self.market_schema.installed_ids.push(id);
+                    }
+                }
+                MarketTaskResult::Error(e) => {
+                    self.market_schema.install_message = Some(e);
+                }
+            }
+            self.market_schema.downloading = None;
+            self.market_schema.installing = None;
+            cx.notify();
+        }
+    }
+
+    pub fn download_market_schema(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+        if self.market_schema.downloading.is_some() || self.market_schema.installing.is_some() {
+            return;
+        }
+
+        let schema = match self.market_schema.schemas.iter().find(|s| s.id == schema_id) {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        self.market_schema.downloading = Some(schema_id.to_string());
+        self.market_schema.install_message = None;
+        cx.notify();
+
+        std::thread::spawn(move || {
+            let result = do_download(&schema);
+            let task = match result {
+                Ok(()) => MarketTaskResult::DownloadDone(schema.id.clone()),
+                Err(e) => MarketTaskResult::Error(e.to_string()),
+            };
+            *market_task_result().lock().unwrap() = Some(task);
+            if let Some(cb) = NOTIFY_DEPLOY.get() {
+                cb();
+            }
+        });
+    }
+
+    pub fn install_market_schema(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+        if self.market_schema.installing.is_some() || self.market_schema.downloading.is_some() {
+            return;
+        }
+
+        self.market_schema.installing = Some(schema_id.to_string());
+        self.market_schema.install_message = None;
+        cx.notify();
+
+        let sid = schema_id.to_string();
+        std::thread::spawn(move || {
+            let result = do_install(&sid);
+            let task = match result {
+                Ok(()) => MarketTaskResult::InstallDone(sid),
+                Err(e) => MarketTaskResult::Error(e.to_string()),
+            };
+            *market_task_result().lock().unwrap() = Some(task);
+            if let Some(cb) = NOTIFY_DEPLOY.get() {
+                cb();
+            }
+        });
+    }
+
     pub fn deploy(&mut self) -> Result<(), String> {
         let result = deploy_all().map_err(|e| e.to_string());
         match &result {
@@ -321,4 +488,257 @@ pub struct InputSchemaState {
     pub available_schemas: Vec<SchemaInfo>,
     pub schema_config: SchemaConfig,
     pub config_loaded: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct MarketSchemaState {
+    pub schemas: Vec<MarketSchema>,
+    pub loaded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub installed_ids: Vec<String>,
+    pub downloaded_ids: Vec<String>,
+    pub downloading: Option<String>,
+    pub installing: Option<String>,
+    pub install_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SchemaIndex {
+    pub index_version: u32,
+    pub updated_at: String,
+    pub schemas: Vec<MarketSchema>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketSchema {
+    pub id: String,
+    pub name: String,
+    pub author: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub homepage: Option<String>,
+    pub versions: Vec<MarketSchemaVersion>,
+    #[serde(rename = "currentVersion")]
+    pub current_version: Option<String>,
+    #[serde(default)]
+    pub dependencies: Option<Vec<String>>,
+    #[serde(default)]
+    pub app_version: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketSchemaVersion {
+    pub version: String,
+    pub date: String,
+    #[serde(default)]
+    pub changelog: Option<String>,
+    #[serde(rename = "downloadUrl", default)]
+    pub download_url: Vec<MarketDownloadUrl>,
+    #[serde(default)]
+    pub size: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketDownloadUrl {
+    pub url: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+// ---- installation helpers ----
+
+impl SettingsState {
+    fn get_installed_schema_ids(&self) -> Vec<String> {
+        if let Ok(manager) = SchemaManager::new() {
+            manager
+                .get_schema_list()
+                .into_iter()
+                .map(|s| s.schema_id)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn get_cached_schema_ids(&self) -> Vec<String> {
+        let dir = cache_dir();
+        if !dir.exists() {
+            return Vec::new();
+        }
+        let mut ids = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        ids.push(name.to_string());
+                    }
+                }
+            }
+        }
+        ids
+    }
+}
+
+fn get_download_info(schema: &MarketSchema) -> Option<(String, String)> {
+    let version = schema.current_version.as_deref().unwrap_or("latest");
+    let info = schema
+        .versions
+        .iter()
+        .find(|v| v.version == version || version == "latest")
+        .or_else(|| schema.versions.first())?;
+    let url = info.download_url.first()?;
+    let ext = if url.url.ends_with(".zip") {
+        ".zip"
+    } else if url.url.ends_with(".tar.gz") {
+        ".tar.gz"
+    } else {
+        return None;
+    };
+    Some((url.url.clone(), format!("{}{}", version, ext)))
+}
+
+fn do_download(schema: &MarketSchema) -> anyhow::Result<()> {
+    let (url, filename) = get_download_info(schema)
+        .ok_or_else(|| anyhow::anyhow!("无可用下载地址或不支持的格式"))?;
+
+    let dest_dir = cache_dir().join(&schema.id);
+    std::fs::create_dir_all(&dest_dir)?;
+
+    let bytes = ureq::get(&url)
+        .call()?
+        .into_body()
+        .read_to_vec()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    std::fs::write(dest_dir.join(&filename), &bytes)?;
+    Ok(())
+}
+
+fn do_install(schema_id: &str) -> anyhow::Result<()> {
+    let cache_schema_dir = cache_dir().join(schema_id);
+    anyhow::ensure!(cache_schema_dir.exists(), "未找到缓存的下载文件");
+
+    let archive = std::fs::read_dir(&cache_schema_dir)?
+        .flatten()
+        .find(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            n.ends_with(".zip") || n.ends_with(".tar.gz")
+        })
+        .ok_or_else(|| anyhow::anyhow!("未找到缓存的压缩包"))?;
+
+    let archive_path = archive.path();
+    let temp_dir = std::env::temp_dir().join(format!("xime_extract_{}", schema_id));
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+    std::fs::create_dir_all(&temp_dir)?;
+
+    let filename = archive_path.file_name().unwrap().to_string_lossy().to_string();
+    if filename.ends_with(".zip") {
+        extract_zip(&archive_path, &temp_dir)?;
+    } else {
+        extract_tar_gz(&archive_path, &temp_dir)?;
+    }
+
+    let (_, user_data_dir) = get_data_dirs();
+    let schema_files = find_schema_files(&temp_dir);
+    anyhow::ensure!(!schema_files.is_empty(), "未在下载包中找到 .schema.yaml 文件");
+
+    for path in &schema_files {
+        let name = path.file_name().unwrap();
+        std::fs::copy(path, user_data_dir.join(name))?;
+    }
+
+    let manager = SchemaManager::new().map_err(|e| anyhow::anyhow!("{}", e))?;
+    if let Some(current) = manager.get_selected_schema() {
+        manager
+            .set_schema_list(&[current.as_str(), schema_id])
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    } else {
+        manager
+            .set_schema_list(&[schema_id])
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+    manager
+        .save()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
+    notify_daemon_reload();
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+    Ok(())
+}
+
+fn extract_zip(archive_path: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
+    let file = std::fs::File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let Some(path) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        let target = dest.join(&path);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut output = std::fs::File::create(&target)?;
+            std::io::copy(&mut entry, &mut output)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_tar_gz(archive_path: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
+    let file = std::fs::File::open(archive_path)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        let target = dest.join(&path);
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            entry.unpack(&target)?;
+        }
+    }
+    Ok(())
+}
+
+fn find_schema_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut results = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                results.extend(find_schema_files(&path));
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".schema.yaml") {
+                    results.push(path);
+                }
+            }
+        }
+    }
+    results
 }

@@ -3,6 +3,7 @@ pub mod appearance;
 pub mod dictionary;
 pub mod hotkeys;
 pub mod input_schema;
+pub mod schema_market;
 
 #[cfg(feature = "clipboard-page")]
 pub mod clipboard;
@@ -13,7 +14,6 @@ pub mod smart_suggestion;
 #[cfg(target_os = "linux")]
 pub mod sync;
 
-use crate::components::TitleBar;
 use crate::state::SettingsState;
 use gpui::{prelude::FluentBuilder, IntoElement, ParentElement, *};
 
@@ -37,6 +37,7 @@ impl SettingsApp {
             ("icons/palette.svg", "外观"),
             ("icons/command.svg", "快捷键"),
             ("icons/books.svg", "词典"),
+            ("icons/download.svg", "方案市场"),
         ];
 
         #[cfg(feature = "smart-suggestion-page")]
@@ -64,7 +65,6 @@ impl Render for SettingsApp {
         let page_count = pages.len();
         let current = self.current_page.min(page_count.saturating_sub(1));
         let settings = self.settings.clone();
-        let settings_for_title = settings.clone();
         let colors = cx.read_entity(&settings, |state, _| state.colors());
 
         let sidebar = div()
@@ -113,12 +113,13 @@ impl Render for SettingsApp {
                     )
             }));
 
-        let mut page_offset = 4;
+        let mut page_offset = 5;
         let content: AnyElement = match current {
-            0 => input_schema::render(&settings, &colors).into_any_element(),
+            0 => input_schema::render(&settings, &colors, cx).into_any_element(),
             1 => appearance::render(&settings, &colors).into_any_element(),
             2 => hotkeys::render(&settings, &colors, cx).into_any_element(),
             3 => dictionary::render(&settings, &colors).into_any_element(),
+            4 => schema_market::render(&settings, &colors, cx).into_any_element(),
             i if i == page_offset && cfg!(feature = "smart-suggestion-page") => {
                 #[cfg(feature = "smart-suggestion-page")]
                 {
@@ -172,7 +173,6 @@ impl Render for SettingsApp {
             .flex()
             .flex_col()
             .size_full()
-            .child(TitleBar::render(&settings_for_title, &colors))
             .child(
                 div()
                     .id("content-area")

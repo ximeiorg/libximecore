@@ -14,8 +14,11 @@ name = "xime_setup_lib"
 #     "wayland",
 #     "font-kit",
 # ] }
-gpui = { git = "https://github.com/zed-industries/zed" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit","wayland"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "53e4d34a71f61f13572919c04335e9da838623e6" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "53e4d34a71f61f13572919c04335e9da838623e6", features = [
+    "font-kit",
+    "wayland",
+] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 xime-config = { path = "../xime-config" }
 serde = { workspace = true, features = ["derive"] }
@@ -23,6 +26,15 @@ serde_yaml.workspace = true
 tracing.workspace = true
 rust-embed = { version = "8", features = ["interpolate-folder-path"] }
 anyhow = "1.0"
+ureq = "3.3.0"
+zip = "8.6.0"
+tar = "0.4"
+flate2 = "1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [features]
 default = []
