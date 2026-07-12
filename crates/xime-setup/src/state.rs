@@ -21,6 +21,8 @@ fn market_yaml_result() -> &'static Mutex<Option<Result<String, String>>> {
 enum MarketTaskResult {
     DownloadDone(String),
     InstallDone(String),
+    UninstallDone(String),
+    DeleteDone(String),
     Error(String),
 }
 
@@ -51,17 +53,16 @@ fn notify_daemon_reload_style() {
 }
 
 fn cache_dir() -> std::path::PathBuf {
-    let base = if cfg!(windows) {
-        std::env::var("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir())
-    } else {
-        std::path::PathBuf::from(
-            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()),
-        )
-        .join(".cache")
-    };
-    base.join("xime").join("market")
+    let (_, user_data_dir) = get_data_dirs();
+    user_data_dir
+        .parent()
+        .map(|p| p.join("market"))
+        .unwrap_or_else(|| {
+            let base = std::env::var("LOCALAPPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir());
+            base.join("xime").join("market")
+        })
 }
 
 pub struct SettingsState {
@@ -330,6 +331,12 @@ impl SettingsState {
                         self.market_schema.installed_ids.push(id);
                     }
                 }
+                MarketTaskResult::UninstallDone(id) => {
+                    self.market_schema.installed_ids.retain(|i| i != &id);
+                }
+                MarketTaskResult::DeleteDone(id) => {
+                    self.market_schema.downloaded_ids.retain(|i| i != &id);
+                }
                 MarketTaskResult::Error(e) => {
                     self.market_schema.install_message = Some(e);
                 }
@@ -381,6 +388,42 @@ impl SettingsState {
             let result = do_install(&sid);
             let task = match result {
                 Ok(()) => MarketTaskResult::InstallDone(sid),
+                Err(e) => MarketTaskResult::Error(e.to_string()),
+            };
+            *market_task_result().lock().unwrap() = Some(task);
+            if let Some(cb) = NOTIFY_DEPLOY.get() {
+                cb();
+            }
+        });
+    }
+
+    pub fn delete_market_package(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+        let sid = schema_id.to_string();
+        std::thread::spawn(move || {
+            let pkg_dir = cache_dir().join(&sid);
+            let _ = std::fs::remove_dir_all(&pkg_dir);
+            let task = MarketTaskResult::DeleteDone(sid);
+            *market_task_result().lock().unwrap() = Some(task);
+            if let Some(cb) = NOTIFY_DEPLOY.get() {
+                cb();
+            }
+        });
+    }
+
+    pub fn uninstall_market_schema(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+        if self.market_schema.installing.is_some() || self.market_schema.downloading.is_some() {
+            return;
+        }
+
+        self.market_schema.installing = Some(schema_id.to_string());
+        self.market_schema.install_message = None;
+        cx.notify();
+
+        let sid = schema_id.to_string();
+        std::thread::spawn(move || {
+            let result = do_uninstall(&sid);
+            let task = match result {
+                Ok(()) => MarketTaskResult::UninstallDone(sid),
                 Err(e) => MarketTaskResult::Error(e.to_string()),
             };
             *market_task_result().lock().unwrap() = Some(task);
@@ -488,6 +531,7 @@ pub struct InputSchemaState {
     pub available_schemas: Vec<SchemaInfo>,
     pub schema_config: SchemaConfig,
     pub config_loaded: bool,
+    pub current_tab: usize,
 }
 
 #[derive(Clone, Default)]
@@ -608,6 +652,62 @@ fn get_download_info(schema: &MarketSchema) -> Option<(String, String)> {
         return None;
     };
     Some((url.url.clone(), format!("{}{}", version, ext)))
+}
+
+fn do_uninstall(schema_id: &str) -> anyhow::Result<()> {
+    let (_, user_data_dir) = get_data_dirs();
+    let market_dir = cache_dir();
+    let registry_path = market_dir.join(".registry.yaml");
+
+    // Read registry to find installed files
+    let files_to_remove: Vec<String> = if registry_path.exists() {
+        let content = std::fs::read_to_string(&registry_path)?;
+        #[derive(serde::Deserialize)]
+        struct Entry {
+            files: Vec<String>,
+        }
+        let registry: std::collections::HashMap<String, Entry> =
+            serde_yaml::from_str(&content)?;
+        registry
+            .get(schema_id)
+            .map(|e| e.files.clone())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    for file in &files_to_remove {
+        let path = user_data_dir.join(file);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    let manager = SchemaManager::new().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let current_list: Vec<String> = manager
+        .get_schema_list()
+        .into_iter()
+        .map(|s| s.schema_id)
+        .filter(|id| id != schema_id)
+        .collect();
+    if let Some(first) = current_list.first() {
+        manager
+            .set_schema_list(&[first.as_str()])
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    }
+    manager.save().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if registry_path.exists() {
+        let content = std::fs::read_to_string(&registry_path)?;
+        let mut registry: std::collections::HashMap<String, serde_yaml::Value> =
+            serde_yaml::from_str(&content)?;
+        registry.remove(schema_id);
+        if let Ok(yaml) = serde_yaml::to_string(&registry) {
+            let _ = std::fs::write(&registry_path, yaml);
+        }
+    }
+
+    deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
+    notify_daemon_reload();
+    Ok(())
 }
 
 fn do_download(schema: &MarketSchema) -> anyhow::Result<()> {

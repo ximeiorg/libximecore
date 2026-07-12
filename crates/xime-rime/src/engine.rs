@@ -286,8 +286,19 @@ impl RimeEngine {
         }
     }
 
-    pub fn deploy(&self) -> bool {
-        full_deploy_and_wait() == DeployResult::Success
+    pub fn deploy(&mut self) -> bool {
+        if full_deploy_and_wait() != DeployResult::Success {
+            return false;
+        }
+        // Deployment finalizes and reinitializes the Rime engine,
+        // which invalidates the existing session. Create a new one.
+        match create_session() {
+            Ok(session) => {
+                self.session = session;
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     pub fn get_version(&self) -> Option<String> {
