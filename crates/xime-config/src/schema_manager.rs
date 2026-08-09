@@ -196,21 +196,12 @@ mod tests {
 
     #[test]
     fn test_schema_list_uses_rime_wubi_not_system() {
-        // 注入 rime-wubi 目录（与 app 一致），验证 get_schema_list 不含系统内置方案
+        // 注入统一 rime 目录（与 app 一致），验证 get_schema_list 不含系统内置方案
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        let shared_candidates = [
-            std::path::PathBuf::from(&home).join(".local/share/xime/rime-data"),
-            std::path::PathBuf::from("/usr/share/xime/rime-data"),
-        ];
-        let shared = shared_candidates
-            .iter()
-            .find(|d| d.join("default.yaml").exists())
-            .cloned()
-            .unwrap_or_else(|| shared_candidates[0].clone());
-        let user = std::path::PathBuf::from(&home).join(".config/xime/rime");
+        let rime_dir = std::path::PathBuf::from(&home).join(".config/xime/rime");
         let _ = crate::set_rime_paths(crate::RimePaths {
-            shared_data_dir: shared,
-            user_data_dir: user,
+            shared_data_dir: rime_dir.clone(),
+            user_data_dir: rime_dir,
         });
 
         let manager = SchemaManager::new().unwrap();

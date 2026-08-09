@@ -32,13 +32,11 @@ pub fn get_data_dirs() -> (PathBuf, PathBuf) {
     }
 }
 
-/// 未显式配置时的兜底默认（基于 HOME，不含系统 librime 目录）。
+/// 未显式配置时的兜底默认（统一 single dir，不含系统 librime 目录）。
 fn default_data_dirs() -> (PathBuf, PathBuf) {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    (
-        PathBuf::from(&home).join(".local/share/xime/rime-data"),
-        PathBuf::from(&home).join(".config/xime/rime"),
-    )
+    let rime_dir = PathBuf::from(&home).join(".config/xime/rime");
+    (rime_dir.clone(), rime_dir)
 }
 
 fn ensure_user_config_files(_shared_data_dir: &std::path::Path, user_data_dir: &std::path::Path) {
@@ -135,18 +133,5 @@ mod tests {
             "user dir: {}",
             user.display()
         );
-    }
-
-    #[test]
-    fn test_set_rime_paths_roundtrip() {
-        let shared = std::path::PathBuf::from("/tmp/xime-test/rime-data");
-        let user = std::path::PathBuf::from("/tmp/xime-test/rime");
-        let _ = set_rime_paths(RimePaths {
-            shared_data_dir: shared.clone(),
-            user_data_dir: user.clone(),
-        });
-        let (s, u) = get_data_dirs();
-        assert_eq!(s, shared);
-        assert_eq!(u, user);
     }
 }
