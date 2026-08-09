@@ -4,75 +4,67 @@ use librime::{
     create_session, get_api, initialize, join_maintenance_thread, setup, start_maintenance, Traits,
 };
 use std::ffi::CString;
-use std::sync::Once;
+use std::path::PathBuf;
+use std::sync::{Once, OnceLock};
 
 static RIME_INIT: Once = Once::new();
 
-fn get_shared_data_dir() -> std::path::PathBuf {
-    if cfg!(windows) {
-        let exe_path = std::env::current_exe()
-            .ok()
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        exe_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("data")
-    } else {
-        std::path::PathBuf::from("/usr/share/rime-data")
+/// Rime 数据目录，由宿主应用在启动时通过 [`set_rime_paths`] 提供。
+#[derive(Clone, Debug)]
+pub struct RimePaths {
+    pub shared_data_dir: PathBuf,
+    pub user_data_dir: PathBuf,
+}
+
+static RIME_PATHS: OnceLock<RimePaths> = OnceLock::new();
+
+/// 设置 Rime 数据目录。必须在首次调用 Rime 相关函数之前调用。
+pub fn set_rime_paths(paths: RimePaths) -> Result<(), String> {
+    RIME_PATHS
+        .set(paths)
+        .map_err(|_| "rime paths already set".to_string())
+}
+
+pub fn get_data_dirs() -> (PathBuf, PathBuf) {
+    match RIME_PATHS.get() {
+        Some(paths) => (paths.shared_data_dir.clone(), paths.user_data_dir.clone()),
+        None => default_data_dirs(),
     }
 }
 
-fn get_user_data_dir() -> std::path::PathBuf {
-    if cfg!(windows) {
-        let exe_path = std::env::current_exe()
-            .ok()
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        exe_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("user-data")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        std::path::PathBuf::from(&home).join(".config/xime/rime")
+/// 未显式配置时的兜底默认（基于 HOME，不含系统 librime 目录）。
+fn default_data_dirs() -> (PathBuf, PathBuf) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    (
+        PathBuf::from(&home).join(".local/share/xime/rime-data"),
+        PathBuf::from(&home).join(".config/xime/rime"),
+    )
+}
+
+fn ensure_user_config_files(_shared_data_dir: &std::path::Path, user_data_dir: &std::path::Path) {
+    if !user_data_dir.exists() {
+        std::fs::create_dir_all(user_data_dir).ok();
     }
 }
 
-pub fn get_data_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
-    (get_shared_data_dir(), get_user_data_dir())
-}
-
-fn ensure_user_config_files(shared_data_dir: &std::path::Path, _user_data_dir: &std::path::Path) {
-    if !shared_data_dir.exists() {
-        std::fs::create_dir_all(shared_data_dir).ok();
-    }
-
-    let xime_yaml = shared_data_dir.join("xime.yaml");
-    if !xime_yaml.exists() {
-        let default_yaml = r#"config_version: "1.0"
-style:
-  font_size: 14.0
-  candidate_count: 5
-  corner_radius: 8.0
-  color_scheme: lavender_purple
-"#;
-        std::fs::write(&xime_yaml, default_yaml).ok();
-    }
-}
-
-fn ensure_schemas_in_user_dir(_shared_data_dir: &std::path::Path, user_data_dir: &std::path::Path) {
+fn ensure_schemas_in_user_dir(shared_data_dir: &std::path::Path, user_data_dir: &std::path::Path) {
     let default_custom = user_data_dir.join("default.custom.yaml");
     if !default_custom.exists() {
-        let content = r#"customization:
+        // 优先复制 rime-wubi 自带的 default.custom.yaml（含默认 schema_list）
+        let template = shared_data_dir.join("default.custom.yaml");
+        if template.exists() {
+            std::fs::copy(&template, &default_custom).ok();
+        } else {
+            let content = r#"customization:
   distribution_code_name: Xime
   distribution_version: "1.0"
 
 patch:
   schema_list:
-    - schema: wubi86_jidian
+    - schema: wubi86_pinyin
 "#;
-        std::fs::write(&default_custom, content).ok();
+            std::fs::write(&default_custom, content).ok();
+        }
     }
 }
 
@@ -124,4 +116,33 @@ pub fn init_rime_deployer() -> Result<(), String> {
 pub fn deploy_all_schemas() -> Result<(), String> {
     init_rime_deployer()?;
     deploy_all().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_data_dirs_no_system_librime() {
+        let (shared, user) = default_data_dirs();
+        assert!(
+            !shared.starts_with("/usr/share/rime-data"),
+            "default shared dir must not use system librime-data: {}",
+            shared.display()
+        );
+        assert!(user.ends_with(".config/xime/rime"), "user dir: {}", user.display());
+    }
+
+    #[test]
+    fn test_set_rime_paths_roundtrip() {
+        let shared = std::path::PathBuf::from("/tmp/xime-test/rime-data");
+        let user = std::path::PathBuf::from("/tmp/xime-test/rime");
+        let _ = set_rime_paths(RimePaths {
+            shared_data_dir: shared.clone(),
+            user_data_dir: user.clone(),
+        });
+        let (s, u) = get_data_dirs();
+        assert_eq!(s, shared);
+        assert_eq!(u, user);
+    }
 }

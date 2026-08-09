@@ -189,3 +189,37 @@ fn extract_schema_name(content: &str, schema_id: &str) -> String {
     }
     schema_id.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_schema_list_uses_rime_wubi_not_system() {
+        // 注入 rime-wubi 目录（与 app 一致），验证 get_schema_list 不含系统内置方案
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let shared_candidates = [
+            std::path::PathBuf::from(&home).join(".local/share/xime/rime-data"),
+            std::path::PathBuf::from("/usr/share/xime/rime-data"),
+        ];
+        let shared = shared_candidates
+            .iter()
+            .find(|d| d.join("default.yaml").exists())
+            .cloned()
+            .unwrap_or_else(|| shared_candidates[0].clone());
+        let user = std::path::PathBuf::from(&home).join(".config/xime/rime");
+        let _ = crate::set_rime_paths(crate::RimePaths {
+            shared_data_dir: shared,
+            user_data_dir: user,
+        });
+
+        let manager = SchemaManager::new().unwrap();
+        let schemas = manager.get_schema_list();
+        println!("schema list: {:?}", schemas.iter().map(|s| &s.schema_id).collect::<Vec<_>>());
+        // rime-wubi 方案应存在
+        let ids: Vec<_> = schemas.iter().map(|s| s.schema_id.as_str()).collect();
+        assert!(ids.contains(&"wubi86_pinyin"), "wubi86_pinyin should be in list: {:?}", ids);
+        // 系统内置方案不应出现
+        assert!(!ids.contains(&"stroke"), "system schema stroke must not appear: {:?}", ids);
+    }
+}
