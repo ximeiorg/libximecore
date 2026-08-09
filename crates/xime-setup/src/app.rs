@@ -62,6 +62,14 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             state.settings.input_schema.selected_schema = i;
             state.settings.input_schema.config_loaded = false;
             state.settings.load_schema_config();
+            match state.settings.save_schema() {
+                Ok(_) => {
+                    state.settings.deploy_message = Some("已切换当前输入方案".to_string());
+                }
+                Err(e) => {
+                    state.settings.deploy_message = Some(format!("切换方案失败: {}", e));
+                }
+            }
         }
         Message::DeploySchemas => {
             state.settings.start_deploy();

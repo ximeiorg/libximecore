@@ -32,6 +32,7 @@ enum MarketTaskResult {
 
 static NOTIFY_DEPLOY: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_RELOAD_STYLE: OnceLock<fn()> = OnceLock::new();
+static NOTIFY_SELECT_SCHEMA: OnceLock<fn(&str) -> bool> = OnceLock::new();
 
 /// 设置宿主进程的「部署后重载」回调（daemon 重载配置）。
 pub fn set_notify_deploy(f: fn()) {
@@ -41,6 +42,12 @@ pub fn set_notify_deploy(f: fn()) {
 /// 设置宿主进程的「样式重载」回调（daemon 重新加载配色/字号）。
 pub fn set_notify_reload_style(f: fn()) {
     let _ = NOTIFY_RELOAD_STYLE.set(f);
+}
+
+/// 设置宿主进程的「切换当前输入方案」回调（通过 IPC 发送 SelectSchema 命令）。
+/// 返回是否发送成功（服务器是否运行）。
+pub fn set_notify_select_schema(f: fn(&str) -> bool) {
+    let _ = NOTIFY_SELECT_SCHEMA.set(f);
 }
 
 fn notify_daemon_reload() -> bool {
@@ -55,6 +62,14 @@ fn notify_daemon_reload() -> bool {
 fn notify_daemon_reload_style() {
     if let Some(f) = NOTIFY_RELOAD_STYLE.get() {
         f();
+    }
+}
+
+fn notify_select_schema(schema_id: &str) -> bool {
+    if let Some(f) = NOTIFY_SELECT_SCHEMA.get() {
+        f(schema_id)
+    } else {
+        false
     }
 }
 
@@ -235,17 +250,17 @@ impl SettingsState {
     }
 
     pub fn save_schema(&self) -> Result<(), String> {
-        if self.input_schema.selected_schema < self.input_schema.available_schemas.len() {
-            let selected_id =
-                &self.input_schema.available_schemas[self.input_schema.selected_schema].schema_id;
+        if self.input_schema.selected_schema >= self.input_schema.available_schemas.len() {
+            return Ok(());
+        }
+        let selected_id =
+            &self.input_schema.available_schemas[self.input_schema.selected_schema].schema_id;
 
-            let schema_manager = SchemaManager::new()?;
-            schema_manager.set_schema_list(&[selected_id])?;
-            schema_manager.save()?;
-
-            deploy_all().map_err(|e| e.to_string())?;
-
-            notify_daemon_reload();
+        if !notify_select_schema(selected_id) {
+            return Err(format!(
+                "切换输入方案失败：无法向服务器发送 SelectSchema 命令（{}）",
+                selected_id
+            ));
         }
         Ok(())
     }

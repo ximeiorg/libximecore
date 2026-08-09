@@ -6,7 +6,7 @@ pub mod theme;
 
 pub use app::{run, SettingsApp};
 pub use state::SettingsState;
-pub use state::{set_notify_deploy, set_notify_reload_style};
+pub use state::{set_notify_deploy, set_notify_reload_style, set_notify_select_schema};
 pub use theme::{SystemTheme, ThemeColors};
 
 use rust_embed::RustEmbed;
