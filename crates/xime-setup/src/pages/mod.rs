@@ -117,7 +117,6 @@ fn nav_button(
             icon,
             text(label)
                 .size(13)
-                .font(if active { semibold() } else { iced::font::Font::DEFAULT })
                 .color(if active { colors.primary } else { colors.foreground_muted }),
         ]
         .spacing(8)

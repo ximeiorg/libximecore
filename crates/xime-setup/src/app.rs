@@ -34,6 +34,10 @@ pub fn run() -> iced::Result {
         .title("Xime 设置")
         .window(iced::window::Settings {
             icon,
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: "xime-setup".to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         })
         .theme(theme)
