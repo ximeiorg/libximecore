@@ -215,11 +215,22 @@ mod tests {
 
         let manager = SchemaManager::new().unwrap();
         let schemas = manager.get_schema_list();
-        println!("schema list: {:?}", schemas.iter().map(|s| &s.schema_id).collect::<Vec<_>>());
+        println!(
+            "schema list: {:?}",
+            schemas.iter().map(|s| &s.schema_id).collect::<Vec<_>>()
+        );
         // rime-wubi 方案应存在
         let ids: Vec<_> = schemas.iter().map(|s| s.schema_id.as_str()).collect();
-        assert!(ids.contains(&"wubi86_pinyin"), "wubi86_pinyin should be in list: {:?}", ids);
+        assert!(
+            ids.contains(&"wubi86_pinyin"),
+            "wubi86_pinyin should be in list: {:?}",
+            ids
+        );
         // 系统内置方案不应出现
-        assert!(!ids.contains(&"stroke"), "system schema stroke must not appear: {:?}", ids);
+        assert!(
+            !ids.contains(&"stroke"),
+            "system schema stroke must not appear: {:?}",
+            ids
+        );
     }
 }

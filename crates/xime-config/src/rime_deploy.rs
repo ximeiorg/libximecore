@@ -130,7 +130,11 @@ mod tests {
             "default shared dir must not use system librime-data: {}",
             shared.display()
         );
-        assert!(user.ends_with(".config/xime/rime"), "user dir: {}", user.display());
+        assert!(
+            user.ends_with(".config/xime/rime"),
+            "user dir: {}",
+            user.display()
+        );
     }
 
     #[test]
