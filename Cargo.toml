@@ -7,7 +7,6 @@ members = [
     "crates/xime-rime",
     "crates/xime-ipc",
     "crates/xime-setup",
-    "crates/ximed",
 ]
 
 [workspace.package]

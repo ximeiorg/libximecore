@@ -1,52 +1,42 @@
-use crate::components::{SettingsGroup, SettingsPage};
-use crate::state::SettingsState;
+use crate::components::settings::{settings_group, settings_page};
+use crate::components::widgets::semibold;
+use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
-use gpui::*;
+use iced::widget::{column, svg, text, Space};
+use iced::{Alignment, Element, Length};
 
-pub fn render(_settings: &Entity<SettingsState>, colors: &ThemeColors) -> impl IntoElement {
-    SettingsPage::new("关于 Xime", colors.clone()).group(
-        SettingsGroup::new("Xime 输入法", colors.clone())
-            .items(vec![])
-            .custom_item(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(16.0))
-                    .pb(px(16.0))
-                    .child(
-                        img("icons/xime.svg")
-                            .w(px(64.0))
-                            .h(px(64.0))
-                            .rounded(px(16.0)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(16.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(colors.foreground)
-                            .child("Xime"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(colors.foreground_muted)
-                            .child("版本 0.2.0"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(colors.foreground_muted)
-                            .child("基于 Rime 引擎的五笔输入法"),
-                    )
-                    .child(
-                        div()
-                            .pt(px(16.0))
-                            .text_size(px(12.0))
-                            .text_color(colors.foreground_muted)
-                            .child("使用 librime + GPUI 构建"),
-                    ),
-            ),
+pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    settings_page(
+        "关于 Xime",
+        colors,
+        vec![settings_group(
+            "Xime 输入法",
+            None,
+            colors,
+            vec![about_content(colors)],
+        )],
     )
+}
+
+fn about_content(colors: &ThemeColors) -> Element<'static, Message> {
+    let logo: Element<'static, Message> = match crate::Assets::get("icons/xime.svg") {
+        Some(f) => svg(svg::Handle::from_memory(f.data))
+            .width(64)
+            .height(64)
+            .into(),
+        None => Space::new().width(64).into(),
+    };
+
+    column![
+        logo,
+        text("Xime").size(16).font(semibold()).color(colors.foreground),
+        text("版本 0.2.0").size(12).color(colors.foreground_muted),
+        text("基于 Rime 引擎的五笔输入法").size(12).color(colors.foreground_muted),
+        text("使用 librime + Iced 构建").size(12).color(colors.foreground_muted),
+    ]
+    .spacing(8)
+    .align_x(Alignment::Center)
+    .width(Length::Fill)
+    .padding(16)
+    .into()
 }

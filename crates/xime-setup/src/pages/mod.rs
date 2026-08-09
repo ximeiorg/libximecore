@@ -14,183 +14,175 @@ pub mod smart_suggestion;
 #[cfg(target_os = "linux")]
 pub mod sync;
 
-use crate::state::SettingsState;
-use gpui::{prelude::FluentBuilder, IntoElement, ParentElement, *};
+use crate::components::widgets::{
+    nav_button_style, scroll_style, semibold, sidebar_style,
+};
+use crate::state::{Message, SettingsState};
+use crate::theme::ThemeColors;
+use iced::widget::{
+    button, column, container, row, scrollable, svg, text, Space,
+};
+use iced::{border, Alignment, Background, Border, Element, Length};
 
-pub struct SettingsApp {
-    current_page: usize,
-    pub settings: Entity<SettingsState>,
+pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
+    let mut items = vec![
+        ("icons/keyboard.svg", "输入方案"),
+        ("icons/palette.svg", "外观"),
+        ("icons/command.svg", "快捷键"),
+        ("icons/word.svg", "词典"),
+        ("icons/download.svg", "方案市场"),
+    ];
+
+    #[cfg(feature = "smart-suggestion-page")]
+    items.push(("icons/thinking.svg", "智能联想"));
+
+    #[cfg(target_os = "linux")]
+    items.push(("icons/sync.svg", "同步"));
+
+    #[cfg(feature = "pair-page")]
+    items.push(("icons/sync.svg", "设备关联"));
+
+    #[cfg(feature = "clipboard-page")]
+    items.push(("icons/clipboard.svg", "剪贴板"));
+
+    items.push(("icons/about.svg", "关于"));
+    items
 }
 
-impl SettingsApp {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let settings = cx.new(SettingsState::new);
-        Self {
-            current_page: 0,
-            settings,
-        }
+/// 侧栏导航。
+pub fn sidebar(current: usize, colors: &ThemeColors) -> Element<'static, Message> {
+    let items = sidebar_items();
+    let colors = *colors;
+
+    let mut nav = column![
+        brand(&colors),
+        Space::new().height(20),
+        text("菜单").size(11).color(colors.foreground_faint),
+        Space::new().height(4),
+    ]
+    .spacing(2)
+    .padding([20, 14]);
+
+    for (i, (icon_path, name)) in items.iter().enumerate() {
+        nav = nav.push(nav_button(*icon_path, *name, i, i == current, &colors));
     }
 
-    fn sidebar_items() -> Vec<(&'static str, &'static str)> {
-        let mut items = vec![
-            ("icons/keyboard.svg", "输入方案"),
-            ("icons/palette.svg", "外观"),
-            ("icons/command.svg", "快捷键"),
-            ("icons/books.svg", "词典"),
-            ("icons/download.svg", "方案市场"),
-        ];
+    container(nav)
+        .width(200)
+        .height(Length::Fill)
+        .style(move |_| sidebar_style(&colors))
+        .into()
+}
 
+/// 品牌区：应用图标 + 名称 + 副标题。
+fn brand(colors: &ThemeColors) -> Element<'static, Message> {
+    let logo: Element<'static, Message> = match crate::Assets::get("icons/xime.svg") {
+        Some(f) => svg(svg::Handle::from_memory(f.data))
+            .width(28)
+            .height(28)
+            .into(),
+        None => Space::new().width(28).into(),
+    };
+    row![
+        logo,
+        column![
+            text("Xime").size(15).font(semibold()).color(colors.foreground),
+            text("输入法设置").size(11).color(colors.foreground_muted),
+        ]
+        .spacing(1),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// 导航项：图标 + 文字。
+fn nav_button(
+    icon_path: &'static str,
+    label: &'static str,
+    index: usize,
+    active: bool,
+    colors: &ThemeColors,
+) -> Element<'static, Message> {
+    let colors = *colors;
+    let icon: Element<'static, Message> = match crate::Assets::get(icon_path) {
+        Some(f) => svg(svg::Handle::from_memory(f.data))
+            .width(16)
+            .height(16)
+            .into(),
+        None => Space::new().width(16).into(),
+    };
+    button(
+        row![
+            icon,
+            text(label)
+                .size(13)
+                .font(if active { semibold() } else { iced::font::Font::DEFAULT })
+                .color(if active { colors.primary } else { colors.foreground_muted }),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::PageSelected(index))
+    .width(Length::Fill)
+    .padding([8, 10])
+    .style(move |_theme, status| nav_button_style(&colors, status, active))
+    .into()
+}
+
+/// 当前页面内容。
+pub fn page_content<'a>(
+    settings: &'a SettingsState,
+    page: usize,
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    let items = sidebar_items();
+    let page = page.min(items.len().saturating_sub(1));
+
+    match items[page].1 {
+        "输入方案" => input_schema::view(settings, colors),
+        "外观" => appearance::view(settings, colors),
+        "快捷键" => hotkeys::view(settings, colors),
+        "词典" => dictionary::view(settings, colors),
+        "方案市场" => schema_market::view(settings, colors),
         #[cfg(feature = "smart-suggestion-page")]
-        items.push(("icons/thinking.svg", "智能联想"));
-
+        "智能联想" => smart_suggestion::view(settings, colors),
         #[cfg(target_os = "linux")]
-        items.push(("icons/sync.svg", "同步"));
-
+        "同步" => sync::view(settings, colors),
         #[cfg(feature = "pair-page")]
-        items.push(("icons/link.svg", "设备关联"));
-
+        "设备关联" => pair::view(settings, colors),
         #[cfg(feature = "clipboard-page")]
-        items.push(("icons/clipboard.svg", "剪贴板"));
-
-        items.push(("icons/about.svg", "关于"));
-        items
+        "剪贴板" => clipboard::view(settings, colors),
+        _ => about::view(settings, colors),
     }
 }
 
-impl Render for SettingsApp {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window.set_background_appearance(WindowBackgroundAppearance::Blurred);
+/// 状态行（部署/保存结果提示）。
+pub fn status_line<'a>(message: &'a str, colors: &ThemeColors) -> Element<'a, Message> {
+    let colors = *colors;
+    container(text(message).size(12).color(colors.foreground_muted))
+        .width(Length::Fill)
+        .padding([8, 20])
+        .style(move |_| container::Style {
+            background: Some(Background::Color(colors.surface_variant)),
+            border: Border {
+                color: colors.border,
+                width: 1.0,
+                radius: border::radius(10.0),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
 
-        let pages = Self::sidebar_items();
-        let page_count = pages.len();
-        let current = self.current_page.min(page_count.saturating_sub(1));
-        let settings = self.settings.clone();
-        let colors = cx.read_entity(&settings, |state, _| state.colors());
-
-        let sidebar = div()
-            .w(px(213.0))
-            .min_w(px(213.0))
-            .max_w(px(213.0))
-            .h_full()
-            .bg(colors.sidebar_bg)
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .p(px(8.0))
-            .children(pages.iter().enumerate().map(|(i, (icon_path, name))| {
-                let is_current = i == current;
-                let view = cx.entity();
-                div()
-                    .id(("menu", i))
-                    .py(px(10.0))
-                    .px(px(12.0))
-                    .rounded(px(8.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .when(is_current, |this: Stateful<Div>| this.bg(colors.primary))
-                    .when(!is_current, |this: Stateful<Div>| {
-                        this.cursor_pointer()
-                            .hover(|style: StyleRefinement| style.bg(hsla(0.0, 0.0, 1.0, 0.15)))
-                    })
-                    .text_size(px(15.0))
-                    .text_color(colors.on_primary)
-                    .on_click(move |_, _window: &mut Window, cx: &mut App| {
-                        cx.update_entity(
-                            &view,
-                            |app: &mut SettingsApp, cx: &mut Context<SettingsApp>| {
-                                app.current_page = i;
-                                cx.notify();
-                            },
-                        );
-                    })
-                    .child(img(*icon_path).w(px(20.0)).h(px(20.0)))
-                    .child(
-                        div()
-                            .text_size(px(15.0))
-                            .text_color(colors.on_primary)
-                            .child(name.to_string()),
-                    )
-            }));
-
-        let mut page_offset = 5;
-        let content: AnyElement = match current {
-            0 => input_schema::render(&settings, &colors, cx).into_any_element(),
-            1 => appearance::render(&settings, &colors).into_any_element(),
-            2 => hotkeys::render(&settings, &colors, cx).into_any_element(),
-            3 => dictionary::render(&settings, &colors).into_any_element(),
-            4 => schema_market::render(&settings, &colors, cx).into_any_element(),
-            i if i == page_offset && cfg!(feature = "smart-suggestion-page") => {
-                #[cfg(feature = "smart-suggestion-page")]
-                {
-                    page_offset += 1;
-                    smart_suggestion::render(&settings, &colors).into_any_element()
-                }
-                #[cfg(not(feature = "smart-suggestion-page"))]
-                {
-                    page_offset += 0;
-                    about::render(&settings, &colors).into_any_element()
-                }
-            }
-            i if i == page_offset && cfg!(target_os = "linux") => {
-                #[cfg(target_os = "linux")]
-                {
-                    page_offset += 1;
-                    sync::render(&settings, &colors).into_any_element()
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    page_offset += 0;
-                    about::render(&settings, &colors).into_any_element()
-                }
-            }
-            i if i == page_offset && cfg!(feature = "pair-page") => {
-                #[cfg(feature = "pair-page")]
-                {
-                    page_offset += 1;
-                    pair::render(&settings, &colors).into_any_element()
-                }
-                #[cfg(not(feature = "pair-page"))]
-                {
-                    page_offset += 0;
-                    about::render(&settings, &colors).into_any_element()
-                }
-            }
-            i if i == page_offset && cfg!(feature = "clipboard-page") => {
-                #[cfg(feature = "clipboard-page")]
-                {
-                    clipboard::render(&settings, &colors).into_any_element()
-                }
-                #[cfg(not(feature = "clipboard-page"))]
-                {
-                    about::render(&settings, &colors).into_any_element()
-                }
-            }
-            _ => about::render(&settings, &colors).into_any_element(),
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .child(
-                div()
-                    .id("content-area")
-                    .flex()
-                    .flex_1()
-                    .h_full()
-                    .overflow_hidden()
-                    .child(sidebar)
-                    .child(
-                        div()
-                            .id("content-scroll")
-                            .flex_1()
-                            .min_w(px(400.0))
-                            .overflow_y_scroll()
-                            .bg(colors.background)
-                            .child(content),
-                    ),
-            )
-            .into_any_element()
-    }
+pub fn scrollable_content<'a>(
+    content: impl Into<Element<'a, Message>>,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let colors = *colors;
+    scrollable(content)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |theme, status| scroll_style(&colors, theme, status))
+        .into()
 }

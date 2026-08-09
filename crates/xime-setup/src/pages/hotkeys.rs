@@ -1,55 +1,79 @@
-use crate::components::{SettingsControl, SettingsGroup, SettingsItem, SettingsPage};
-use crate::pages::SettingsApp;
-use crate::state::SettingsState;
+use crate::components::settings::{settings_group, settings_item, settings_page};
+use crate::components::widgets::{button_primary, kbd};
+use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
-use gpui::*;
+use iced::widget::row;
+use iced::Element;
 
-pub fn render(
-    settings: &Entity<SettingsState>,
-    colors: &ThemeColors,
-    _cx: &mut Context<SettingsApp>,
-) -> impl IntoElement {
-    SettingsPage::new("快捷键", colors.clone())
-        .group(
-            SettingsGroup::new("常用快捷键", colors.clone())
-                .description("Xime 输入法快捷键配置")
-                .items(vec![
-                    SettingsItem::new("中/英切换", SettingsControl::kbd("Shift"))
-                        .description("切换中文/英文输入模式"),
-                    SettingsItem::new("中/英切换", SettingsControl::kbd("Ctrl+Space"))
-                        .description("切换中文/英文输入模式（备选）"),
-                    SettingsItem::new("全/半角切换", SettingsControl::kbd("Ctrl+."))
-                        .description("切换全角/半角符号"),
-                    SettingsItem::new("中/英标点切换", SettingsControl::kbd("Ctrl+,"))
-                        .description("切换中文/英文标点"),
-                ]),
-        )
-        .group(
-            SettingsGroup::new("候选词选择", colors.clone())
-                .description("候选词翻页和选择")
-                .items(vec![
-                    SettingsItem::new("下一页", SettingsControl::kbd("["))
-                        .description("候选词翻到下一页"),
-                    SettingsItem::new("上一页", SettingsControl::kbd("]"))
-                        .description("候选词翻到上一页"),
-                ]),
-        )
-        .group(SettingsGroup::new("操作", colors.clone()).items(vec![
-                SettingsItem::new("显示字根", SettingsControl::kbd("Ctrl"))
-                    .description("按住 Ctrl 键显示当前按键对应的五笔字根"),
-                SettingsItem::new(
-                    "重新部署",
-                    SettingsControl::button_with("重新部署", {
-                        let settings = settings.clone();
-                        move |_window, cx| {
-                            cx.update_entity(&settings, |state, cx| {
-                                if let Err(e) = state.deploy() {
-                                    state.deploy_message = Some(format!("部署失败: {}", e));
-                                    cx.notify();
-                                }
-                            });
-                        }
-                    }),
-                ),
-            ]))
+pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    settings_page(
+        "快捷键",
+        colors,
+        vec![
+            settings_group(
+                "常用快捷键",
+                Some("Xime 输入法快捷键配置"),
+                colors,
+                vec![
+                    settings_item(
+                        "中/英切换",
+                        Some("切换中文/英文输入模式"),
+                        colors,
+                        kbd("Shift", colors),
+                    ),
+                    settings_item(
+                        "中/英切换",
+                        Some("切换中文/英文输入模式（备选）"),
+                        colors,
+                        kbd("Ctrl+Space", colors),
+                    ),
+                    settings_item(
+                        "全/半角切换",
+                        Some("切换全角/半角符号"),
+                        colors,
+                        kbd("Ctrl+.", colors),
+                    ),
+                    settings_item(
+                        "中/英标点切换",
+                        Some("切换中文/英文标点"),
+                        colors,
+                        kbd("Ctrl+,", colors),
+                    ),
+                ],
+            ),
+            settings_group(
+                "候选词选择",
+                Some("候选词翻页和选择"),
+                colors,
+                vec![
+                    settings_item(
+                        "下一页",
+                        Some("候选词翻到下一页"),
+                        colors,
+                        kbd("[", colors),
+                    ),
+                    settings_item(
+                        "上一页",
+                        Some("候选词翻到上一页"),
+                        colors,
+                        kbd("]", colors),
+                    ),
+                ],
+            ),
+            settings_group(
+                "操作",
+                None,
+                colors,
+                vec![
+                    settings_item(
+                        "显示字根",
+                        Some("按住 Ctrl 键显示当前按键对应的五笔字根"),
+                        colors,
+                        kbd("Ctrl", colors),
+                    ),
+                    row![button_primary("重新部署", colors, Message::DeploySchemas)].into(),
+                ],
+            ),
+        ],
+    )
 }

@@ -1,5 +1,4 @@
 use crate::theme::{SystemTheme, ThemeColors};
-use gpui::*;
 use serde::Deserialize;
 use std::sync::{Mutex, OnceLock};
 use xime_config::{
@@ -9,6 +8,7 @@ use xime_config::{
 
 static MARKET_TASK_RESULT: OnceLock<Mutex<Option<MarketTaskResult>>> = OnceLock::new();
 static MARKET_YAML_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
+static DEPLOY_RESULT: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
 
 fn market_task_result() -> &'static Mutex<Option<MarketTaskResult>> {
     MARKET_TASK_RESULT.get_or_init(|| Mutex::new(None))
@@ -16,6 +16,10 @@ fn market_task_result() -> &'static Mutex<Option<MarketTaskResult>> {
 
 fn market_yaml_result() -> &'static Mutex<Option<Result<String, String>>> {
     MARKET_YAML_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+fn deploy_result() -> &'static Mutex<Option<Result<(), String>>> {
+    DEPLOY_RESULT.get_or_init(|| Mutex::new(None))
 }
 
 enum MarketTaskResult {
@@ -29,10 +33,12 @@ enum MarketTaskResult {
 static NOTIFY_DEPLOY: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_RELOAD_STYLE: OnceLock<fn()> = OnceLock::new();
 
+/// 设置宿主进程的「部署后重载」回调（daemon 重载配置）。
 pub fn set_notify_deploy(f: fn()) {
     let _ = NOTIFY_DEPLOY.set(f);
 }
 
+/// 设置宿主进程的「样式重载」回调（daemon 重新加载配色/字号）。
 pub fn set_notify_reload_style(f: fn()) {
     let _ = NOTIFY_RELOAD_STYLE.set(f);
 }
@@ -65,6 +71,44 @@ fn cache_dir() -> std::path::PathBuf {
         })
 }
 
+/// 设置应用的 UI 消息（iced）。
+#[derive(Debug, Clone)]
+pub enum Message {
+    /// 切换左侧导航页面。
+    PageSelected(usize),
+    /// 输入方案页：切换「已安装 / 已下载」标签。
+    SchemaTab(usize),
+    /// 输入方案页：选择某个已安装方案。
+    SelectSchema(usize),
+    /// 部署方案（输入方案页 / 快捷键页 / 方案市场）。
+    DeploySchemas,
+    /// 安装方案（已下载包 / 方案市场）。
+    InstallSchema(String),
+    /// 卸载方案。
+    UninstallSchema(String),
+    /// 方案市场：下载方案。
+    DownloadSchema(String),
+    /// 方案市场：加载失败后重试。
+    MarketRetry,
+    /// 外观：字号变更。
+    FontSizeChanged(f64),
+    /// 外观：候选词数量变更。
+    CandidateCountChanged(i32),
+    /// 外观：圆角大小变更。
+    CornerRadiusChanged(f64),
+    /// 外观：保存。
+    SaveAppearance,
+    #[cfg(feature = "smart-suggestion-page")]
+    SaveSmartSuggestion,
+    #[cfg(feature = "clipboard-page")]
+    ClearClipboardHistory,
+    #[cfg(feature = "pair-page")]
+    StartPairing,
+    /// 订阅轮询：后台任务结果。
+    BackgroundPoll,
+}
+
+#[derive(Clone)]
 pub struct SettingsState {
     pub appearance: AppearanceState,
     pub input_schema: InputSchemaState,
@@ -72,6 +116,7 @@ pub struct SettingsState {
     pub deploy_message: Option<String>,
     pub schemas_loaded: bool,
     pub market_schema: MarketSchemaState,
+    pub current_page: usize,
     #[cfg(feature = "smart-suggestion-page")]
     pub smart_suggestion: SmartSuggestionState,
     #[cfg(feature = "pair-page")]
@@ -82,8 +127,14 @@ pub struct SettingsState {
     pub sync: SyncState,
 }
 
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SettingsState {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new() -> Self {
         let mut state = Self {
             appearance: AppearanceState::default(),
             input_schema: InputSchemaState::default(),
@@ -91,6 +142,7 @@ impl SettingsState {
             system_theme: SystemTheme::detect(),
             deploy_message: None,
             schemas_loaded: false,
+            current_page: 0,
             #[cfg(feature = "smart-suggestion-page")]
             smart_suggestion: SmartSuggestionState::default(),
             #[cfg(feature = "pair-page")]
@@ -100,36 +152,11 @@ impl SettingsState {
             #[cfg(target_os = "linux")]
             sync: SyncState::default(),
         };
-        state.load_color_schemes(cx);
+        state.load_color_schemes();
+        state.load_schemas();
+        state.load_schema_config();
+        state.start_load_market();
         state
-    }
-
-    pub fn load_schemas(&mut self, cx: &mut Context<Self>) {
-        if self.schemas_loaded {
-            return;
-        }
-        if let Ok(manager) = SchemaManager::new() {
-            let schemas = manager.get_schema_list();
-            self.input_schema.available_schemas = schemas;
-            self.schemas_loaded = true;
-            cx.notify();
-        }
-    }
-
-    pub fn load_schema_config(&mut self, cx: &mut Context<Self>) {
-        if self.input_schema.config_loaded {
-            return;
-        }
-        if self.input_schema.selected_schema >= self.input_schema.available_schemas.len() {
-            return;
-        }
-        let schema_id =
-            &self.input_schema.available_schemas[self.input_schema.selected_schema].schema_id;
-        if let Ok(manager) = SchemaConfigManager::new(schema_id) {
-            self.input_schema.schema_config = manager.get_config();
-            self.input_schema.config_loaded = true;
-            cx.notify();
-        }
     }
 
     pub fn colors(&self) -> ThemeColors {
@@ -146,7 +173,33 @@ impl SettingsState {
             .unwrap_or(0x8F73E2)
     }
 
-    pub fn load_color_schemes(&mut self, cx: &mut Context<Self>) {
+    pub fn load_schemas(&mut self) {
+        if self.schemas_loaded {
+            return;
+        }
+        if let Ok(manager) = SchemaManager::new() {
+            let schemas = manager.get_schema_list();
+            self.input_schema.available_schemas = schemas;
+            self.schemas_loaded = true;
+        }
+    }
+
+    pub fn load_schema_config(&mut self) {
+        if self.input_schema.config_loaded {
+            return;
+        }
+        if self.input_schema.selected_schema >= self.input_schema.available_schemas.len() {
+            return;
+        }
+        let schema_id =
+            &self.input_schema.available_schemas[self.input_schema.selected_schema].schema_id;
+        if let Ok(manager) = SchemaConfigManager::new(schema_id) {
+            self.input_schema.schema_config = manager.get_config();
+            self.input_schema.config_loaded = true;
+        }
+    }
+
+    pub fn load_color_schemes(&mut self) {
         if self.appearance.color_schemes_loaded {
             return;
         }
@@ -161,7 +214,6 @@ impl SettingsState {
         self.appearance.candidate_count = config.style.candidate_count;
         self.appearance.corner_radius = config.style.corner_radius as f64;
         self.appearance.color_schemes_loaded = true;
-        cx.notify();
     }
 
     pub fn save_color_scheme(&self) -> Result<(), String> {
@@ -259,12 +311,44 @@ impl SettingsState {
         Ok(())
     }
 
-    pub fn load_market_schemas(&mut self, cx: &mut Context<Self>) {
+    // ---- 部署（后台线程执行，结果经轮询回收） ----
+
+    pub fn start_deploy(&mut self) {
+        if deploy_result().lock().unwrap().is_some() {
+            return;
+        }
+        self.deploy_message = Some("正在部署…".to_string());
+        std::thread::spawn(|| {
+            let result = deploy_all().map_err(|e| e.to_string());
+            *deploy_result().lock().unwrap() = Some(result);
+        });
+    }
+
+    pub fn poll_deploy(&mut self) {
+        let result = deploy_result().lock().unwrap().take();
+        if let Some(result) = result {
+            match result {
+                Ok(()) => {
+                    self.deploy_message = Some(if notify_daemon_reload() {
+                        "部署成功！配置已重载。".to_string()
+                    } else {
+                        "部署成功！(服务器未运行，配置将在下次启动时生效)".to_string()
+                    });
+                }
+                Err(e) => {
+                    self.deploy_message = Some(format!("部署失败: {}", e));
+                }
+            }
+        }
+    }
+
+    // ---- 方案市场 ----
+
+    pub fn start_load_market(&mut self) {
         if self.market_schema.loaded || self.market_schema.loading {
             return;
         }
         self.market_schema.loading = true;
-        cx.notify();
 
         std::thread::spawn(|| {
             let result = (|| -> Result<String, String> {
@@ -277,20 +361,17 @@ impl SettingsState {
             })();
 
             *market_yaml_result().lock().unwrap() = Some(result);
-            if let Some(cb) = NOTIFY_DEPLOY.get() {
-                cb();
-            }
         });
     }
 
-    pub fn apply_market_yaml(&mut self, cx: &mut Context<Self>) {
-        if self.market_schema.loaded || !self.market_schema.loading {
-            return;
+    /// 轮询方案索引结果。返回是否有变化。
+    pub fn poll_market_yaml(&mut self) -> bool {
+        if !self.market_schema.loading {
+            return false;
         }
-        let mut guard = market_yaml_result().lock().unwrap();
-        let result = match guard.take() {
-            Some(r) => r,
-            None => return,
+        let result = market_yaml_result().lock().unwrap().take();
+        let Some(result) = result else {
+            return false;
         };
         match result {
             Ok(text) => {
@@ -314,40 +395,49 @@ impl SettingsState {
                 self.market_schema.error = Some(e);
             }
         }
-        cx.notify();
+        true
     }
 
-    pub fn check_market_task_result(&mut self, cx: &mut Context<Self>) {
-        let mut guard = market_task_result().lock().unwrap();
-        if let Some(result) = guard.take() {
-            match result {
-                MarketTaskResult::DownloadDone(id) => {
-                    if !self.market_schema.downloaded_ids.contains(&id) {
-                        self.market_schema.downloaded_ids.push(id);
-                    }
-                }
-                MarketTaskResult::InstallDone(id) => {
-                    if !self.market_schema.installed_ids.contains(&id) {
-                        self.market_schema.installed_ids.push(id);
-                    }
-                }
-                MarketTaskResult::UninstallDone(id) => {
-                    self.market_schema.installed_ids.retain(|i| i != &id);
-                }
-                MarketTaskResult::DeleteDone(id) => {
-                    self.market_schema.downloaded_ids.retain(|i| i != &id);
-                }
-                MarketTaskResult::Error(e) => {
-                    self.market_schema.install_message = Some(e);
+    /// 轮询方案市场后台任务结果。返回是否有变化。
+    pub fn poll_market_task(&mut self) -> bool {
+        let result = market_task_result().lock().unwrap().take();
+        let Some(result) = result else {
+            return false;
+        };
+        match result {
+            MarketTaskResult::DownloadDone(id) => {
+                if !self.market_schema.downloaded_ids.contains(&id) {
+                    self.market_schema.downloaded_ids.push(id);
                 }
             }
-            self.market_schema.downloading = None;
-            self.market_schema.installing = None;
-            cx.notify();
+            MarketTaskResult::InstallDone(id) => {
+                if !self.market_schema.installed_ids.contains(&id) {
+                    self.market_schema.installed_ids.push(id);
+                }
+            }
+            MarketTaskResult::UninstallDone(id) => {
+                self.market_schema.installed_ids.retain(|i| i != &id);
+            }
+            MarketTaskResult::DeleteDone(id) => {
+                self.market_schema.downloaded_ids.retain(|i| i != &id);
+            }
+            MarketTaskResult::Error(e) => {
+                self.market_schema.install_message = Some(e);
+            }
         }
+        self.market_schema.downloading = None;
+        self.market_schema.installing = None;
+        true
     }
 
-    pub fn download_market_schema(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+    /// 统一回收后台任务结果（由轮询订阅调用）。
+    pub fn poll_background(&mut self) {
+        self.poll_deploy();
+        self.poll_market_yaml();
+        self.poll_market_task();
+    }
+
+    pub fn download_market_schema(&mut self, schema_id: &str) {
         if self.market_schema.downloading.is_some() || self.market_schema.installing.is_some() {
             return;
         }
@@ -359,7 +449,6 @@ impl SettingsState {
 
         self.market_schema.downloading = Some(schema_id.to_string());
         self.market_schema.install_message = None;
-        cx.notify();
 
         std::thread::spawn(move || {
             let result = do_download(&schema);
@@ -368,20 +457,16 @@ impl SettingsState {
                 Err(e) => MarketTaskResult::Error(e.to_string()),
             };
             *market_task_result().lock().unwrap() = Some(task);
-            if let Some(cb) = NOTIFY_DEPLOY.get() {
-                cb();
-            }
         });
     }
 
-    pub fn install_market_schema(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+    pub fn install_market_schema(&mut self, schema_id: &str) {
         if self.market_schema.installing.is_some() || self.market_schema.downloading.is_some() {
             return;
         }
 
         self.market_schema.installing = Some(schema_id.to_string());
         self.market_schema.install_message = None;
-        cx.notify();
 
         let sid = schema_id.to_string();
         std::thread::spawn(move || {
@@ -391,33 +476,26 @@ impl SettingsState {
                 Err(e) => MarketTaskResult::Error(e.to_string()),
             };
             *market_task_result().lock().unwrap() = Some(task);
-            if let Some(cb) = NOTIFY_DEPLOY.get() {
-                cb();
-            }
         });
     }
 
-    pub fn delete_market_package(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+    pub fn delete_market_package(&mut self, schema_id: &str) {
         let sid = schema_id.to_string();
         std::thread::spawn(move || {
             let pkg_dir = cache_dir().join(&sid);
             let _ = std::fs::remove_dir_all(&pkg_dir);
             let task = MarketTaskResult::DeleteDone(sid);
             *market_task_result().lock().unwrap() = Some(task);
-            if let Some(cb) = NOTIFY_DEPLOY.get() {
-                cb();
-            }
         });
     }
 
-    pub fn uninstall_market_schema(&mut self, schema_id: &str, cx: &mut Context<Self>) {
+    pub fn uninstall_market_schema(&mut self, schema_id: &str) {
         if self.market_schema.installing.is_some() || self.market_schema.downloading.is_some() {
             return;
         }
 
         self.market_schema.installing = Some(schema_id.to_string());
         self.market_schema.install_message = None;
-        cx.notify();
 
         let sid = schema_id.to_string();
         std::thread::spawn(move || {
@@ -427,53 +505,39 @@ impl SettingsState {
                 Err(e) => MarketTaskResult::Error(e.to_string()),
             };
             *market_task_result().lock().unwrap() = Some(task);
-            if let Some(cb) = NOTIFY_DEPLOY.get() {
-                cb();
-            }
         });
     }
 
-    pub fn deploy(&mut self) -> Result<(), String> {
-        let result = deploy_all().map_err(|e| e.to_string());
-        match &result {
-            Ok(_) => {
-                if notify_daemon_reload() {
-                    self.deploy_message = Some("部署成功！配置已重载。".to_string());
-                } else {
-                    self.deploy_message =
-                        Some("部署成功！(服务器未运行，配置将在下次启动时生效)".to_string());
+    // ---- 私有辅助 ----
+
+    fn get_installed_schema_ids(&self) -> Vec<String> {
+        if let Ok(manager) = SchemaManager::new() {
+            manager
+                .get_schema_list()
+                .into_iter()
+                .map(|s| s.schema_id)
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn get_cached_schema_ids(&self) -> Vec<String> {
+        let dir = cache_dir();
+        if !dir.exists() {
+            return Vec::new();
+        }
+        let mut ids = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        ids.push(name.to_string());
+                    }
                 }
             }
-            Err(e) => {
-                self.deploy_message = Some(format!("部署失败: {}", e));
-            }
         }
-        result
-    }
-
-    #[cfg(feature = "smart-suggestion-page")]
-    pub fn load_smart_suggestion_config(&mut self) {
-        let config = XimeConfig::load();
-        self.smart_suggestion = SmartSuggestionState {
-            enabled: config.smart_suggestion.enabled.unwrap_or(false),
-            suggestion_count: config.smart_suggestion.suggestion_count,
-            record_user_frequency: config.smart_suggestion.record_user_frequency,
-            auto_adjust_frequency: config.smart_suggestion.auto_adjust_frequency,
-            learning_threshold: config.smart_suggestion.learning_threshold,
-        };
-    }
-
-    #[cfg(feature = "smart-suggestion-page")]
-    pub fn save_smart_suggestion(&self) -> Result<(), String> {
-        let mut config = XimeConfig::load();
-        config.smart_suggestion.enabled = Some(self.smart_suggestion.enabled);
-        config.smart_suggestion.suggestion_count = self.smart_suggestion.suggestion_count;
-        config.smart_suggestion.record_user_frequency = self.smart_suggestion.record_user_frequency;
-        config.smart_suggestion.auto_adjust_frequency = self.smart_suggestion.auto_adjust_frequency;
-        config.smart_suggestion.learning_threshold = self.smart_suggestion.learning_threshold;
-        config.save()?;
-        notify_daemon_reload_style();
-        Ok(())
+        ids
     }
 }
 
@@ -603,38 +667,6 @@ pub struct MarketDownloadUrl {
 }
 
 // ---- installation helpers ----
-
-impl SettingsState {
-    fn get_installed_schema_ids(&self) -> Vec<String> {
-        if let Ok(manager) = SchemaManager::new() {
-            manager
-                .get_schema_list()
-                .into_iter()
-                .map(|s| s.schema_id)
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn get_cached_schema_ids(&self) -> Vec<String> {
-        let dir = cache_dir();
-        if !dir.exists() {
-            return Vec::new();
-        }
-        let mut ids = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        ids.push(name.to_string());
-                    }
-                }
-            }
-        }
-        ids
-    }
-}
 
 fn get_download_info(schema: &MarketSchema) -> Option<(String, String)> {
     let version = schema.current_version.as_deref().unwrap_or("latest");

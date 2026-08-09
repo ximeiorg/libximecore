@@ -1,6 +1,7 @@
-use gpui::*;
+﻿use iced::Color;
 
-#[derive(Clone)]
+/// 系统主题检测（不使用任何 GUI 框架，纯平台 API）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemTheme {
     Light,
     Dark,
@@ -87,23 +88,59 @@ impl SystemTheme {
     }
 }
 
-#[derive(Clone)]
+/// 颜色混合：`t=0` 时为 `a`，`t=1` 时为 `b`。
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color::from_rgba(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        a.a + (b.a - a.a) * t,
+    )
+}
+
+/// 主题颜色：Tailwind zinc 色阶 + 可定制主色，风格参考 ximed 桌面 UI。
+#[derive(Clone, Copy, Debug)]
 pub struct ThemeColors {
-    pub background: Hsla,
-    pub surface: Hsla,
-    pub surface_variant: Hsla,
-    pub primary: Hsla,
-    pub primary_hover: Hsla,
-    pub on_primary: Hsla,
-    pub sidebar_bg: Hsla,
-    pub foreground: Hsla,
-    pub foreground_muted: Hsla,
-    pub border: Hsla,
-    pub border_variant: Hsla,
-    pub disabled: Hsla,
-    pub error: Hsla,
-    pub on_error: Hsla,
-    pub selection: Hsla,
+    /// 窗口底色。
+    pub background: Color,
+    /// 卡片 / 侧栏底色。
+    pub surface: Color,
+    /// 悬停底色。
+    pub surface_hover: Color,
+    /// 更浅的次级底色（kbd、胶囊、图标底）。
+    pub surface_variant: Color,
+    /// 主色（强调文字、按钮填充、焦点描边）。
+    pub primary: Color,
+    /// 主色悬停（按钮 hover 填充）。
+    pub primary_hover: Color,
+    /// 主色浅底（active 导航、分段控件）。
+    pub primary_dim: Color,
+    /// 主色上的文字色。
+    pub on_primary: Color,
+    /// 主文本。
+    pub foreground: Color,
+    /// 次级文本。
+    pub foreground_muted: Color,
+    /// 弱化文本。
+    pub foreground_faint: Color,
+    /// 边框。
+    pub border: Color,
+    /// 强调边框。
+    pub border_strong: Color,
+    /// 禁用状态。
+    pub disabled: Color,
+    /// 危险色。
+    pub error: Color,
+    /// 危险浅底。
+    pub error_dim: Color,
+    /// 危险色上的文字色。
+    pub on_error: Color,
+    /// 成功色。
+    pub success: Color,
+    /// 成功浅底。
+    pub success_dim: Color,
+    /// 文本选区。
+    pub selection: Color,
 }
 
 impl ThemeColors {
@@ -113,65 +150,74 @@ impl ThemeColors {
             (primary_color >> 8) as u8,
             primary_color as u8,
         );
-        let hover_r = (r as f32 * 0.9) as u8;
-        let hover_g = (g as f32 * 0.9) as u8;
-        let hover_b = (b as f32 * 0.9) as u8;
-        let primary_hover = ((hover_r as u32) << 16) | ((hover_g as u32) << 8) | hover_b as u32;
-
-        let sidebar_r = (r as f32 * 0.35) as u8;
-        let sidebar_g = (g as f32 * 0.35) as u8;
-        let sidebar_b = (b as f32 * 0.35) as u8;
-        let sidebar_bg = ((sidebar_r as u32) << 16) | ((sidebar_g as u32) << 8) | sidebar_b as u32;
-
-        let selection_r = (r as f32 * 0.15 + 255.0 * 0.85) as u8;
-        let selection_g = (g as f32 * 0.15 + 255.0 * 0.85) as u8;
-        let selection_b = (b as f32 * 0.15 + 255.0 * 0.85) as u8;
-        let selection_light =
-            ((selection_r as u32) << 16) | ((selection_g as u32) << 8) | selection_b as u32;
-
-        let selection_dark_r = (r as f32 * 0.3) as u8;
-        let selection_dark_g = (g as f32 * 0.3) as u8;
-        let selection_dark_b = (b as f32 * 0.3) as u8;
-        let selection_dark = ((selection_dark_r as u32) << 16)
-            | ((selection_dark_g as u32) << 8)
-            | selection_dark_b as u32;
+        let base = Color::from_rgb8(r, g, b);
+        const WHITE: Color = Color::WHITE;
+        const BLACK: Color = Color::BLACK;
 
         if theme.is_dark() {
+            // Tailwind zinc 深色 + 主色提亮（深底可读性）
+            let primary = mix(base, WHITE, 0.28);
+            let primary_hover = mix(base, WHITE, 0.4);
             Self {
-                background: hsla(0.0, 0.0, 0.05, 0.85),
-                surface: rgb(0x1a1a1a).into(),
-                surface_variant: rgb(0x262626).into(),
-                primary: rgb(primary_color).into(),
-                primary_hover: rgb(primary_hover).into(),
-                on_primary: rgb(0xffffff).into(),
-                sidebar_bg: rgb(sidebar_bg).into(),
-                foreground: rgb(0xe0e0e0).into(),
-                foreground_muted: rgb(0x808080).into(),
-                border: rgb(0x303030).into(),
-                border_variant: rgb(0x404040).into(),
-                disabled: rgb(0x4d4d4d).into(),
-                error: rgb(0xc42b1c).into(),
-                on_error: rgb(0xffffff).into(),
-                selection: rgb(selection_dark).into(),
+                background: Color::from_rgb8(0x0a, 0x0a, 0x0c),
+                surface: Color::from_rgb8(0x15, 0x15, 0x18),
+                surface_hover: Color::from_rgb8(0x22, 0x22, 0x27),
+                surface_variant: Color::from_rgb8(0x1c, 0x1c, 0x1f),
+                primary,
+                primary_hover,
+                primary_dim: Color::from_rgba(primary.r, primary.g, primary.b, 0.18),
+                on_primary: Color::WHITE,
+                foreground: Color::from_rgb8(0xf4, 0xf4, 0xf5),
+                foreground_muted: Color::from_rgb8(0xa1, 0xa1, 0xaa),
+                foreground_faint: Color::from_rgb8(0x71, 0x71, 0x7a),
+                border: Color::from_rgb8(0x2a, 0x2a, 0x30),
+                border_strong: Color::from_rgb8(0x3f, 0x3f, 0x46),
+                disabled: Color::from_rgb8(0x52, 0x52, 0x5b),
+                error: Color::from_rgb8(0xfb, 0x71, 0x85),
+                error_dim: Color::from_rgba8(0xfb, 0x71, 0x85, 0.15),
+                on_error: Color::WHITE,
+                success: Color::from_rgb8(0x34, 0xd3, 0x99),
+                success_dim: Color::from_rgba8(0x34, 0xd3, 0x99, 0.15),
+                selection: Color::from_rgba(base.r, base.g, base.b, 0.35),
             }
         } else {
+            // Tailwind zinc 浅色
+            let primary_hover = mix(base, BLACK, 0.1);
             Self {
-                background: hsla(0.0, 0.0, 1.0, 0.95),
-                surface: rgb(0xffffff).into(),
-                surface_variant: rgb(0xf5f5f5).into(),
-                primary: rgb(primary_color).into(),
-                primary_hover: rgb(primary_hover).into(),
-                on_primary: rgb(0xffffff).into(),
-                sidebar_bg: rgb(sidebar_bg).into(),
-                foreground: rgb(0x1a1a1a).into(),
-                foreground_muted: rgb(0x666666).into(),
-                border: rgb(0xe0e0e0).into(),
-                border_variant: rgb(0xd0d0d0).into(),
-                disabled: rgb(0xaaaaaa).into(),
-                error: rgb(0xc42b1c).into(),
-                on_error: rgb(0xffffff).into(),
-                selection: rgb(selection_light).into(),
+                background: Color::from_rgb8(0xf4, 0xf4, 0xf5),
+                surface: Color::WHITE,
+                surface_hover: Color::from_rgb8(0xf4, 0xf4, 0xf5),
+                surface_variant: Color::from_rgb8(0xfa, 0xfa, 0xfa),
+                primary: base,
+                primary_hover,
+                primary_dim: Color::from_rgba(base.r, base.g, base.b, 0.12),
+                on_primary: Color::WHITE,
+                foreground: Color::from_rgb8(0x18, 0x18, 0x1b),
+                foreground_muted: Color::from_rgb8(0x71, 0x71, 0x7a),
+                foreground_faint: Color::from_rgb8(0xa1, 0xa1, 0xaa),
+                border: Color::from_rgb8(0xe4, 0xe4, 0xe7),
+                border_strong: Color::from_rgb8(0xd4, 0xd4, 0xd8),
+                disabled: Color::from_rgb8(0xa1, 0xa1, 0xaa),
+                error: Color::from_rgb8(0xe1, 0x1d, 0x48),
+                error_dim: Color::from_rgba8(0xe1, 0x1d, 0x48, 0.10),
+                on_error: Color::WHITE,
+                success: Color::from_rgb8(0x05, 0x96, 0x69),
+                success_dim: Color::from_rgba8(0x05, 0x96, 0x69, 0.10),
+                selection: Color::from_rgba(base.r, base.g, base.b, 0.3),
             }
         }
+    }
+
+    /// 生成 iced 主题（供内置控件使用：滚动条、toggler 等）。
+    pub fn iced_theme(&self) -> iced::Theme {
+        let palette = iced::theme::Palette {
+            background: self.background,
+            text: self.foreground,
+            primary: self.primary,
+            success: self.success,
+            warning: Color::from_rgb8(0xfb, 0xb0, 0x24),
+            danger: self.error,
+        };
+        iced::Theme::custom("xime".to_string(), palette)
     }
 }

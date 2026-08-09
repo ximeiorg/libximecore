@@ -1,16 +1,23 @@
-use crate::components::{SettingsControl, SettingsGroup, SettingsItem, SettingsPage};
-use crate::state::SettingsState;
+use crate::components::settings::{settings_group, settings_item, settings_page};
+use crate::components::widgets::label;
+use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
-use gpui::*;
+use iced::Element;
 
-pub fn render(_settings: &Entity<SettingsState>, colors: &ThemeColors) -> impl IntoElement {
-    SettingsPage::new("词典管理", colors.clone()).group(
-        SettingsGroup::new("用户词典", colors.clone())
-            .description("管理用户词库")
-            .items(vec![SettingsItem::new(
+pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    settings_page(
+        "词典管理",
+        colors,
+        vec![settings_group(
+            "用户词典",
+            Some("管理用户词库"),
+            colors,
+            vec![settings_item(
                 "用户词典",
-                SettingsControl::label("Rime 自动管理"),
-            )
-            .description("用户词典由 Rime 引擎自动维护")]),
+                Some("用户词典由 Rime 引擎自动维护"),
+                colors,
+                label("Rime 自动管理", colors),
+            )],
+        )],
     )
 }

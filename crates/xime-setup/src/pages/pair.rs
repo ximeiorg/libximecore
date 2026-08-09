@@ -1,34 +1,33 @@
 #![cfg(feature = "pair-page")]
-use crate::components::{SettingsControl, SettingsGroup, SettingsItem, SettingsPage};
-use crate::state::SettingsState;
-use gpui::*;
+use crate::components::settings::{settings_group, settings_item, settings_page};
+use crate::components::widgets::{button_primary, label};
+use crate::state::{Message, SettingsState};
+use crate::theme::ThemeColors;
+use iced::widget::row;
+use iced::Element;
 
-pub fn render(
-    settings: Entity<SettingsState>,
-    cx: &mut Context<SettingsState>,
-) -> impl IntoElement {
-    let colors = cx.read_entity(&settings, |state, _| state.colors());
-
-    SettingsPage::new("设备关联", colors.clone())
-        .group(
-            SettingsGroup::new("设备配对", colors.clone())
-                .description("通过配对码关联多台设备")
-                .items(vec![SettingsItem::new(
+pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    settings_page(
+        "设备关联",
+        colors,
+        vec![
+            settings_group(
+                "设备配对",
+                Some("通过配对码关联多台设备"),
+                colors,
+                vec![settings_item(
                     "配对状态",
-                    SettingsControl::label("未配对"),
-                )
-                .description("当前设备未关联到任何账户")]),
-        )
-        .group(SettingsGroup::new("操作", colors.clone()).items(vec![
-            SettingsItem::button("开始配对").on_click({
-                let settings = settings.clone();
-                move |_window, cx| {
-                    cx.update_entity(&settings, |state, cx| {
-                        // TODO: implement pairing
-                        state.deploy_message = Some("功能开发中".to_string());
-                        cx.notify();
-                    });
-                }
-            }),
-        ]))
+                    Some("当前设备未关联到任何账户"),
+                    colors,
+                    label("未配对", colors),
+                )],
+            ),
+            settings_group(
+                "操作",
+                None,
+                colors,
+                vec![row![button_primary("开始配对", colors, Message::StartPairing)].into()],
+            ),
+        ],
+    )
 }

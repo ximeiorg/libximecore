@@ -1,143 +1,112 @@
-use crate::components::{SettingsGroup, SettingsPage};
-use crate::pages::SettingsApp;
-use crate::state::{MarketSchema, SettingsState};
+use crate::components::settings::{settings_group, settings_page};
+use crate::components::widgets::{
+    badge, button_primary, card_style, semibold, text_button,
+};
+use crate::state::{MarketSchema, MarketSchemaState, Message, SettingsState};
 use crate::theme::ThemeColors;
-use gpui::prelude::FluentBuilder;
-use gpui::*;
+use iced::widget::{
+    button, column, container, row, text,
+};
+use iced::{border, Alignment, Background, Border, Color, Element, Length};
 
-pub fn render(
-    settings: &Entity<SettingsState>,
-    colors: &ThemeColors,
-    cx: &mut Context<SettingsApp>,
-) -> impl IntoElement {
-    cx.update_entity(settings, |state, cx| {
-        state.check_market_task_result(cx);
-        state.apply_market_yaml(cx);
-        state.load_market_schemas(cx);
-    });
+pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    let market = &settings.market_schema;
 
-    let state = settings.read(cx);
-    let market = &state.market_schema;
+    let content: Element<'a, Message> = if market.loading && !market.loaded {
+        center_msg(colors, "正在加载方案列表…")
+    } else if let Some(error) = &market.error {
+        error_view(colors, error)
+    } else if market.loaded {
+        schema_list(market, colors)
+    } else {
+        center_msg(colors, "正在加载方案列表…")
+    };
 
-    SettingsPage::new("方案市场", colors.clone()).group(
-        SettingsGroup::new("方案列表", colors.clone())
-            .description("从方案市场下载并安装输入方案")
-            .custom_item(if market.loading && !market.loaded {
-                center_msg(colors, "正在加载方案列表…")
-            } else if let Some(ref error) = market.error {
-                error_view(colors, error, settings.clone())
-            } else if market.loaded {
-                schema_list(colors, market, settings.clone())
-            } else {
-                center_msg(colors, "正在加载方案列表…")
-            }),
-    )
+    let mut groups = vec![settings_group(
+        "方案列表",
+        Some("从方案市场下载并安装输入方案"),
+        colors,
+        vec![content],
+    )];
+
+    if let Some(msg) = &market.install_message {
+        groups.push(settings_group(
+            "提示",
+            None,
+            colors,
+            vec![text(msg.clone()).size(12).color(colors.error).into()],
+        ));
+    }
+
+    settings_page("方案市场", colors, groups)
 }
 
-fn center_msg(colors: &ThemeColors, msg: &str) -> Div {
-    div()
-        .py(px(32.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .text_size(px(14.0))
-                .text_color(colors.foreground_muted)
-                .child(msg.to_string()),
-    )
+fn center_msg<'a>(colors: &'a ThemeColors, msg: &'a str) -> Element<'a, Message> {
+    container(text(msg).size(14).color(colors.foreground_muted))
+        .width(Length::Fill)
+        .padding(32)
+        .center_x(Length::Fill)
+        .into()
 }
 
-fn error_view(colors: &ThemeColors, error: &str, settings: Entity<SettingsState>) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(12.0))
-        .py(px(24.0))
-        .px(px(16.0))
-        .child(
-            div()
-                .text_size(px(14.0))
-                .text_color(colors.foreground_muted)
-                .child(error.to_string()),
-        )
-        .child(
-            div()
-                .id("retry-btn")
-                .py(px(8.0))
-                .px(px(16.0))
-                .rounded(px(8.0))
-                .bg(colors.primary)
-                .text_color(colors.on_primary)
-                .text_size(px(14.0))
-                .cursor_pointer()
-                .child("重试")
-                .on_click(move |_, _window, cx| {
-                    cx.update_entity(&settings, |state, cx| {
-                        state.market_schema.loading = false;
-                        state.market_schema.error = None;
-                        state.market_schema.loaded = false;
-                        cx.notify();
-                    });
-                }),
-        )
+fn error_view<'a>(colors: &'a ThemeColors, error: &'a str) -> Element<'a, Message> {
+    column![
+        text(error.to_string()).size(14).color(colors.foreground_muted),
+        text_button("重试", colors, Message::MarketRetry),
+    ]
+    .spacing(12)
+    .align_x(Alignment::Start)
+    .width(Length::Fill)
+    .padding(24)
+    .into()
 }
 
-fn schema_list(
-    colors: &ThemeColors,
-    market: &crate::state::MarketSchemaState,
-    settings: Entity<SettingsState>,
-) -> Div {
-    let mut items: Vec<Div> = Vec::new();
+fn schema_list<'a>(
+    market: &'a MarketSchemaState,
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
     let schemas = market.schemas.clone();
     let installed = &market.installed_ids;
     let downloaded = &market.downloaded_ids;
     let downloading = market.downloading.as_deref();
     let installing = market.installing.as_deref();
-    let _msg = market.install_message.as_deref();
 
-    for (i, schema) in schemas.iter().enumerate() {
+    let mut list = column![].spacing(8).width(Length::Fill);
+    for schema in &schemas {
         let is_installed = installed.contains(&schema.id);
         let is_downloaded = downloaded.contains(&schema.id);
         let is_downloading = downloading == Some(schema.id.as_str());
         let is_installing = installing == Some(schema.id.as_str());
 
-        items.push(card(
-            colors,
+        list = list.push(schema_card(
             schema,
-            i as u64,
             is_installed,
             is_downloaded,
             is_downloading,
             is_installing,
-            _msg,
-            settings.clone(),
+            colors,
         ));
     }
-
-    div().flex().flex_col().gap(px(8.0)).children(items)
+    list.into()
 }
 
-fn card(
-    colors: &ThemeColors,
+fn schema_card<'a>(
     schema: &MarketSchema,
-    idx: u64,
     installed: bool,
     downloaded: bool,
     downloading: bool,
     installing: bool,
-    _msg: Option<&str>,
-    settings: Entity<SettingsState>,
-) -> Div {
-    let version = schema
-        .current_version
-        .as_deref()
-        .unwrap_or("latest");
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    let version = schema.current_version.as_deref().unwrap_or("latest");
 
     let size_label = schema
         .versions
         .iter()
-        .find(|v| v.version == version || (schema.current_version.is_none() && v.version == "latest"))
+        .find(|v| {
+            v.version == version
+                || (schema.current_version.is_none() && v.version == "latest")
+        })
         .or_else(|| schema.versions.first())
         .and_then(|v| {
             v.download_url
@@ -150,243 +119,155 @@ fn card(
 
     let deps = schema.dependencies.clone().unwrap_or_default();
 
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .p(px(14.0))
-        .rounded(px(12.0))
-        .bg(colors.surface)
-        .border_1()
-        .border_color(colors.border)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(16.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(colors.foreground)
-                        .child(if schema.name.is_empty() {
-                            schema.id.clone()
-                        } else {
-                            schema.name.clone()
-                        }),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(colors.primary)
-                        .child(version.to_string()),
-                )
-                .when(schema.schema_type == "built-in", |this| {
-                    this.child(
-                        div()
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(4.0))
-                            .text_size(px(11.0))
-                            .bg(colors.primary)
-                            .text_color(colors.on_primary)
-                            .child("内置"),
-                    )
-                }),
-        )
-        .when(!schema.description.is_empty(), |this| {
-            this.child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(colors.foreground_muted)
-                    .max_w(px(500.0))
-                    .child(schema.description.clone()),
-            )
+    let mut header = row![
+        text(if schema.name.is_empty() {
+            schema.id.clone()
+        } else {
+            schema.name.clone()
         })
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(colors.foreground_muted)
-                .child(if schema.author.is_empty() {
-                    schema.tags.join("、")
-                } else {
-                    format!("作者：{}　{}", schema.author, schema.tags.join("、"))
-                }),
-        )
-        .when(!deps.is_empty(), |this| {
-            this.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(4.0))
-                    .children(deps.iter().take(4).map(|dep| {
-                        div()
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(4.0))
-                            .text_size(px(11.0))
-                            .bg(colors.surface_variant)
-                            .text_color(colors.foreground_muted)
-                            .child(dep.clone())
-                    })),
-            )
-        })
-        .when_some(schema.warning.clone(), |this, warning| {
-            if warning.is_empty() {
-                return this;
-            }
-            this.child(
-                div()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.0))
-                    .bg(hsla(0.0, 0.5, 0.2, 0.3))
-                    .text_color(colors.foreground)
-                    .child(warning),
-            )
-        })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(colors.foreground_muted)
-                        .child(if !size_label.is_empty() {
-                            format!("大小: {}", size_label)
-                        } else {
-                            String::new()
-                        }),
-                )
-                .child(action_button(
-                    colors,
-                    idx,
-                    schema.id.clone(),
-                    installed,
-                    downloaded,
-                    downloading,
-                    installing,
-            _msg,
-                    settings,
-                )),
-        )
+        .size(16)
+        .font(semibold())
+        .color(colors.foreground),
+        text(version.to_string()).size(12).color(colors.primary),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    if schema.schema_type == "built-in" {
+        header = header.push(badge("内置", colors.on_primary, colors.primary));
+    }
+
+    let mut body = column![header].spacing(8).width(Length::Fill);
+
+    if !schema.description.is_empty() {
+        body = body.push(
+            text(schema.description.to_string())
+                .size(13)
+                .color(colors.foreground_muted),
+        );
+    }
+
+    let author_line = if schema.author.is_empty() {
+        schema.tags.join("、")
+    } else {
+        format!("作者：{}　{}", schema.author, schema.tags.join("、"))
+    };
+    body = body.push(text(author_line).size(12).color(colors.foreground_muted));
+
+    if !deps.is_empty() {
+        let mut deps_row = row![].spacing(4);
+        for dep in deps.iter().take(4) {
+            deps_row = deps_row.push(pill(dep, colors));
+        }
+        body = body.push(deps_row);
+    }
+
+    if let Some(warning) = &schema.warning {
+        if !warning.is_empty() {
+            body = body.push(
+                container(text(warning.to_string()).size(12).color(colors.foreground))
+                    .width(Length::Fill)
+                    .padding(10)
+                    .style(move |_| container::Style {
+                        background: Some(Background::Color(colors.error_dim)),
+                        border: Border {
+                            color: Color::TRANSPARENT,
+                            width: 0.0,
+                            radius: border::radius(6.0),
+                        },
+                        ..container::Style::default()
+                    }),
+            );
+        }
+    }
+
+    let size_text = if !size_label.is_empty() {
+        format!("大小: {}", size_label)
+    } else {
+        String::new()
+    };
+
+    body = body.push(
+        row![
+            container(text(size_text).size(12).color(colors.foreground_muted))
+                .width(Length::Fill),
+            action_button(
+                schema.id.clone(),
+                installed,
+                downloaded,
+                downloading,
+                installing,
+                colors,
+            ),
+        ]
+        .width(Length::Fill)
+        .align_y(Alignment::Center),
+    );
+
+    container(body)
+        .width(Length::Fill)
+        .padding(14)
+        .style(move |_| card_style(colors))
+        .into()
 }
 
-fn action_button(
-    colors: &ThemeColors,
-    idx: u64,
+fn action_button<'a>(
     schema_id: String,
     installed: bool,
     downloaded: bool,
     downloading: bool,
     installing: bool,
-    _msg: Option<&str>,
-    settings: Entity<SettingsState>,
-) -> impl IntoElement {
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    let colors = *colors;
     if installing {
-        div()
-            .id(("market-btn", idx))
-            .py(px(6.0))
-            .px(px(12.0))
-            .rounded(px(8.0))
-            .bg(colors.surface_variant)
-            .text_color(colors.foreground_muted)
-            .text_size(px(13.0))
-            .child("安装中…")
-            .into_any_element()
+        button(text("安装中…").size(13).color(colors.foreground_muted))
+            .padding([6, 14])
+            .style(move |_theme, _status| {
+                crate::components::widgets::secondary_button_style(
+                    &colors,
+                    button::Status::Disabled,
+                )
+            })
+            .into()
     } else if downloading {
-        div()
-            .id(("market-btn", idx))
-            .py(px(6.0))
-            .px(px(12.0))
-            .rounded(px(8.0))
-            .bg(colors.surface_variant)
-            .text_color(colors.foreground_muted)
-            .text_size(px(13.0))
-            .child("下载中…")
-            .into_any_element()
+        button(text("下载中…").size(13).color(colors.foreground_muted))
+            .padding([6, 14])
+            .style(move |_theme, _status| {
+                crate::components::widgets::secondary_button_style(
+                    &colors,
+                    button::Status::Disabled,
+                )
+            })
+            .into()
     } else if installed {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .child(
-                div()
-                    .id(("market-deploy", idx))
-                    .py(px(6.0))
-                    .px(px(14.0))
-                    .rounded(px(8.0))
-                    .bg(colors.primary)
-                    .text_color(colors.on_primary)
-                    .text_size(px(13.0))
-                    .cursor_pointer()
-                    .child("部署")
-                    .on_click({
-                        let settings = settings.clone();
-                        move |_, _window, cx| {
-                            cx.update_entity(&settings, |state, cx| {
-                                if let Err(e) = state.deploy() {
-                                    state.market_schema.install_message =
-                                        Some(format!("部署失败: {}", e));
-                                }
-                                cx.notify();
-                            });
-                        }
-                    }),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(colors.foreground_muted)
-                    .child("已安装"),
-            )
-            .into_any_element()
+        row![
+            button_primary("部署", &colors, Message::DeploySchemas),
+            text("已安装").size(12).color(colors.foreground_muted),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
     } else if downloaded {
-        div()
-            .id(("market-install", idx))
-            .py(px(6.0))
-            .px(px(14.0))
-            .rounded(px(8.0))
-            .bg(colors.primary)
-            .text_color(colors.on_primary)
-            .text_size(px(13.0))
-            .cursor_pointer()
-            .child("安装")
-            .on_click({
-                let settings = settings.clone();
-                let sid = schema_id.clone();
-                move |_, _window, cx| {
-                    cx.update_entity(&settings, |state, cx| {
-                        state.install_market_schema(&sid, cx);
-                    });
-                }
-            })
-            .into_any_element()
+        button_primary("安装", &colors, Message::InstallSchema(schema_id)).into()
     } else {
-        div()
-            .id(("market-download", idx))
-            .py(px(6.0))
-            .px(px(14.0))
-            .rounded(px(8.0))
-            .bg(colors.primary)
-            .text_color(colors.on_primary)
-            .text_size(px(13.0))
-            .cursor_pointer()
-            .child("下载")
-            .on_click({
-                let settings = settings.clone();
-                let sid = schema_id.clone();
-                move |_, _window, cx| {
-                    cx.update_entity(&settings, |state, cx| {
-                        state.download_market_schema(&sid, cx);
-                    });
-                }
-            })
-            .into_any_element()
+        button_primary("下载", &colors, Message::DownloadSchema(schema_id)).into()
     }
+}
+
+fn pill<'a>(label: &str, colors: &'a ThemeColors) -> Element<'a, Message> {
+    let colors = *colors;
+    container(text(label.to_string()).size(11).color(colors.foreground_muted))
+        .padding([2, 8])
+        .style(move |_| container::Style {
+            background: Some(Background::Color(colors.surface_variant)),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: border::radius(6.0),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn format_size(s: &str) -> String {

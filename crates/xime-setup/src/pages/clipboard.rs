@@ -1,33 +1,33 @@
 #![cfg(feature = "clipboard-page")]
-use crate::components::{SettingsControl, SettingsGroup, SettingsItem, SettingsPage};
-use crate::state::SettingsState;
-use gpui::*;
+use crate::components::settings::{settings_group, settings_item, settings_page};
+use crate::components::widgets::{button_primary, label};
+use crate::state::{Message, SettingsState};
+use crate::theme::ThemeColors;
+use iced::widget::row;
+use iced::Element;
 
-pub fn render(
-    settings: Entity<SettingsState>,
-    cx: &mut Context<SettingsState>,
-) -> impl IntoElement {
-    let colors = cx.read_entity(&settings, |state, _| state.colors());
-
-    SettingsPage::new("剪贴板", colors.clone())
-        .group(
-            SettingsGroup::new("剪贴板历史", colors.clone())
-                .description("管理剪贴板历史记录")
-                .items(vec![SettingsItem::new(
+pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    settings_page(
+        "剪贴板",
+        colors,
+        vec![
+            settings_group(
+                "剪贴板历史",
+                Some("管理剪贴板历史记录"),
+                colors,
+                vec![settings_item(
                     "启用剪贴板历史",
-                    SettingsControl::label("开发中"),
-                )
-                .description("记录复制历史以便快速粘贴")]),
-        )
-        .group(SettingsGroup::new("操作", colors.clone()).items(vec![
-            SettingsItem::button("清空历史").on_click({
-                let settings = settings.clone();
-                move |_window, cx| {
-                    cx.update_entity(&settings, |state, cx| {
-                        state.deploy_message = Some("功能开发中".to_string());
-                        cx.notify();
-                    });
-                }
-            }),
-        ]))
+                    Some("记录复制历史以便快速粘贴"),
+                    colors,
+                    label("开发中", colors),
+                )],
+            ),
+            settings_group(
+                "操作",
+                None,
+                colors,
+                vec![row![button_primary("清空历史", colors, Message::ClearClipboardHistory)].into()],
+            ),
+        ],
+    )
 }

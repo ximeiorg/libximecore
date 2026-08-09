@@ -1,22 +1,8 @@
-pub mod button;
-pub mod dropdown;
-pub mod kbd;
-pub mod label;
-pub mod number_input;
-pub mod radio;
 pub mod settings;
-pub mod switch;
-pub mod title_bar;
+pub mod widgets;
 
-#[cfg(target_os = "linux")]
-pub mod text_input;
-
-pub use button::Button;
-pub use dropdown::Dropdown;
-pub use kbd::Kbd;
-pub use label::Label;
-pub use number_input::NumberInput;
-
-pub use settings::{SettingsControl, SettingsGroup, SettingsItem, SettingsPage};
-pub use switch::Switch;
-pub use title_bar::TitleBar;
+pub use settings::{settings_group, settings_item, settings_page};
+pub use widgets::{
+    badge, button_danger, button_primary, button_secondary, card_style, kbd, label, number_input,
+    switch, text_button,
+};
