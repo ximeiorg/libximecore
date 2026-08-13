@@ -1,0 +1,21 @@
+[package]
+name = "xime-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Xime Lua plugin runtime, installer and manifest (platform-agnostic)"
+repository.workspace = true
+
+[dependencies]
+mlua = { version = "0.12", features = ["lua54", "vendored", "serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_yaml.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zip = "8.6.0"
+flate2 = "1"
+ureq = "3.3.0"
+
+[features]
+default = []

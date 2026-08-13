@@ -1,6 +1,4 @@
-use crate::components::widgets::{
-    badge, button_danger, button_primary, card_style, semibold,
-};
+use crate::components::widgets::{badge, button_danger, button_primary, card_style, semibold};
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, row, text};
@@ -10,16 +8,10 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     let tab = settings.input_schema.current_tab;
     let installed_ids = settings.market_schema.installed_ids.clone();
 
-    let mut content = column![
-        text("输入方案")
-            .size(20)
-            .font(semibold())
-            .color(colors.foreground),
-        tab_bar(tab, colors),
-    ]
-    .spacing(16)
-    .padding(20)
-    .width(Length::Fill);
+    let mut content = column![header(tab, colors), tab_bar(tab, colors)]
+        .spacing(16)
+        .padding(20)
+        .width(Length::Fill);
 
     content = content.push(if tab == 0 {
         installed_tab(settings, colors)
@@ -28,6 +20,26 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     });
 
     content.into()
+}
+
+/// 页头：标题 + 右侧操作按钮（已安装 Tab 时显示「部署方案」）。
+fn header<'a>(tab: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
+    let action: Element<'a, Message> = if tab == 0 {
+        button_primary("部署方案", colors, Message::DeploySchemas).into()
+    } else {
+        container(text("")).into()
+    };
+    row![
+        text("输入方案")
+            .size(20)
+            .font(semibold())
+            .color(colors.foreground)
+            .width(Length::Fill),
+        action,
+    ]
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
+    .into()
 }
 
 /// 分段标签：已安装 / 已下载。
@@ -40,19 +52,14 @@ fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
         let is_active = i == active;
         let label = *label;
         bar = bar.push(
-            button(
-                text(label)
-                    .size(13)
-                    .color(if is_active {
-                        colors.primary
-                    } else {
-                        colors.foreground_muted
-                    }),
-            )
+            button(text(label).size(13).color(if is_active {
+                colors.primary
+            } else {
+                colors.foreground_muted
+            }))
             .padding([7, 16])
             .style(move |_theme, status| {
-                let hovered =
-                    matches!(status, button::Status::Hovered | button::Status::Pressed);
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
                 button::Style {
                     background: if is_active || hovered {
                         Some(Background::Color(colors.surface))
@@ -77,7 +84,7 @@ fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
     }
 
     container(bar)
-        .width(Length::Fill)
+        .width(Length::Shrink)
         .style(move |_| container::Style {
             background: Some(Background::Color(colors.surface_variant)),
             border: Border {
@@ -91,20 +98,21 @@ fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
 }
 
 /// 已安装方案列表 + 部署。
-fn installed_tab<'a>(
-    settings: &'a SettingsState,
-    colors: &'a ThemeColors,
-) -> Element<'a, Message> {
+fn installed_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     let colors = *colors;
     let schemas = settings.input_schema.available_schemas.clone();
     let selected = settings.input_schema.selected_schema;
 
     if schemas.is_empty() {
-        return container(text("暂无已安装的方案").size(13).color(colors.foreground_muted))
-            .width(Length::Fill)
-            .padding(24)
-            .center_x(Length::Fill)
-            .into();
+        return container(
+            text("暂无已安装的方案")
+                .size(13)
+                .color(colors.foreground_muted),
+        )
+        .width(Length::Fill)
+        .padding(24)
+        .center_x(Length::Fill)
+        .into();
     }
 
     let mut list = column![].spacing(6).width(Length::Fill);
@@ -116,15 +124,11 @@ fn installed_tab<'a>(
             format!("{} ({})", schema.name, schema.schema_id)
         };
 
-        let mut left = row![
-            text(display)
-                .size(14)
-                .color(if is_current {
-                    colors.on_primary
-                } else {
-                    colors.foreground
-                }),
-        ]
+        let mut left = row![text(display).size(14).color(if is_current {
+            colors.on_primary
+        } else {
+            colors.foreground
+        }),]
         .spacing(8)
         .align_y(Alignment::Center);
         if is_current {
@@ -134,15 +138,11 @@ fn installed_tab<'a>(
                 Color::from_rgba(1.0, 1.0, 1.0, 0.2),
             ));
         }
-        left = left.push(
-            text("设置")
-                .size(12)
-                .color(if is_current {
-                    colors.primary
-                } else {
-                    colors.foreground_muted
-                }),
-        );
+        left = left.push(text("设置").size(12).color(if is_current {
+            colors.primary
+        } else {
+            colors.foreground_muted
+        }));
 
         let row_item = button(left)
             .on_press(Message::SelectSchema(i))
@@ -150,8 +150,7 @@ fn installed_tab<'a>(
             .height(Length::Shrink)
             .padding([10, 12])
             .style(move |_theme, status| {
-                let hovered =
-                    matches!(status, button::Status::Hovered | button::Status::Pressed);
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
                 button::Style {
                     background: Some(Background::Color(if is_current {
                         colors.primary
@@ -181,13 +180,6 @@ fn installed_tab<'a>(
         list = list.push(row_item);
     }
 
-    list = list.push(
-        container(button_primary("部署方案", &colors, Message::DeploySchemas))
-            .width(Length::Fill)
-            .padding(16)
-            .center_x(Length::Fill),
-    );
-
     if let Some(msg) = &settings.market_schema.install_message {
         list = list.push(text(msg.clone()).size(12).color(colors.error));
     }
@@ -201,8 +193,12 @@ fn downloads_tab<'a>(installed_ids: &[String], colors: &'a ThemeColors) -> Eleme
 
     if pkg_ids.is_empty() {
         return column![
-            text("暂无已下载的方案包").size(14).color(colors.foreground_muted),
-            text("请前往「方案市场」下载").size(13).color(colors.foreground_muted),
+            text("暂无已下载的方案包")
+                .size(14)
+                .color(colors.foreground_muted),
+            text("请前往「扩展商店」下载")
+                .size(13)
+                .color(colors.foreground_muted),
         ]
         .spacing(8)
         .align_x(Alignment::Center)
@@ -236,9 +232,13 @@ fn package_card<'a>(
         row![
             column![
                 text(pkg_id.to_string()).size(14).color(colors.foreground),
-                text(if installed { "已安装至输入法" } else { "已下载，未安装" })
-                    .size(12)
-                    .color(colors.foreground_muted),
+                text(if installed {
+                    "已安装至输入法"
+                } else {
+                    "已下载，未安装"
+                })
+                .size(12)
+                .color(colors.foreground_muted),
             ]
             .spacing(2)
             .width(Length::Fill),

@@ -87,11 +87,54 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::DownloadSchema(id) => {
             state.settings.download_market_schema(&id);
         }
+        Message::DownloadModel(id) => {
+            state.settings.download_market_model(&id);
+        }
+        Message::DeleteModel(id) => {
+            state.settings.delete_market_model(&id);
+        }
+        Message::DownloadPlugin(id) => {
+            state.settings.download_market_plugin(&id);
+        }
+        Message::InstallPlugin(id) => {
+            state.settings.install_market_plugin(&id);
+        }
+        Message::UninstallPlugin(id) => {
+            state.settings.uninstall_market_plugin(&id);
+        }
+        Message::TogglePlugin(id, enabled) => {
+            state.settings.toggle_market_plugin(&id, enabled);
+        }
         Message::MarketRetry => {
-            state.settings.market_schema.loading = false;
-            state.settings.market_schema.error = None;
-            state.settings.market_schema.loaded = false;
-            state.settings.start_load_market();
+            state.settings.refresh_store();
+        }
+        Message::StoreTab(i) => {
+            state.settings.market_schema.store_tab = i;
+        }
+        Message::StoreTagSelected(tag) => {
+            let store = &mut state.settings.market_schema;
+            let selected = if tag.is_empty() { None } else { Some(tag) };
+            if store.store_tab == 0 {
+                store.selected_tag = selected;
+            } else if store.store_tab == 1 {
+                state.settings.market_model.selected_tag = selected;
+            } else {
+                state.settings.market_plugin.selected_tag = selected;
+            }
+        }
+        Message::SchemaVersionSelected(id, version) => {
+            state
+                .settings
+                .market_schema
+                .selected_versions
+                .insert(id, version);
+        }
+        Message::ModelVersionSelected(id, version) => {
+            state
+                .settings
+                .market_model
+                .selected_versions
+                .insert(id, version);
         }
         Message::FontSizeChanged(v) => {
             state.settings.appearance.font_size = v;
@@ -102,16 +145,14 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::CornerRadiusChanged(v) => {
             state.settings.appearance.corner_radius = v;
         }
-        Message::SaveAppearance => {
-            match state.settings.save_appearance() {
-                Ok(_) => {
-                    state.settings.deploy_message = Some("外观设置已保存并重载".to_string());
-                }
-                Err(e) => {
-                    state.settings.deploy_message = Some(format!("保存失败: {}", e));
-                }
+        Message::SaveAppearance => match state.settings.save_appearance() {
+            Ok(_) => {
+                state.settings.deploy_message = Some("外观设置已保存并重载".to_string());
             }
-        }
+            Err(e) => {
+                state.settings.deploy_message = Some(format!("保存失败: {}", e));
+            }
+        },
         #[cfg(feature = "smart-suggestion-page")]
         Message::SaveSmartSuggestion => {
             state.settings.deploy_message = Some("功能开发中".to_string());
@@ -139,8 +180,8 @@ pub fn view(state: &SettingsApp) -> Element<'_, Message> {
         .current_page
         .min(items.len().saturating_sub(1));
 
-    let mut content = column![pages::page_content(&state.settings, current, colors)]
-        .width(Length::Fill);
+    let mut content =
+        column![pages::page_content(&state.settings, current, colors)].width(Length::Fill);
 
     if let Some(msg) = &state.settings.deploy_message {
         content = content.push(pages::status_line(msg, colors));

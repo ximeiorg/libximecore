@@ -1,5 +1,8 @@
 use crate::theme::{SystemTheme, ThemeColors};
 use serde::Deserialize;
+use sha2::Digest;
+use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::sync::{Mutex, OnceLock};
 use xime_config::{
     deploy_all, get_data_dirs, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager,
@@ -9,6 +12,11 @@ use xime_config::{
 static MARKET_TASK_RESULT: OnceLock<Mutex<Option<MarketTaskResult>>> = OnceLock::new();
 static MARKET_YAML_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
 static DEPLOY_RESULT: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
+static MODEL_TASK_RESULT: OnceLock<Mutex<Option<ModelTaskResult>>> = OnceLock::new();
+static MODEL_YAML_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
+static PLUGIN_TASK_RESULT: OnceLock<Mutex<Option<PluginTaskResult>>> = OnceLock::new();
+static PLUGIN_YAML_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
+static DOWNLOAD_PROGRESS: OnceLock<Mutex<Option<(String, f32)>>> = OnceLock::new();
 
 fn market_task_result() -> &'static Mutex<Option<MarketTaskResult>> {
     MARKET_TASK_RESULT.get_or_init(|| Mutex::new(None))
@@ -22,11 +30,46 @@ fn deploy_result() -> &'static Mutex<Option<Result<(), String>>> {
     DEPLOY_RESULT.get_or_init(|| Mutex::new(None))
 }
 
+fn model_task_result() -> &'static Mutex<Option<ModelTaskResult>> {
+    MODEL_TASK_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+fn model_yaml_result() -> &'static Mutex<Option<Result<String, String>>> {
+    MODEL_YAML_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+fn plugin_task_result() -> &'static Mutex<Option<PluginTaskResult>> {
+    PLUGIN_TASK_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+fn plugin_yaml_result() -> &'static Mutex<Option<Result<String, String>>> {
+    PLUGIN_YAML_RESULT.get_or_init(|| Mutex::new(None))
+}
+
+/// 下载进度（任务 id, 0.0~1.0），由下载线程更新、UI 轮询取走。
+fn download_progress() -> &'static Mutex<Option<(String, f32)>> {
+    DOWNLOAD_PROGRESS.get_or_init(|| Mutex::new(None))
+}
+
 enum MarketTaskResult {
     DownloadDone(String),
     InstallDone(String),
     UninstallDone(String),
     DeleteDone(String),
+    Error(String),
+}
+
+enum ModelTaskResult {
+    DownloadDone(String),
+    DeleteDone(String),
+    Error(String),
+}
+
+enum PluginTaskResult {
+    DownloadDone(String),
+    InstallDone(String),
+    UninstallDone(String),
+    ToggleDone(String, bool),
     Error(String),
 }
 
@@ -103,8 +146,28 @@ pub enum Message {
     UninstallSchema(String),
     /// 方案市场：下载方案。
     DownloadSchema(String),
-    /// 方案市场：加载失败后重试。
+    /// 扩展商店：下载模型。
+    DownloadModel(String),
+    /// 扩展商店：删除本地已下载的模型。
+    DeleteModel(String),
+    /// 扩展商店：下载插件包。
+    DownloadPlugin(String),
+    /// 扩展商店：安装已下载的插件包。
+    InstallPlugin(String),
+    /// 扩展商店：卸载插件。
+    UninstallPlugin(String),
+    /// 扩展商店：启用 / 禁用插件。
+    TogglePlugin(String, bool),
+    /// 扩展商店：方案市场 / 模型市场加载失败后重试。
     MarketRetry,
+    /// 扩展商店：切换「方案 / 模型」Tab。
+    StoreTab(usize),
+    /// 扩展商店：分类筛选（"" 表示全部）。
+    StoreTagSelected(String),
+    /// 扩展商店：选择方案版本。
+    SchemaVersionSelected(String, String),
+    /// 扩展商店：选择模型版本。
+    ModelVersionSelected(String, String),
     /// 外观：字号变更。
     FontSizeChanged(f64),
     /// 外观：候选词数量变更。
@@ -131,6 +194,8 @@ pub struct SettingsState {
     pub deploy_message: Option<String>,
     pub schemas_loaded: bool,
     pub market_schema: MarketSchemaState,
+    pub market_model: MarketModelState,
+    pub market_plugin: MarketPluginState,
     pub current_page: usize,
     #[cfg(feature = "smart-suggestion-page")]
     pub smart_suggestion: SmartSuggestionState,
@@ -154,6 +219,8 @@ impl SettingsState {
             appearance: AppearanceState::default(),
             input_schema: InputSchemaState::default(),
             market_schema: MarketSchemaState::default(),
+            market_model: MarketModelState::default(),
+            market_plugin: MarketPluginState::default(),
             system_theme: SystemTheme::detect(),
             deploy_message: None,
             schemas_loaded: false,
@@ -171,6 +238,8 @@ impl SettingsState {
         state.load_schemas();
         state.load_schema_config();
         state.start_load_market();
+        state.start_load_models();
+        state.start_load_plugins();
         state
     }
 
@@ -357,7 +426,7 @@ impl SettingsState {
         }
     }
 
-    // ---- 方案市场 ----
+    // ---- 扩展商店：方案市场 ----
 
     pub fn start_load_market(&mut self) {
         if self.market_schema.loaded || self.market_schema.loading {
@@ -389,22 +458,21 @@ impl SettingsState {
             return false;
         };
         match result {
-            Ok(text) => {
-                match serde_yaml::from_str::<SchemaIndex>(&text) {
-                    Ok(index) => {
-                        self.market_schema.installed_ids = self.get_installed_schema_ids();
-                        self.market_schema.downloaded_ids = self.get_cached_schema_ids();
-                        self.market_schema.schemas = index.schemas;
-                        self.market_schema.loaded = true;
-                        self.market_schema.loading = false;
-                        self.market_schema.error = None;
-                    }
-                    Err(e) => {
-                        self.market_schema.loading = false;
-                        self.market_schema.error = Some(format!("解析失败: {}", e));
-                    }
+            Ok(text) => match serde_yaml::from_str::<SchemaIndex>(&text) {
+                Ok(index) => {
+                    self.market_schema.installed_ids = self.get_installed_schema_ids();
+                    self.market_schema.downloaded_ids = self.get_cached_schema_ids();
+                    self.market_schema.schemas = index.schemas;
+                    self.market_schema.updated_at = index.updated_at;
+                    self.market_schema.loaded = true;
+                    self.market_schema.loading = false;
+                    self.market_schema.error = None;
                 }
-            }
+                Err(e) => {
+                    self.market_schema.loading = false;
+                    self.market_schema.error = Some(format!("解析失败: {}", e));
+                }
+            },
             Err(e) => {
                 self.market_schema.loading = false;
                 self.market_schema.error = Some(e);
@@ -445,11 +513,289 @@ impl SettingsState {
         true
     }
 
+    /// 轮询扩展商店下载进度（方案 / 模型通用）。返回是否有变化。
+    fn poll_download_progress(&mut self) -> bool {
+        let result = download_progress().lock().unwrap().take();
+        let Some((id, progress)) = result else {
+            return false;
+        };
+        if self.market_schema.downloading.as_deref() == Some(&id) {
+            self.market_schema.download_progress = Some(progress);
+        }
+        if self.market_model.downloading.as_deref() == Some(&id) {
+            self.market_model.download_progress = Some(progress);
+        }
+        true
+    }
+
+    // ---- 扩展商店：模型市场 ----
+
+    pub fn start_load_models(&mut self) {
+        if self.market_model.loaded || self.market_model.loading {
+            return;
+        }
+        self.market_model.loading = true;
+
+        std::thread::spawn(|| {
+            let result = (|| -> Result<String, String> {
+                ureq::get("https://index.ximei.me/models/index.yaml")
+                    .call()
+                    .map_err(|e| format!("网络请求失败: {}", e))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| format!("读取响应失败: {}", e))
+            })();
+
+            *model_yaml_result().lock().unwrap() = Some(result);
+        });
+    }
+
+    /// 轮询模型索引结果。返回是否有变化。
+    pub fn poll_model_yaml(&mut self) -> bool {
+        if !self.market_model.loading {
+            return false;
+        }
+        let result = model_yaml_result().lock().unwrap().take();
+        let Some(result) = result else {
+            return false;
+        };
+        match result {
+            Ok(text) => match serde_yaml::from_str::<ModelIndex>(&text) {
+                Ok(index) => {
+                    self.market_model.downloaded_ids = self.get_cached_model_ids();
+                    self.market_model.models = index.models;
+                    self.market_model.updated_at = index.updated_at;
+                    self.market_model.loaded = true;
+                    self.market_model.loading = false;
+                    self.market_model.error = None;
+                }
+                Err(e) => {
+                    self.market_model.loading = false;
+                    self.market_model.error = Some(format!("解析失败: {}", e));
+                }
+            },
+            Err(e) => {
+                self.market_model.loading = false;
+                self.market_model.error = Some(e);
+            }
+        }
+        true
+    }
+
+    /// 轮询模型市场后台任务结果。返回是否有变化。
+    pub fn poll_model_task(&mut self) -> bool {
+        let result = model_task_result().lock().unwrap().take();
+        let Some(result) = result else {
+            return false;
+        };
+        match result {
+            ModelTaskResult::DownloadDone(id) => {
+                if !self.market_model.downloaded_ids.contains(&id) {
+                    self.market_model.downloaded_ids.push(id);
+                }
+            }
+            ModelTaskResult::DeleteDone(id) => {
+                self.market_model.downloaded_ids.retain(|i| i != &id);
+            }
+            ModelTaskResult::Error(e) => {
+                self.market_model.install_message = Some(e);
+            }
+        }
+        self.market_model.downloading = None;
+        self.market_model.download_progress = None;
+        true
+    }
+
     /// 统一回收后台任务结果（由轮询订阅调用）。
     pub fn poll_background(&mut self) {
         self.poll_deploy();
         self.poll_market_yaml();
+        self.poll_model_yaml();
+        self.poll_plugin_yaml();
         self.poll_market_task();
+        self.poll_model_task();
+        self.poll_plugin_task();
+        self.poll_download_progress();
+    }
+
+    /// 重新加载扩展商店（方案 + 模型索引）。
+    pub fn refresh_store(&mut self) {
+        self.market_schema.loaded = false;
+        self.market_schema.loading = false;
+        self.market_schema.error = None;
+        self.start_load_market();
+        self.market_model.loaded = false;
+        self.market_model.loading = false;
+        self.market_model.error = None;
+        self.start_load_models();
+        self.market_plugin.loaded = false;
+        self.market_plugin.loading = false;
+        self.market_plugin.error = None;
+        self.start_load_plugins();
+    }
+
+    // ---- 扩展商店：插件市场 ----
+
+    pub fn start_load_plugins(&mut self) {
+        if self.market_plugin.loaded || self.market_plugin.loading {
+            return;
+        }
+        self.market_plugin.loading = true;
+
+        std::thread::spawn(|| {
+            let result = (|| -> Result<String, String> {
+                ureq::get("https://index.ximei.me/plugins/index.yaml")
+                    .call()
+                    .map_err(|e| format!("网络请求失败: {}", e))?
+                    .into_body()
+                    .read_to_string()
+                    .map_err(|e| format!("读取响应失败: {}", e))
+            })();
+
+            *plugin_yaml_result().lock().unwrap() = Some(result);
+        });
+    }
+
+    /// 轮询插件索引结果。返回是否有变化。
+    pub fn poll_plugin_yaml(&mut self) -> bool {
+        if !self.market_plugin.loading {
+            return false;
+        }
+        let result = plugin_yaml_result().lock().unwrap().take();
+        let Some(result) = result else {
+            return false;
+        };
+        match result {
+            Ok(text) => match serde_yaml::from_str::<PluginIndex>(&text) {
+                Ok(index) => {
+                    self.market_plugin.installed = self.installed_plugins();
+                    self.market_plugin.plugins = index.plugins;
+                    self.market_plugin.updated_at = index.updated_at;
+                    self.market_plugin.loaded = true;
+                    self.market_plugin.loading = false;
+                    self.market_plugin.error = None;
+                }
+                Err(e) => {
+                    self.market_plugin.loading = false;
+                    self.market_plugin.error = Some(format!("解析失败: {}", e));
+                }
+            },
+            Err(e) => {
+                self.market_plugin.loading = false;
+                self.market_plugin.error = Some(e);
+            }
+        }
+        true
+    }
+
+    /// 轮询插件市场后台任务结果。返回是否有变化。
+    pub fn poll_plugin_task(&mut self) -> bool {
+        let result = plugin_task_result().lock().unwrap().take();
+        let Some(result) = result else {
+            return false;
+        };
+        match result {
+            PluginTaskResult::DownloadDone(id) => {
+                self.market_plugin.downloaded_ids.push(id);
+            }
+            PluginTaskResult::InstallDone(id) => {
+                self.market_plugin.installed = self.installed_plugins();
+                self.market_plugin.downloaded_ids.retain(|i| i != &id);
+            }
+            PluginTaskResult::UninstallDone(id) => {
+                self.market_plugin.installed = self.installed_plugins();
+                self.market_plugin.downloaded_ids.retain(|i| i != &id);
+            }
+            PluginTaskResult::ToggleDone(id, enabled) => {
+                if let Some(p) = self.market_plugin.installed.iter_mut().find(|p| p.id == id) {
+                    p.enabled = enabled;
+                }
+            }
+            PluginTaskResult::Error(e) => {
+                self.market_plugin.install_message = Some(e);
+            }
+        }
+        self.market_plugin.downloading = None;
+        self.market_plugin.installing = None;
+        true
+    }
+
+    pub fn download_market_plugin(&mut self, plugin_id: &str) {
+        if self.market_plugin.downloading.is_some() || self.market_plugin.installing.is_some() {
+            return;
+        }
+
+        let plugin = match self
+            .market_plugin
+            .plugins
+            .iter()
+            .find(|p| p.id == plugin_id)
+        {
+            Some(p) => p.clone(),
+            None => return,
+        };
+
+        self.market_plugin.downloading = Some(plugin_id.to_string());
+        self.market_plugin.download_progress = None;
+        self.market_plugin.install_message = None;
+
+        std::thread::spawn(move || {
+            let result = do_download_plugin(&plugin);
+            let task = match result {
+                Ok(()) => PluginTaskResult::DownloadDone(plugin.id.clone()),
+                Err(e) => PluginTaskResult::Error(e.to_string()),
+            };
+            *plugin_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
+    pub fn install_market_plugin(&mut self, plugin_id: &str) {
+        if self.market_plugin.installing.is_some() || self.market_plugin.downloading.is_some() {
+            return;
+        }
+
+        self.market_plugin.installing = Some(plugin_id.to_string());
+        self.market_plugin.install_message = None;
+
+        let pid = plugin_id.to_string();
+        std::thread::spawn(move || {
+            let result = do_install_plugin(&pid);
+            let task = match result {
+                Ok(()) => PluginTaskResult::InstallDone(pid),
+                Err(e) => PluginTaskResult::Error(e.to_string()),
+            };
+            *plugin_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
+    pub fn uninstall_market_plugin(&mut self, plugin_id: &str) {
+        let pid = plugin_id.to_string();
+        std::thread::spawn(move || {
+            let result = plugin_manager().uninstall(&pid).map_err(|e| e.to_string());
+            let task = match result {
+                Ok(()) => PluginTaskResult::UninstallDone(pid),
+                Err(e) => PluginTaskResult::Error(e),
+            };
+            *plugin_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
+    pub fn toggle_market_plugin(&mut self, plugin_id: &str, enabled: bool) {
+        let pid = plugin_id.to_string();
+        std::thread::spawn(move || {
+            let result = plugin_manager()
+                .set_enabled(&pid, enabled)
+                .map_err(|e| e.to_string());
+            let task = match result {
+                Ok(()) => PluginTaskResult::ToggleDone(pid, enabled),
+                Err(e) => PluginTaskResult::Error(e),
+            };
+            *plugin_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
+    fn installed_plugins(&self) -> Vec<xime_plugin::PluginRecord> {
+        plugin_manager().list()
     }
 
     pub fn download_market_schema(&mut self, schema_id: &str) {
@@ -457,12 +803,18 @@ impl SettingsState {
             return;
         }
 
-        let schema = match self.market_schema.schemas.iter().find(|s| s.id == schema_id) {
+        let schema = match self
+            .market_schema
+            .schemas
+            .iter()
+            .find(|s| s.id == schema_id)
+        {
             Some(s) => s.clone(),
             None => return,
         };
 
         self.market_schema.downloading = Some(schema_id.to_string());
+        self.market_schema.download_progress = None;
         self.market_schema.install_message = None;
 
         std::thread::spawn(move || {
@@ -523,6 +875,43 @@ impl SettingsState {
         });
     }
 
+    pub fn download_market_model(&mut self, model_id: &str) {
+        if self.market_model.downloading.is_some() {
+            return;
+        }
+
+        let model = match self.market_model.models.iter().find(|m| m.id == model_id) {
+            Some(m) => m.clone(),
+            None => return,
+        };
+
+        self.market_model.downloading = Some(model_id.to_string());
+        self.market_model.download_progress = None;
+        self.market_model.install_message = None;
+
+        std::thread::spawn(move || {
+            let result = do_download_model(&model);
+            let task = match result {
+                Ok(()) => ModelTaskResult::DownloadDone(model.id.clone()),
+                Err(e) => ModelTaskResult::Error(e.to_string()),
+            };
+            *model_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
+    pub fn delete_market_model(&mut self, model_id: &str) {
+        if self.market_model.downloading.as_deref() == Some(model_id) {
+            return;
+        }
+        let mid = model_id.to_string();
+        std::thread::spawn(move || {
+            let model_dir = models_dir().join(&mid);
+            let _ = std::fs::remove_dir_all(&model_dir);
+            let task = ModelTaskResult::DeleteDone(mid);
+            *model_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
     // ---- 私有辅助 ----
 
     fn get_installed_schema_ids(&self) -> Vec<String> {
@@ -538,22 +927,66 @@ impl SettingsState {
     }
 
     fn get_cached_schema_ids(&self) -> Vec<String> {
-        let dir = cache_dir();
-        if !dir.exists() {
-            return Vec::new();
-        }
-        let mut ids = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        ids.push(name.to_string());
-                    }
-                }
+        scan_dir_ids(&cache_dir())
+    }
+
+    fn get_cached_model_ids(&self) -> Vec<String> {
+        scan_dir_ids(&models_dir())
+    }
+}
+
+/// 扫描目录下的子目录名（跳过隐藏项），作为已下载/已缓存列表。
+fn scan_dir_ids(dir: &std::path::Path) -> Vec<String> {
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let mut ids = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if entry.path().is_dir() {
+                ids.push(name);
             }
         }
-        ids
     }
+    ids
+}
+
+/// 模型下载目录：~/.config/xime/models/<id>/。
+fn models_dir() -> std::path::PathBuf {
+    let (_, user_data_dir) = get_data_dirs();
+    user_data_dir
+        .parent()
+        .map(|p| p.join("models"))
+        .unwrap_or_else(|| {
+            let base = std::env::var("LOCALAPPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir());
+            base.join("xime").join("models")
+        })
+}
+
+/// 插件安装目录根：~/.config/xime/plugins/。
+fn plugins_dir() -> std::path::PathBuf {
+    let (_, user_data_dir) = get_data_dirs();
+    user_data_dir
+        .parent()
+        .map(|p| p.join("plugins"))
+        .unwrap_or_else(|| {
+            let base = std::env::var("LOCALAPPDATA")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir());
+            base.join("xime").join("plugins")
+        })
+}
+
+/// 构建插件管理器（注册表/配置都在 plugins 目录下）。
+fn plugin_manager() -> xime_plugin::PluginManager {
+    xime_plugin::PluginManager::new(plugins_dir())
 }
 
 #[cfg(feature = "smart-suggestion-page")]
@@ -622,8 +1055,104 @@ pub struct MarketSchemaState {
     pub installed_ids: Vec<String>,
     pub downloaded_ids: Vec<String>,
     pub downloading: Option<String>,
+    pub download_progress: Option<f32>,
     pub installing: Option<String>,
     pub install_message: Option<String>,
+    /// 扩展商店当前 Tab（0=方案, 1=模型）。
+    pub store_tab: usize,
+    /// 分类筛选（None=全部）。
+    pub selected_tag: Option<String>,
+    /// 每个方案选中的版本。
+    pub selected_versions: HashMap<String, String>,
+    /// 索引更新时间。
+    pub updated_at: String,
+}
+
+#[derive(Clone, Default)]
+pub struct MarketModelState {
+    pub models: Vec<MarketModel>,
+    pub loaded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub downloaded_ids: Vec<String>,
+    pub downloading: Option<String>,
+    pub download_progress: Option<f32>,
+    pub install_message: Option<String>,
+    /// 分类筛选（None=全部）。
+    pub selected_tag: Option<String>,
+    /// 每个模型选中的版本。
+    pub selected_versions: HashMap<String, String>,
+    /// 索引更新时间。
+    pub updated_at: String,
+}
+
+#[derive(Clone, Default)]
+pub struct MarketPluginState {
+    pub plugins: Vec<MarketPlugin>,
+    pub loaded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// 本地已安装插件（来自 xime-plugin registry）。
+    pub installed: Vec<xime_plugin::PluginRecord>,
+    pub downloaded_ids: Vec<String>,
+    pub downloading: Option<String>,
+    pub download_progress: Option<f32>,
+    pub installing: Option<String>,
+    pub install_message: Option<String>,
+    /// 分类筛选（None=全部）。
+    pub selected_tag: Option<String>,
+    /// 索引更新时间。
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PluginIndex {
+    pub index_version: u32,
+    pub updated_at: String,
+    #[serde(default)]
+    pub plugins: Vec<MarketPlugin>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketPlugin {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(rename = "type", default)]
+    pub plugin_type: String,
+    #[serde(rename = "pluginType", default)]
+    pub plugin_kind: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub homepage: Option<String>,
+    #[serde(rename = "currentVersion")]
+    pub current_version: Option<String>,
+    #[serde(default)]
+    pub versions: Vec<MarketPluginVersion>,
+    #[serde(rename = "appVersion", default)]
+    pub app_version: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketPluginVersion {
+    pub version: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub changelog: Option<String>,
+    #[serde(rename = "downloadUrl", default)]
+    pub download_url: Vec<MarketDownloadUrl>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -677,28 +1206,93 @@ pub struct MarketDownloadUrl {
     pub sha256: Option<String>,
     #[serde(default)]
     pub size: Option<String>,
+    #[serde(rename = "sizeBytes", default)]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ModelIndex {
+    pub index_version: u32,
+    pub updated_at: String,
     #[serde(default)]
+    pub models: Vec<MarketModel>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketModel {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub description: String,
+    /// prediction / handwriting / asr / other
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub size: String,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub model_type: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub homepage: Option<String>,
+    #[serde(rename = "currentVersion")]
+    pub current_version: Option<String>,
+    #[serde(default)]
+    pub versions: Vec<MarketModelVersion>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketModelVersion {
+    pub version: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub changelog: Option<String>,
+    #[serde(default)]
+    pub files: Vec<MarketModelFile>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MarketModelFile {
+    pub name: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(rename = "sizeBytes", default)]
     pub size_bytes: Option<u64>,
 }
 
 // ---- installation helpers ----
 
-fn get_download_info(schema: &MarketSchema) -> Option<(String, String)> {
+fn get_download_info(schema: &MarketSchema) -> Option<(&MarketDownloadUrl, String)> {
     let version = schema.current_version.as_deref().unwrap_or("latest");
     let info = schema
         .versions
         .iter()
         .find(|v| v.version == version || version == "latest")
         .or_else(|| schema.versions.first())?;
-    let url = info.download_url.first()?;
-    let ext = if url.url.ends_with(".zip") {
+    let download = info.download_url.first()?;
+    let ext = if download.url.ends_with(".zip") {
         ".zip"
-    } else if url.url.ends_with(".tar.gz") {
+    } else if download.url.ends_with(".tar.gz") {
         ".tar.gz"
     } else {
         return None;
     };
-    Some((url.url.clone(), format!("{}{}", version, ext)))
+    Some((download, format!("{}{}", version, ext)))
 }
 
 fn do_uninstall(schema_id: &str) -> anyhow::Result<()> {
@@ -713,8 +1307,7 @@ fn do_uninstall(schema_id: &str) -> anyhow::Result<()> {
         struct Entry {
             files: Vec<String>,
         }
-        let registry: std::collections::HashMap<String, Entry> =
-            serde_yaml::from_str(&content)?;
+        let registry: std::collections::HashMap<String, Entry> = serde_yaml::from_str(&content)?;
         registry
             .get(schema_id)
             .map(|e| e.files.clone())
@@ -758,19 +1351,151 @@ fn do_uninstall(schema_id: &str) -> anyhow::Result<()> {
 }
 
 fn do_download(schema: &MarketSchema) -> anyhow::Result<()> {
-    let (url, filename) = get_download_info(schema)
-        .ok_or_else(|| anyhow::anyhow!("无可用下载地址或不支持的格式"))?;
+    let (download, filename) =
+        get_download_info(schema).ok_or_else(|| anyhow::anyhow!("无可用下载地址或不支持的格式"))?;
 
     let dest_dir = cache_dir().join(&schema.id);
     std::fs::create_dir_all(&dest_dir)?;
 
-    let bytes = ureq::get(&url)
-        .call()?
-        .into_body()
-        .read_to_vec()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let dest = dest_dir.join(&filename);
+    download_file(
+        &download.url,
+        &dest,
+        download.sha256.as_deref(),
+        |progress| {
+            *download_progress().lock().unwrap() = Some((schema.id.clone(), progress as f32));
+        },
+    )?;
+    Ok(())
+}
 
-    std::fs::write(dest_dir.join(&filename), &bytes)?;
+fn do_download_model(model: &MarketModel) -> anyhow::Result<()> {
+    let version = model
+        .versions
+        .iter()
+        .find(|v| Some(v.version.as_str()) == model.current_version.as_deref())
+        .or_else(|| model.versions.first())
+        .ok_or_else(|| anyhow::anyhow!("无可用版本"))?;
+    anyhow::ensure!(
+        !version.files.is_empty(),
+        "无可用下载文件（version: {}）",
+        version.version
+    );
+
+    let dest_dir = models_dir().join(&model.id);
+    std::fs::create_dir_all(&dest_dir)?;
+
+    let total_bytes: u64 = version
+        .files
+        .iter()
+        .map(|f| f.size_bytes.unwrap_or(0))
+        .sum();
+
+    let mut accumulated: u64 = 0;
+    for file in &version.files {
+        anyhow::ensure!(!file.url.is_empty(), "缺少下载地址（{}）", file.name);
+        let dest = dest_dir.join(&file.name);
+        let file_bytes = file.size_bytes.unwrap_or(0);
+        let sha256 = file.sha256.as_deref();
+        download_file(&file.url, &dest, sha256, |progress| {
+            let overall = accumulated as f64 / total_bytes.max(1) as f64
+                + progress * file_bytes as f64 / total_bytes.max(1) as f64;
+            *download_progress().lock().unwrap() = Some((model.id.clone(), overall as f32));
+        })?;
+        accumulated += file_bytes;
+    }
+    Ok(())
+}
+
+/// 下载插件 .xipk 到市场缓存（market/<id>.xipk，文件非目录，避免与方案缓存混淆）。
+fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<()> {
+    let version = plugin
+        .versions
+        .iter()
+        .find(|v| Some(v.version.as_str()) == plugin.current_version.as_deref())
+        .or_else(|| plugin.versions.first())
+        .ok_or_else(|| anyhow::anyhow!("无可用版本"))?;
+    let download = version
+        .download_url
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("缺少下载地址"))?;
+    anyhow::ensure!(!download.url.is_empty(), "缺少下载地址");
+
+    let dest = cache_dir().join(format!("{}.xipk", plugin.id));
+    download_file(
+        &download.url,
+        &dest,
+        download.sha256.as_deref(),
+        |progress| {
+            *download_progress().lock().unwrap() = Some((plugin.id.clone(), progress as f32));
+        },
+    )?;
+    Ok(())
+}
+
+/// 从市场缓存安装插件包。
+fn do_install_plugin(plugin_id: &str) -> anyhow::Result<()> {
+    let xipk = cache_dir().join(format!("{plugin_id}.xipk"));
+    anyhow::ensure!(xipk.exists(), "未找到缓存的插件包，请先下载");
+
+    let manager = plugin_manager();
+    manager
+        .install_from_zip(&xipk, true)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    std::fs::remove_file(&xipk).ok();
+    Ok(())
+}
+
+/// 下载单个文件到 dest，可选 sha256 校验；进度经回调上报（0.0~1.0）。
+fn download_file(
+    url: &str,
+    dest: &std::path::Path,
+    sha256: Option<&str>,
+    on_progress: impl Fn(f64),
+) -> anyhow::Result<()> {
+    let mut response = ureq::get(url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("网络请求失败: {}", e))?;
+    let total = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let mut reader = response.body_mut().as_reader();
+    let mut hasher = sha256.map(|_| sha2::Sha256::new());
+    let mut output =
+        std::fs::File::create(dest).map_err(|e| anyhow::anyhow!("创建文件失败: {}", e))?;
+
+    let mut buf = [0u8; 8192];
+    let mut done: u64 = 0;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| anyhow::anyhow!("读取响应失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        if let Some(h) = &mut hasher {
+            h.update(&buf[..n]);
+        }
+        output
+            .write_all(&buf[..n])
+            .map_err(|e| anyhow::anyhow!("写入文件失败: {}", e))?;
+        done += n as u64;
+        if total > 0 {
+            on_progress(done as f64 / total as f64);
+        }
+    }
+
+    if let (Some(h), Some(expected)) = (hasher, sha256) {
+        let actual = hex::encode(h.finalize());
+        if !actual.eq_ignore_ascii_case(expected.trim()) {
+            std::fs::remove_file(dest).ok();
+            anyhow::bail!("文件校验失败（sha256 不匹配），文件可能不完整");
+        }
+    }
     Ok(())
 }
 
@@ -794,7 +1519,11 @@ fn do_install(schema_id: &str) -> anyhow::Result<()> {
     }
     std::fs::create_dir_all(&temp_dir)?;
 
-    let filename = archive_path.file_name().unwrap().to_string_lossy().to_string();
+    let filename = archive_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     if filename.ends_with(".zip") {
         extract_zip(&archive_path, &temp_dir)?;
     } else {
@@ -803,7 +1532,10 @@ fn do_install(schema_id: &str) -> anyhow::Result<()> {
 
     let (_, user_data_dir) = get_data_dirs();
     let schema_files = find_schema_files(&temp_dir);
-    anyhow::ensure!(!schema_files.is_empty(), "未在下载包中找到 .schema.yaml 文件");
+    anyhow::ensure!(
+        !schema_files.is_empty(),
+        "未在下载包中找到 .schema.yaml 文件"
+    );
 
     for path in &schema_files {
         let name = path.file_name().unwrap();
@@ -820,9 +1552,7 @@ fn do_install(schema_id: &str) -> anyhow::Result<()> {
             .set_schema_list(&[schema_id])
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     }
-    manager
-        .save()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    manager.save().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
     notify_daemon_reload();
@@ -888,4 +1618,143 @@ fn find_schema_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MODEL_INDEX_YAML: &str = r#"
+index_version: 1
+updated_at: '2026-08-12'
+models:
+- id: predictive-text-small
+  name: 智能联想模型 small 版本
+  author: kingzcheung
+  description: 基于 ONNX 的 AI 联想词预测模型
+  category: prediction
+  size: 18.9 MB
+  type: remote
+  tags: [联想, AI, ONNX]
+  homepage: https://github.com/ximeiorg/predictive-text
+  currentVersion: v1.0
+  versions:
+  - version: v1.0
+    date: '2026-08-01'
+    changelog: 初始版本
+    files:
+    - name: vocab.json
+      url: https://example.com/vocab.json
+      sha256: 3f7a6aa773afe6dacf75701f7861257d36a46a26ac70c0f8ee6dd4032cc3b9c2
+      size: 137.8 KB
+      sizeBytes: 141139
+    - name: model_int8_dynamic.onnx
+      url: https://example.com/model.onnx
+      sha256: e15009c84d9702056ba8b5f6c04b27ae7d0400167647a5e94cb699f24f885a9d
+      size: 34.7 MB
+      sizeBytes: 36353598
+- id: ochwpro
+  name: 手写模型
+  category: handwriting
+  size: 6.7 MB
+  currentVersion: v1.0
+  versions:
+  - version: v1.0
+    files:
+    - name: ochwpro.onnx
+      url: https://example.com/ochwpro.onnx
+"#;
+
+    #[test]
+    fn parse_model_index() {
+        let index: ModelIndex = serde_yaml::from_str(MODEL_INDEX_YAML).unwrap();
+        assert_eq!(index.updated_at, "2026-08-12");
+        assert_eq!(index.models.len(), 2);
+
+        let model = &index.models[0];
+        assert_eq!(model.id, "predictive-text-small");
+        assert_eq!(model.category, "prediction");
+        assert_eq!(model.current_version.as_deref(), Some("v1.0"));
+        assert_eq!(model.versions[0].files.len(), 2);
+        let file = &model.versions[0].files[0];
+        assert_eq!(file.name, "vocab.json");
+        assert_eq!(file.size_bytes, Some(141139));
+        assert_eq!(
+            file.sha256.as_deref(),
+            Some("3f7a6aa773afe6dacf75701f7861257d36a46a26ac70c0f8ee6dd4032cc3b9c2")
+        );
+
+        let handwriting = &index.models[1];
+        assert_eq!(handwriting.category, "handwriting");
+        assert_eq!(handwriting.author, "");
+        assert!(handwriting.versions[0].files[0].sha256.is_none());
+    }
+
+    const SCHEMA_INDEX_YAML: &str = r#"
+index_version: 1
+updated_at: '2026-08-12'
+schemas:
+- id: rime-frost
+  name: 白霜拼音
+  author: gaboolic
+  description: 白霜拼音
+  type: remote
+  tags: [拼音, 双拼]
+  dependencies: [luna_pinyin]
+  currentVersion: 1.0.4
+  versions:
+  - version: 1.0.4
+    date: '2026-07-10'
+    downloadUrl:
+    - url: https://github.com/gaboolic/rime-frost/releases/download/1.0.4/rime-frost-schemas.zip
+      sha256: 4f4998ae83f63d757c0a4ace192f69d48265bddfabe231642b73e3739ed0f2f5
+      size: 42 MB
+"#;
+
+    #[test]
+    fn parse_schema_index_and_pick_download() {
+        let index: SchemaIndex = serde_yaml::from_str(SCHEMA_INDEX_YAML).unwrap();
+        assert_eq!(index.schemas.len(), 1);
+
+        let schema = &index.schemas[0];
+        assert_eq!(schema.schema_type, "remote");
+        assert_eq!(schema.tags, vec!["拼音".to_string(), "双拼".to_string()]);
+        assert_eq!(schema.current_version.as_deref(), Some("1.0.4"));
+
+        let (download, filename) = get_download_info(schema).unwrap();
+        assert_eq!(
+            download.url,
+            "https://github.com/gaboolic/rime-frost/releases/download/1.0.4/rime-frost-schemas.zip"
+        );
+        assert_eq!(
+            download.sha256.as_deref(),
+            Some("4f4998ae83f63d757c0a4ace192f69d48265bddfabe231642b73e3739ed0f2f5")
+        );
+        assert_eq!(filename, "1.0.4.zip");
+    }
+
+    #[test]
+    fn scan_dir_ids_skips_hidden_and_files() {
+        let dir = std::env::temp_dir().join(format!("xime_scan_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("model-a")).unwrap();
+        std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+        std::fs::create_dir_all(dir.join("model-b")).unwrap();
+        std::fs::write(dir.join("plain-file"), b"x").unwrap();
+
+        let mut ids = scan_dir_ids(&dir);
+        ids.sort();
+        assert_eq!(ids, vec!["model-a".to_string(), "model-b".to_string()]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn format_size_helper() {
+        assert_eq!(crate::pages::store::format_size("42 MB"), "42 mb");
+        assert_eq!(crate::pages::store::format_size("7001270"), "6.7 MB");
+        assert_eq!(crate::pages::store::format_size("1024"), "1024 B");
+        assert_eq!(crate::pages::store::format_size("2048"), "2.0 KB");
+        assert_eq!(crate::pages::store::format_size("500"), "500 B");
+    }
 }

@@ -3,7 +3,7 @@ pub mod appearance;
 pub mod dictionary;
 pub mod hotkeys;
 pub mod input_schema;
-pub mod schema_market;
+pub mod store;
 
 #[cfg(feature = "clipboard-page")]
 pub mod clipboard;
@@ -14,14 +14,10 @@ pub mod smart_suggestion;
 #[cfg(target_os = "linux")]
 pub mod sync;
 
-use crate::components::widgets::{
-    nav_button_style, scroll_style, semibold, sidebar_style,
-};
+use crate::components::widgets::{nav_button_style, scroll_style, semibold, sidebar_style};
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
-use iced::widget::{
-    button, column, container, row, scrollable, svg, text, Space,
-};
+use iced::widget::{button, column, container, row, scrollable, svg, text, Space};
 use iced::{border, Alignment, Background, Border, Element, Length};
 
 pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
@@ -30,7 +26,7 @@ pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
         ("icons/palette.svg", "外观"),
         ("icons/command.svg", "快捷键"),
         ("icons/word.svg", "词典"),
-        ("icons/download.svg", "方案市场"),
+        ("icons/store.svg", "扩展商店"),
     ];
 
     #[cfg(feature = "smart-suggestion-page")]
@@ -64,7 +60,7 @@ pub fn sidebar(current: usize, colors: &ThemeColors) -> Element<'static, Message
     .padding([20, 14]);
 
     for (i, (icon_path, name)) in items.iter().enumerate() {
-        nav = nav.push(nav_button(*icon_path, *name, i, i == current, &colors));
+        nav = nav.push(nav_button(icon_path, name, i, i == current, &colors));
     }
 
     container(nav)
@@ -86,7 +82,10 @@ fn brand(colors: &ThemeColors) -> Element<'static, Message> {
     row![
         logo,
         column![
-            text("Xime").size(15).font(semibold()).color(colors.foreground),
+            text("Xime")
+                .size(15)
+                .font(semibold())
+                .color(colors.foreground),
             text("输入法设置").size(11).color(colors.foreground_muted),
         ]
         .spacing(1),
@@ -115,9 +114,11 @@ fn nav_button(
     button(
         row![
             icon,
-            text(label)
-                .size(13)
-                .color(if active { colors.primary } else { colors.foreground_muted }),
+            text(label).size(13).color(if active {
+                colors.primary
+            } else {
+                colors.foreground_muted
+            }),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -143,7 +144,7 @@ pub fn page_content<'a>(
         "外观" => appearance::view(settings, colors),
         "快捷键" => hotkeys::view(settings, colors),
         "词典" => dictionary::view(settings, colors),
-        "方案市场" => schema_market::view(settings, colors),
+        "扩展商店" => store::view(settings, colors),
         #[cfg(feature = "smart-suggestion-page")]
         "智能联想" => smart_suggestion::view(settings, colors),
         #[cfg(target_os = "linux")]
