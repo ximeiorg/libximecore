@@ -1,4 +1,6 @@
-use crate::components::widgets::{badge, button_danger, button_primary, card_style, semibold};
+use crate::components::widgets::{
+    badge, button_danger, button_primary, button_secondary, card_style, semibold,
+};
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, row, text};
@@ -22,10 +24,16 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     content.into()
 }
 
-/// 页头：标题 + 右侧操作按钮（已安装 Tab 时显示「部署方案」）。
+/// 页头：标题 + 右侧操作按钮（已安装 Tab 时显示「打开部署目录 + 部署方案」）。
 fn header<'a>(tab: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
     let action: Element<'a, Message> = if tab == 0 {
-        button_primary("部署方案", colors, Message::DeploySchemas).into()
+        row![
+            button_secondary("打开部署目录", colors, Message::OpenDeployDir),
+            button_primary("部署方案", colors, Message::DeploySchemas),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
     } else {
         container(text("")).into()
     };

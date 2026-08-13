@@ -12,8 +12,8 @@ use std::sync::Mutex;
 use tracing_subscriber::prelude::*;
 
 pub use rime_deploy::{
-    deploy_all, deploy_all_schemas, get_data_dirs, init_rime_deployer, set_rime_paths, RimePaths,
-    SchemaInfo,
+    default_rime_paths, deploy_all, deploy_all_schemas, get_data_dirs, init_rime_deployer,
+    set_rime_paths, RimePaths, SchemaInfo,
 };
 pub use schema_config::{
     ReverseLookupConfig, SchemaConfig, SchemaConfigManager, SpellerConfig, TraditionConfig,

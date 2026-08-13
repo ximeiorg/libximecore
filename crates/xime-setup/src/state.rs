@@ -140,6 +140,8 @@ pub enum Message {
     SelectSchema(usize),
     /// 部署方案（输入方案页 / 快捷键页 / 方案市场）。
     DeploySchemas,
+    /// 打开 Rime 部署目录（输入方案页）。
+    OpenDeployDir,
     /// 安装方案（已下载包 / 方案市场）。
     InstallSchema(String),
     /// 卸载方案。
@@ -192,6 +194,8 @@ pub struct SettingsState {
     pub input_schema: InputSchemaState,
     pub system_theme: SystemTheme,
     pub deploy_message: Option<String>,
+    /// deploy_message 设置时间，用于自动消失（toast 通知）。
+    pub deploy_message_since: Option<std::time::Instant>,
     pub schemas_loaded: bool,
     pub market_schema: MarketSchemaState,
     pub market_model: MarketModelState,
@@ -223,6 +227,7 @@ impl SettingsState {
             market_plugin: MarketPluginState::default(),
             system_theme: SystemTheme::detect(),
             deploy_message: None,
+            deploy_message_since: None,
             schemas_loaded: false,
             current_page: 0,
             #[cfg(feature = "smart-suggestion-page")]
@@ -397,11 +402,31 @@ impl SettingsState {
 
     // ---- 部署（后台线程执行，结果经轮询回收） ----
 
+    /// 显示底部状态通知（toast）：4 秒后自动消失。
+    pub fn show_message(&mut self, msg: String) {
+        self.deploy_message = Some(msg);
+        self.deploy_message_since = Some(std::time::Instant::now());
+    }
+
+    /// 轮询时检查通知是否过期。
+    fn expire_deploy_message(&mut self) {
+        if self.deploy_message.is_none() {
+            self.deploy_message_since = None;
+            return;
+        }
+        if let Some(since) = self.deploy_message_since {
+            if since.elapsed() > std::time::Duration::from_secs(4) {
+                self.deploy_message = None;
+                self.deploy_message_since = None;
+            }
+        }
+    }
+
     pub fn start_deploy(&mut self) {
         if deploy_result().lock().unwrap().is_some() {
             return;
         }
-        self.deploy_message = Some("正在部署…".to_string());
+        self.show_message("正在部署…".to_string());
         std::thread::spawn(|| {
             let result = deploy_all().map_err(|e| e.to_string());
             *deploy_result().lock().unwrap() = Some(result);
@@ -413,14 +438,14 @@ impl SettingsState {
         if let Some(result) = result {
             match result {
                 Ok(()) => {
-                    self.deploy_message = Some(if notify_daemon_reload() {
+                    self.show_message(if notify_daemon_reload() {
                         "部署成功！配置已重载。".to_string()
                     } else {
                         "部署成功！(服务器未运行，配置将在下次启动时生效)".to_string()
                     });
                 }
                 Err(e) => {
-                    self.deploy_message = Some(format!("部署失败: {}", e));
+                    self.show_message(format!("部署失败: {}", e));
                 }
             }
         }
@@ -506,6 +531,7 @@ impl SettingsState {
             }
             MarketTaskResult::Error(e) => {
                 self.market_schema.install_message = Some(e);
+                self.market_schema.install_message_since = Some(std::time::Instant::now());
             }
         }
         self.market_schema.downloading = None;
@@ -599,6 +625,7 @@ impl SettingsState {
             }
             ModelTaskResult::Error(e) => {
                 self.market_model.install_message = Some(e);
+                self.market_model.install_message_since = Some(std::time::Instant::now());
             }
         }
         self.market_model.downloading = None;
@@ -616,6 +643,37 @@ impl SettingsState {
         self.poll_model_task();
         self.poll_plugin_task();
         self.poll_download_progress();
+        self.expire_deploy_message();
+        self.expire_install_messages();
+    }
+
+    /// 扩展商店安装/卸载消息 4 秒后自动消失。
+    fn expire_install_messages(&mut self) {
+        let now = std::time::Instant::now();
+        let expired = std::time::Duration::from_secs(4);
+        for (msg, since) in [
+            (
+                &mut self.market_schema.install_message,
+                &mut self.market_schema.install_message_since,
+            ),
+            (
+                &mut self.market_model.install_message,
+                &mut self.market_model.install_message_since,
+            ),
+            (
+                &mut self.market_plugin.install_message,
+                &mut self.market_plugin.install_message_since,
+            ),
+        ] {
+            if msg.is_some()
+                && since
+                    .map(|t| now.duration_since(t) > expired)
+                    .unwrap_or(true)
+            {
+                *msg = None;
+                *since = None;
+            }
+        }
     }
 
     /// 重新加载扩展商店（方案 + 模型索引）。
@@ -713,6 +771,7 @@ impl SettingsState {
             }
             PluginTaskResult::Error(e) => {
                 self.market_plugin.install_message = Some(e);
+                self.market_plugin.install_message_since = Some(std::time::Instant::now());
             }
         }
         self.market_plugin.downloading = None;
@@ -1058,6 +1117,7 @@ pub struct MarketSchemaState {
     pub download_progress: Option<f32>,
     pub installing: Option<String>,
     pub install_message: Option<String>,
+    pub install_message_since: Option<std::time::Instant>,
     /// 扩展商店当前 Tab（0=方案, 1=模型）。
     pub store_tab: usize,
     /// 分类筛选（None=全部）。
@@ -1078,6 +1138,7 @@ pub struct MarketModelState {
     pub downloading: Option<String>,
     pub download_progress: Option<f32>,
     pub install_message: Option<String>,
+    pub install_message_since: Option<std::time::Instant>,
     /// 分类筛选（None=全部）。
     pub selected_tag: Option<String>,
     /// 每个模型选中的版本。
@@ -1099,6 +1160,7 @@ pub struct MarketPluginState {
     pub download_progress: Option<f32>,
     pub installing: Option<String>,
     pub install_message: Option<String>,
+    pub install_message_since: Option<std::time::Instant>,
     /// 分类筛选（None=全部）。
     pub selected_tag: Option<String>,
     /// 索引更新时间。

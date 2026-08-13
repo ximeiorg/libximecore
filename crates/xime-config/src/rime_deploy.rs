@@ -28,15 +28,34 @@ pub fn set_rime_paths(paths: RimePaths) -> Result<(), String> {
 pub fn get_data_dirs() -> (PathBuf, PathBuf) {
     match RIME_PATHS.get() {
         Some(paths) => (paths.shared_data_dir.clone(), paths.user_data_dir.clone()),
-        None => default_data_dirs(),
+        None => {
+            let paths = default_rime_paths();
+            (paths.shared_data_dir, paths.user_data_dir)
+        }
     }
 }
 
-/// 未显式配置时的兜底默认（统一 single dir，不含系统 librime 目录）。
-fn default_data_dirs() -> (PathBuf, PathBuf) {
+/// 解析默认 Rime 数据目录（双目录模型）：
+/// - shared：只读的 rime-wubi 默认目录。dev 安装优先 `~/.local/share/xime/rime-data`，
+///   系统安装回退 `/usr/share/xime/rime-data`（取首个存在 default.yaml 的目录）。
+/// - user：用户数据目录 `~/.config/xime/rime`（默认文件不落用户目录，用户同名文件优先）。
+///
+/// 宿主应用在启动时可直接调用 [`set_rime_paths`] 注入，或省略调用走本默认值。
+pub fn default_rime_paths() -> RimePaths {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let rime_dir = PathBuf::from(&home).join(".config/xime/rime");
-    (rime_dir.clone(), rime_dir)
+    let shared_candidates = [
+        PathBuf::from(&home).join(".local/share/xime/rime-data"),
+        PathBuf::from("/usr/share/xime/rime-data"),
+    ];
+    let shared_data_dir = shared_candidates
+        .iter()
+        .find(|d| d.join("default.yaml").exists())
+        .cloned()
+        .unwrap_or_else(|| shared_candidates[0].clone());
+    RimePaths {
+        shared_data_dir,
+        user_data_dir: PathBuf::from(&home).join(".config/xime/rime"),
+    }
 }
 
 fn ensure_user_config_files(_shared_data_dir: &std::path::Path, user_data_dir: &std::path::Path) {
@@ -45,32 +64,10 @@ fn ensure_user_config_files(_shared_data_dir: &std::path::Path, user_data_dir: &
     }
 }
 
-fn ensure_schemas_in_user_dir(shared_data_dir: &std::path::Path, user_data_dir: &std::path::Path) {
-    let default_custom = user_data_dir.join("default.custom.yaml");
-    if !default_custom.exists() {
-        // 优先复制 rime-wubi 自带的 default.custom.yaml（含默认 schema_list）
-        let template = shared_data_dir.join("default.custom.yaml");
-        if template.exists() {
-            std::fs::copy(&template, &default_custom).ok();
-        } else {
-            let content = r#"customization:
-  distribution_code_name: Xime
-  distribution_version: "1.0"
-
-patch:
-  schema_list:
-    - schema: wubi86_pinyin
-"#;
-            std::fs::write(&default_custom, content).ok();
-        }
-    }
-}
-
 pub fn init_rime_deployer() -> Result<(), String> {
     RIME_INIT.call_once(|| {
         let (shared_data_dir, user_data_dir) = get_data_dirs();
         ensure_user_config_files(&shared_data_dir, &user_data_dir);
-        ensure_schemas_in_user_dir(&shared_data_dir, &user_data_dir);
 
         let mut traits = Traits::new();
         traits
@@ -122,10 +119,16 @@ mod tests {
 
     #[test]
     fn test_default_data_dirs_no_system_librime() {
-        let (shared, user) = default_data_dirs();
+        let paths = default_rime_paths();
+        let (shared, user) = (paths.shared_data_dir, paths.user_data_dir);
         assert!(
             !shared.starts_with("/usr/share/rime-data"),
             "default shared dir must not use system librime-data: {}",
+            shared.display()
+        );
+        assert!(
+            shared.ends_with(".local/share/xime/rime-data"),
+            "shared dir must be read-only rime-wubi install dir: {}",
             shared.display()
         );
         assert!(
@@ -133,5 +136,6 @@ mod tests {
             "user dir: {}",
             user.display()
         );
+        assert_ne!(shared, user, "shared/user 必须分离，默认文件不得落入用户目录");
     }
 }

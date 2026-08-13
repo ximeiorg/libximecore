@@ -68,15 +68,32 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             state.settings.load_schema_config();
             match state.settings.save_schema() {
                 Ok(_) => {
-                    state.settings.deploy_message = Some("已切换当前输入方案".to_string());
+                    state.settings.show_message("已切换当前输入方案".to_string());
                 }
                 Err(e) => {
-                    state.settings.deploy_message = Some(format!("切换方案失败: {}", e));
+                    state.settings.show_message(format!("切换方案失败: {}", e));
                 }
             }
         }
         Message::DeploySchemas => {
             state.settings.start_deploy();
+        }
+        Message::OpenDeployDir => {
+            let (_, user_data_dir) = xime_config::get_data_dirs();
+            match std::process::Command::new("xdg-open")
+                .arg(&user_data_dir)
+                .spawn()
+            {
+                Ok(_) => {
+                    state.settings.show_message(format!(
+                        "已打开部署目录: {}",
+                        user_data_dir.display()
+                    ));
+                }
+                Err(e) => {
+                    state.settings.show_message(format!("打开部署目录失败: {}", e));
+                }
+            }
         }
         Message::InstallSchema(id) => {
             state.settings.install_market_schema(&id);
@@ -147,23 +164,23 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         }
         Message::SaveAppearance => match state.settings.save_appearance() {
             Ok(_) => {
-                state.settings.deploy_message = Some("外观设置已保存并重载".to_string());
+                state.settings.show_message("外观设置已保存并重载".to_string());
             }
             Err(e) => {
-                state.settings.deploy_message = Some(format!("保存失败: {}", e));
+                state.settings.show_message(format!("保存失败: {}", e));
             }
         },
         #[cfg(feature = "smart-suggestion-page")]
         Message::SaveSmartSuggestion => {
-            state.settings.deploy_message = Some("功能开发中".to_string());
+            state.settings.show_message("功能开发中".to_string());
         }
         #[cfg(feature = "clipboard-page")]
         Message::ClearClipboardHistory => {
-            state.settings.deploy_message = Some("功能开发中".to_string());
+            state.settings.show_message("功能开发中".to_string());
         }
         #[cfg(feature = "pair-page")]
         Message::StartPairing => {
-            state.settings.deploy_message = Some("功能开发中".to_string());
+            state.settings.show_message("功能开发中".to_string());
         }
         Message::BackgroundPoll => {
             state.settings.poll_background();
