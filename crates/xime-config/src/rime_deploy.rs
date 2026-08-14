@@ -1,9 +1,8 @@
-pub use librime::levers::deploy_all;
 pub use librime::levers::SchemaInfo;
+use crate::metadata::app_metadata;
 use librime::{
     create_session, get_api, initialize, join_maintenance_thread, setup, start_maintenance, Traits,
-};
-use std::ffi::CString;
+};use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::{Once, OnceLock};
 
@@ -36,16 +35,17 @@ pub fn get_data_dirs() -> (PathBuf, PathBuf) {
 }
 
 /// 解析默认 Rime 数据目录（双目录模型）：
-/// - shared：只读的 rime-wubi 默认目录。dev 安装优先 `~/.local/share/xime/rime-data`，
-///   系统安装回退 `/usr/share/xime/rime-data`（取首个存在 default.yaml 的目录）。
-/// - user：用户数据目录 `~/.config/xime/rime`（默认文件不落用户目录，用户同名文件优先）。
+/// - shared：只读的 rime-wubi 默认目录。dev 安装优先 `~/.local/share/<name>/rime-data`，
+///   系统安装回退 `/usr/share/<name>/rime-data`（取首个存在 default.yaml 的目录）。
+/// - user：用户数据目录 `~/.config/<name>/rime`（默认文件不落用户目录，用户同名文件优先）。
 ///
 /// 宿主应用在启动时可直接调用 [`set_rime_paths`] 注入，或省略调用走本默认值。
 pub fn default_rime_paths() -> RimePaths {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let config_dir = app_metadata().config_dir_name;
     let shared_candidates = [
-        PathBuf::from(&home).join(".local/share/xime/rime-data"),
-        PathBuf::from("/usr/share/xime/rime-data"),
+        PathBuf::from(&home).join(format!(".local/share/{config_dir}/rime-data")),
+        PathBuf::from(format!("/usr/share/{config_dir}/rime-data")),
     ];
     let shared_data_dir = shared_candidates
         .iter()
@@ -54,7 +54,7 @@ pub fn default_rime_paths() -> RimePaths {
         .unwrap_or_else(|| shared_candidates[0].clone());
     RimePaths {
         shared_data_dir,
-        user_data_dir: PathBuf::from(&home).join(".config/xime/rime"),
+        user_data_dir: PathBuf::from(&home).join(format!(".config/{config_dir}/rime")),
     }
 }
 
@@ -70,13 +70,14 @@ pub fn init_rime_deployer() -> Result<(), String> {
         ensure_user_config_files(&shared_data_dir, &user_data_dir);
 
         let mut traits = Traits::new();
+        let meta = app_metadata();
         traits
             .set_shared_data_dir(shared_data_dir.to_str().unwrap_or(""))
             .set_user_data_dir(user_data_dir.to_str().unwrap_or(""))
-            .set_distribution_name("Xime")
-            .set_distribution_code_name("Xime")
-            .set_distribution_version("1.0")
-            .set_app_name("rime.xime.setup")
+            .set_distribution_name(meta.distribution_name)
+            .set_distribution_code_name(meta.distribution_code_name)
+            .set_distribution_version(meta.version)
+            .set_app_name(meta.app_name)
             .set_min_log_level(2);
 
         setup(&mut traits);
@@ -97,7 +98,8 @@ pub fn init_rime_deployer() -> Result<(), String> {
             let api = get_api();
             if !api.is_null() {
                 if let Some(deploy_config) = (*api).deploy_config_file {
-                    let config_file = CString::new("xime.yaml").unwrap_or_default();
+                    let config_file =
+                        CString::new(format!("{}.yaml", meta.config_file_base)).unwrap_or_default();
                     let version_key = CString::new("config_version").unwrap_or_default();
                     deploy_config(config_file.as_ptr(), version_key.as_ptr());
                 }
@@ -106,6 +108,12 @@ pub fn init_rime_deployer() -> Result<(), String> {
     });
 
     Ok(())
+}
+
+/// 部署全部方案。配置文件名使用 [`AppMetadata::config_file_base`]（如 `xime.yaml`）。
+pub fn deploy_all() -> Result<(), String> {
+    let config_file = format!("{}.yaml", app_metadata().config_file_base);
+    librime::levers::deploy_all_with_config(&config_file).map_err(|e| e.to_string())
 }
 
 pub fn deploy_all_schemas() -> Result<(), String> {
@@ -119,6 +127,7 @@ mod tests {
 
     #[test]
     fn test_default_data_dirs_no_system_librime() {
+        let config_dir = app_metadata().config_dir_name;
         let paths = default_rime_paths();
         let (shared, user) = (paths.shared_data_dir, paths.user_data_dir);
         assert!(
@@ -127,12 +136,12 @@ mod tests {
             shared.display()
         );
         assert!(
-            shared.ends_with(".local/share/xime/rime-data"),
+            shared.ends_with(format!(".local/share/{config_dir}/rime-data").as_str()),
             "shared dir must be read-only rime-wubi install dir: {}",
             shared.display()
         );
         assert!(
-            user.ends_with(".config/xime/rime"),
+            user.ends_with(format!(".config/{config_dir}/rime").as_str()),
             "user dir: {}",
             user.display()
         );

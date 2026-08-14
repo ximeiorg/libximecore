@@ -1,3 +1,4 @@
+pub mod metadata;
 pub mod rime_deploy;
 pub mod schema_config;
 pub mod schema_manager;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing_subscriber::prelude::*;
 
+pub use metadata::{app_metadata, set_app_metadata, AppMetadata};
 pub use rime_deploy::{
     default_rime_paths, deploy_all, deploy_all_schemas, get_data_dirs, init_rime_deployer,
     set_rime_paths, RimePaths, SchemaInfo,
@@ -86,17 +88,20 @@ impl XimeConfig {
 
     fn system_config_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
+        let meta = app_metadata();
+        let config_dir = meta.config_dir_name;
+        let config_file = format!("{}.yaml", meta.config_file_base);
 
         // Linux: /usr/share/xime/xime.yaml
         if cfg!(unix) {
-            paths.push(PathBuf::from("/usr/share/xime/xime.yaml"));
+            paths.push(PathBuf::from("/usr/share").join(config_dir).join(&config_file));
         }
 
         // Windows: data/xime.yaml next to exe
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
-                paths.push(parent.join("data").join("xime.yaml"));
-                paths.push(parent.join("resources").join("xime.yaml"));
+                paths.push(parent.join("data").join(&config_file));
+                paths.push(parent.join("resources").join(&config_file));
             }
         }
 
@@ -104,53 +109,55 @@ impl XimeConfig {
     }
 
     pub fn user_config_path() -> PathBuf {
-        // macOS: ~/Library/Application Support/Luotuo/xime.custom.yaml
+        let meta = app_metadata();
+        let config_dir = meta.config_dir_name;
+        let custom_file = format!("{}.custom.yaml", meta.config_file_base);
+        let config_file = format!("{}.yaml", meta.config_file_base);
+
+        // macOS: ~/Library/Application Support/Xime/xime.custom.yaml
         if cfg!(target_os = "macos") {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-            let base = PathBuf::from(&home).join("Library/Application Support/Luotuo");
-            for path in &[
-                base.join("xime.custom.yaml"),
-                base.join("xime.yaml"),
-            ] {
+            let base = PathBuf::from(&home).join("Library/Application Support").join(config_dir);
+            for path in &[base.join(&custom_file), base.join(&config_file)] {
                 if path.exists() {
                     return path.clone();
                 }
             }
-            return base.join("xime.custom.yaml");
+            return base.join(custom_file);
         }
 
         // Linux: ~/.config/xime/xime.custom.yaml or xime.yaml
         if cfg!(unix) {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-            let base = PathBuf::from(&home).join(".config/xime");
+            let base = PathBuf::from(&home).join(".config").join(config_dir);
             for path in &[
-                base.join("xime.custom.yaml"),
-                base.join("rime/xime.custom.yaml"),
-                base.join("xime.yaml"),
-                base.join("rime/xime.yaml"),
+                base.join(&custom_file),
+                base.join("rime").join(&custom_file),
+                base.join(&config_file),
+                base.join("rime").join(&config_file),
             ] {
                 if path.exists() {
                     return path.clone();
                 }
             }
-            return base.join("xime.custom.yaml");
+            return base.join(custom_file);
         }
 
         // Windows: %APPDATA%/Xime/rime/xime.yaml
         if let Ok(appdata) = std::env::var("APPDATA") {
-            let base = PathBuf::from(&appdata).join("Xime");
+            let base = PathBuf::from(&appdata).join(config_dir);
             for path in &[
-                base.join("rime/xime.custom.yaml"),
-                base.join("rime/xime.yaml"),
+                base.join("rime").join(&custom_file),
+                base.join("rime").join(&config_file),
             ] {
                 if path.exists() {
                     return path.clone();
                 }
             }
-            return base.join("rime/xime.custom.yaml");
+            return base.join("rime").join(custom_file);
         }
 
-        PathBuf::from("xime.custom.yaml")
+        PathBuf::from(custom_file)
     }
 
     fn merge_configs(base: Self, over: Self) -> Self {
@@ -287,7 +294,7 @@ fn get_log_dir() -> PathBuf {
         std::env::var("TEMP")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join("xime")
+            .join(app_metadata().config_dir_name)
     } else {
         dirs_or_home().join("log")
     }
@@ -295,8 +302,10 @@ fn get_log_dir() -> PathBuf {
 
 fn dirs_or_home() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/xime")
+        PathBuf::from(home)
+            .join(".local/share")
+            .join(app_metadata().config_dir_name)
     } else {
-        PathBuf::from("/tmp/xime")
+        PathBuf::from("/tmp").join(app_metadata().config_dir_name)
     }
 }

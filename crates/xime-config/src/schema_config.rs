@@ -1,3 +1,4 @@
+use crate::metadata::app_metadata;
 use crate::rime_deploy::init_rime_deployer;
 use librime::levers::CustomSettings;
 use serde::Deserialize;
@@ -9,8 +10,9 @@ pub struct SchemaConfigManager {
 impl SchemaConfigManager {
     pub fn new(schema_id: &str) -> Result<Self, String> {
         init_rime_deployer()?;
-        let settings = CustomSettings::new(schema_id, "Xime::SchemaConfigManager")
-            .map_err(|e| e.to_string())?;
+        let generator_id = format!("{}::SchemaConfigManager", app_metadata().distribution_name);
+        let settings =
+            CustomSettings::new(schema_id, &generator_id).map_err(|e| e.to_string())?;
         Ok(Self { settings })
     }
 

@@ -183,7 +183,13 @@ impl Drop for CustomSettings {
     }
 }
 
+/// 部署全部方案，使用默认配置文件名 `xime.yaml`。
 pub fn deploy_all() -> Result<()> {
+    deploy_all_with_config("xime.yaml")
+}
+
+/// 部署全部方案，使用宿主应用指定的配置文件名（如 `xime.yaml` 或 `ximeche.yaml`）。
+pub fn deploy_all_with_config(config_name: &str) -> Result<()> {
     use std::ffi::CString;
 
     unsafe {
@@ -198,7 +204,7 @@ pub fn deploy_all() -> Result<()> {
             }
         }
 
-        let config_name = CString::new("xime.yaml").unwrap_or_default();
+        let config_name = CString::new(config_name)?;
         let version_key = CString::new("config_version").unwrap_or_default();
         if let Some(deploy_config) = (*api).deploy_config_file {
             deploy_config(config_name.as_ptr(), version_key.as_ptr());

@@ -8,7 +8,9 @@ pub use app::{run, SettingsApp};
 pub use state::SettingsState;
 pub use state::{set_notify_deploy, set_notify_message, set_notify_reload_style, set_notify_select_schema};
 pub use theme::{SystemTheme, ThemeColors};
-pub use xime_config::{default_rime_paths, set_rime_paths, RimePaths};
+pub use xime_config::{
+    default_rime_paths, set_app_metadata, set_rime_paths, AppMetadata, RimePaths,
+};
 
 use rust_embed::RustEmbed;
 
