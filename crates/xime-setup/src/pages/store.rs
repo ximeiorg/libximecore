@@ -189,8 +189,8 @@ fn grid_rows<'a>(
     let mut list = column![].spacing(8).width(Length::Fill);
     let mut iter = cards.into_iter();
     while iter.len() > 0 {
-        let taken: Vec<_> = iter.by_ref().take(3).collect();
-        let missing = 3 - taken.len();
+        let taken: Vec<_> = iter.by_ref().take(2).collect();
+        let missing = 2 - taken.len();
         let mut line = row![].spacing(8).width(Length::Fill).height(160);
         for card in taken {
             line = line.push(container(card).width(Length::FillPortion(1)).height(Length::Fill));
@@ -315,13 +315,7 @@ fn schema_card<'a>(
         .unwrap_or('方');
 
     let mut meta = String::new();
-    if !schema.author.is_empty() {
-        meta.push_str(&format!("作者：{}", schema.author));
-    }
     if !size_label.is_empty() {
-        if !meta.is_empty() {
-            meta.push_str("  ·  ");
-        }
         meta.push_str(size_label.as_str());
     }
 
@@ -342,6 +336,14 @@ fn schema_card<'a>(
                 } else {
                     text("").size(15).into()
                 },
+                container(text("")).width(Length::Fill),
+                if schema.author.is_empty() {
+                    text("").size(12)
+                } else {
+                    text(schema.author.clone())
+                        .size(12)
+                        .color(colors.foreground_muted)
+                },
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -353,7 +355,7 @@ fn schema_card<'a>(
         .width(Length::Fill),
     ]
     .spacing(10)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Start)
     .width(Length::Fill);
 
     let mut body = column![header].spacing(10).width(Length::Fill);
@@ -584,14 +586,26 @@ fn model_card<'a>(
     let mut body = column![row![
         glyph_box(glyph, model_icon_color(&model.category, colors)),
         column![
-            text(if model.name.is_empty() {
-                model.id.clone()
-            } else {
-                model.name.clone()
-            })
-            .size(15)
-            .font(semibold())
-            .color(colors.foreground),
+            row![
+                text(if model.name.is_empty() {
+                    model.id.clone()
+                } else {
+                    model.name.clone()
+                })
+                .size(15)
+                .font(semibold())
+                .color(colors.foreground),
+                container(text("")).width(Length::Fill),
+                if model.author.is_empty() {
+                    text("").size(12)
+                } else {
+                    text(model.author.clone())
+                        .size(12)
+                        .color(colors.foreground_muted)
+                },
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
             if model.description.is_empty() {
                 text("").size(12)
             } else {
@@ -604,7 +618,7 @@ fn model_card<'a>(
         .width(Length::Fill),
     ]
     .spacing(10)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Start)
     .width(Length::Fill),]
     .spacing(10)
     .width(Length::Fill);
@@ -803,13 +817,7 @@ fn plugin_card<'a>(
     let glyph = kind_label.chars().next().unwrap_or('插');
 
     let mut meta = String::new();
-    if !plugin.author.is_empty() {
-        meta.push_str(&format!("作者：{}", plugin.author));
-    }
     if !kind_label.is_empty() {
-        if !meta.is_empty() {
-            meta.push('　');
-        }
         meta.push_str(&kind_label);
     }
     if !version.is_empty() {
@@ -829,14 +837,26 @@ fn plugin_card<'a>(
     let mut body = column![row![
         glyph_box(glyph, plugin_icon_color(kind, colors)),
         column![
-            text(if plugin.name.is_empty() {
-                plugin.id.clone()
-            } else {
-                plugin.name.clone()
-            })
-            .size(15)
-            .font(semibold())
-            .color(colors.foreground),
+            row![
+                text(if plugin.name.is_empty() {
+                    plugin.id.clone()
+                } else {
+                    plugin.name.clone()
+                })
+                .size(15)
+                .font(semibold())
+                .color(colors.foreground),
+                container(text("")).width(Length::Fill),
+                if plugin.author.is_empty() {
+                    text("").size(12)
+                } else {
+                    text(plugin.author.clone())
+                        .size(12)
+                        .color(colors.foreground_muted)
+                },
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
             if plugin.description.is_empty() {
                 text("").size(12)
             } else {
@@ -849,7 +869,7 @@ fn plugin_card<'a>(
         .width(Length::Fill),
     ]
     .spacing(10)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Start)
     .width(Length::Fill),]
     .spacing(10)
     .width(Length::Fill);
