@@ -43,7 +43,9 @@ fn cmake_build(librime: &std::path::Path) -> Option<PathBuf> {
     );
 
     let dist_dir = librime.join("dist");
-    if dist_dir.join("lib").join("librime.so").exists() {
+    if dist_dir.join("lib").join("librime.so").exists()
+        || dist_dir.join("lib").join("librime.dylib").exists()
+    {
         println!(
             "cargo:warning=Using cached librime build in {}",
             dist_dir.display()
@@ -52,6 +54,7 @@ fn cmake_build(librime: &std::path::Path) -> Option<PathBuf> {
     }
 
     let build_dir = librime.join("build");
+    let install_prefix = format!("-DCMAKE_INSTALL_PREFIX={}", dist_dir.display());
 
     let status = Command::new("cmake")
         .args([
@@ -61,7 +64,8 @@ fn cmake_build(librime: &std::path::Path) -> Option<PathBuf> {
             librime.to_str().unwrap(),
             "-DCMAKE_BUILD_TYPE=Release",
             "-DBUILD_SHARED_LIBS=ON",
-            "-DCMAKE_INSTALL_PREFIX=dist",
+            "-DBUILD_TEST=OFF",
+            &install_prefix,
             "-DENABLE_EXTERNAL_PLUGINS=OFF",
             "-DENABLE_LOGGING=OFF",
         ])

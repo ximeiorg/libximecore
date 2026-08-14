@@ -1,5 +1,5 @@
 use crate::components::widgets::{
-    badge, button_danger, button_primary, button_secondary, card_style, semibold,
+    badge, button_danger, button_primary, card_style, semibold,
 };
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
@@ -10,7 +10,19 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     let tab = settings.input_schema.current_tab;
     let installed_ids = settings.market_schema.installed_ids.clone();
 
-    let mut content = column![header(tab, colors), tab_bar(tab, colors)]
+    let header = row![
+        text("输入方案")
+            .size(20)
+            .font(semibold())
+            .color(colors.foreground),
+        iced::widget::Space::new().width(Length::Fill),
+        button_primary("部署方案", colors, Message::DeploySchemas),
+        button_primary("打开数据目录", colors, Message::OpenUserDataDir),
+    ]
+    .align_y(Alignment::Center)
+    .spacing(12);
+
+    let mut content = column![header, tab_bar(tab, colors)]
         .spacing(16)
         .padding(20)
         .width(Length::Fill);
@@ -22,32 +34,6 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     });
 
     content.into()
-}
-
-/// 页头：标题 + 右侧操作按钮（已安装 Tab 时显示「打开部署目录 + 部署方案」）。
-fn header<'a>(tab: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
-    let action: Element<'a, Message> = if tab == 0 {
-        row![
-            button_secondary("打开部署目录", colors, Message::OpenDeployDir),
-            button_primary("部署方案", colors, Message::DeploySchemas),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
-    } else {
-        container(text("")).into()
-    };
-    row![
-        text("输入方案")
-            .size(20)
-            .font(semibold())
-            .color(colors.foreground)
-            .width(Length::Fill),
-        action,
-    ]
-    .align_y(Alignment::Center)
-    .width(Length::Fill)
-    .into()
 }
 
 /// 分段标签：已安装 / 已下载。

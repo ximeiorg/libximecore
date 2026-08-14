@@ -26,15 +26,27 @@ impl Default for SettingsApp {
 }
 
 /// 启动设置窗口（阻塞直到窗口关闭）。
+/// 用系统默认方式打开目录（macOS `open` / Linux `xdg-open` / Windows `explorer`）。
+fn open_directory(dir: &std::path::Path) {
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(cmd).arg(dir).spawn();
+}
+
 pub fn run() -> iced::Result {
     let icon = crate::Assets::get("image/icon.png")
         .and_then(|f| iced::window::icon::from_file_data(&f.data, None).ok());
-
     iced::application(SettingsApp::new, update, view)
         .title("Xime 设置")
         .window(iced::window::Settings {
             icon,
             platform_specific: iced::window::settings::PlatformSpecific {
+                #[cfg(target_os = "linux")]
                 application_id: "xime-setup".to_string(),
                 ..Default::default()
             },
@@ -78,22 +90,10 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::DeploySchemas => {
             state.settings.start_deploy();
         }
-        Message::OpenDeployDir => {
-            let (_, user_data_dir) = xime_config::get_data_dirs();
-            match std::process::Command::new("xdg-open")
-                .arg(&user_data_dir)
-                .spawn()
-            {
-                Ok(_) => {
-                    state.settings.show_message(format!(
-                        "已打开部署目录: {}",
-                        user_data_dir.display()
-                    ));
-                }
-                Err(e) => {
-                    state.settings.show_message(format!("打开部署目录失败: {}", e));
-                }
-            }
+        Message::OpenUserDataDir => {
+            let (_, user_dir) = xime_config::get_data_dirs();
+            let dir = user_dir.parent().unwrap_or(&user_dir);
+            open_directory(dir);
         }
         Message::InstallSchema(id) => {
             state.settings.install_market_schema(&id);

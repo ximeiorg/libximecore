@@ -140,8 +140,6 @@ pub enum Message {
     SelectSchema(usize),
     /// 部署方案（输入方案页 / 快捷键页 / 方案市场）。
     DeploySchemas,
-    /// 打开 Rime 部署目录（输入方案页）。
-    OpenDeployDir,
     /// 安装方案（已下载包 / 方案市场）。
     InstallSchema(String),
     /// 卸载方案。
@@ -162,6 +160,8 @@ pub enum Message {
     TogglePlugin(String, bool),
     /// 扩展商店：方案市场 / 模型市场加载失败后重试。
     MarketRetry,
+    /// 输入方案页：打开用户数据目录。
+    OpenUserDataDir,
     /// 扩展商店：切换「方案 / 模型」Tab。
     StoreTab(usize),
     /// 扩展商店：分类筛选（"" 表示全部）。

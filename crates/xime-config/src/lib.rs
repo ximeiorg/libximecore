@@ -104,6 +104,21 @@ impl XimeConfig {
     }
 
     pub fn user_config_path() -> PathBuf {
+        // macOS: ~/Library/Application Support/Luotuo/xime.custom.yaml
+        if cfg!(target_os = "macos") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            let base = PathBuf::from(&home).join("Library/Application Support/Luotuo");
+            for path in &[
+                base.join("xime.custom.yaml"),
+                base.join("xime.yaml"),
+            ] {
+                if path.exists() {
+                    return path.clone();
+                }
+            }
+            return base.join("xime.custom.yaml");
+        }
+
         // Linux: ~/.config/xime/xime.custom.yaml or xime.yaml
         if cfg!(unix) {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
