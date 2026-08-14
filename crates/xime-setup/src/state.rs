@@ -76,6 +76,7 @@ enum PluginTaskResult {
 static NOTIFY_DEPLOY: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_RELOAD_STYLE: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_SELECT_SCHEMA: OnceLock<fn(&str) -> bool> = OnceLock::new();
+static NOTIFY_MESSAGE: OnceLock<fn(&str, &str)> = OnceLock::new();
 
 /// 设置宿主进程的「部署后重载」回调（daemon 重载配置）。
 pub fn set_notify_deploy(f: fn()) {
@@ -91,6 +92,12 @@ pub fn set_notify_reload_style(f: fn()) {
 /// 返回是否发送成功（服务器是否运行）。
 pub fn set_notify_select_schema(f: fn(&str) -> bool) {
     let _ = NOTIFY_SELECT_SCHEMA.set(f);
+}
+
+/// 设置宿主进程的「结果消息」回调（部署/保存等成功失败提示）。
+/// 宿主可用它发系统通知；未注册则消息仅在页面底部显示。
+pub fn set_notify_message(f: fn(&str, &str)) {
+    let _ = NOTIFY_MESSAGE.set(f);
 }
 
 fn notify_daemon_reload() -> bool {
@@ -116,16 +123,17 @@ fn notify_select_schema(schema_id: &str) -> bool {
     }
 }
 
-fn cache_dir() -> std::path::PathBuf {
+/// 方案市场下载目录：~/.config/xime/markets/（与 Xime 的 market 约定对齐）。
+fn markets_dir() -> std::path::PathBuf {
     let (_, user_data_dir) = get_data_dirs();
     user_data_dir
         .parent()
-        .map(|p| p.join("market"))
+        .map(|p| p.join("markets"))
         .unwrap_or_else(|| {
             let base = std::env::var("LOCALAPPDATA")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir());
-            base.join("xime").join("market")
+            base.join("xime").join("markets")
         })
 }
 
@@ -193,9 +201,6 @@ pub struct SettingsState {
     pub appearance: AppearanceState,
     pub input_schema: InputSchemaState,
     pub system_theme: SystemTheme,
-    pub deploy_message: Option<String>,
-    /// deploy_message 设置时间，用于自动消失（toast 通知）。
-    pub deploy_message_since: Option<std::time::Instant>,
     pub schemas_loaded: bool,
     pub market_schema: MarketSchemaState,
     pub market_model: MarketModelState,
@@ -226,8 +231,6 @@ impl SettingsState {
             market_model: MarketModelState::default(),
             market_plugin: MarketPluginState::default(),
             system_theme: SystemTheme::detect(),
-            deploy_message: None,
-            deploy_message_since: None,
             schemas_loaded: false,
             current_page: 0,
             #[cfg(feature = "smart-suggestion-page")]
@@ -330,13 +333,31 @@ impl SettingsState {
         let selected_id =
             &self.input_schema.available_schemas[self.input_schema.selected_schema].schema_id;
 
-        if !notify_select_schema(selected_id) {
-            return Err(format!(
-                "切换输入方案失败：无法向服务器发送 SelectSchema 命令（{}）",
-                selected_id
-            ));
+        // 优先通知运行中的宿主进程（若已注册 SelectSchema 回调）。
+        if notify_select_schema(selected_id) {
+            return Ok(());
         }
-        Ok(())
+
+        // 宿主未运行/未注册：改为持久化方案列表（选中方案置顶），
+        // 等效于 RimeSwitcher 的 schema_list 设置，下次启动生效。
+        let manager = SchemaManager::new()?;
+        let mut ids: Vec<String> = manager.get_schema_list_ids();
+        if ids.is_empty() {
+            ids = self
+                .input_schema
+                .available_schemas
+                .iter()
+                .map(|s| s.schema_id.clone())
+                .collect();
+        }
+        ids.retain(|id| id != selected_id);
+        ids.insert(0, selected_id.clone());
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        manager.set_schema_list(&refs)?;
+        manager.save()?;
+
+        xime_config::rime_deploy::deploy_all_schemas()
+            .map_err(|e| format!("部署失败: {}", e))
     }
 
     pub fn save_schema_config(&self) -> Result<(), String> {
@@ -402,23 +423,10 @@ impl SettingsState {
 
     // ---- 部署（后台线程执行，结果经轮询回收） ----
 
-    /// 显示底部状态通知（toast）：4 秒后自动消失。
+    /// 显示结果消息：触发系统通知回调（若宿主注册了 `set_notify_message`）。
     pub fn show_message(&mut self, msg: String) {
-        self.deploy_message = Some(msg);
-        self.deploy_message_since = Some(std::time::Instant::now());
-    }
-
-    /// 轮询时检查通知是否过期。
-    fn expire_deploy_message(&mut self) {
-        if self.deploy_message.is_none() {
-            self.deploy_message_since = None;
-            return;
-        }
-        if let Some(since) = self.deploy_message_since {
-            if since.elapsed() > std::time::Duration::from_secs(4) {
-                self.deploy_message = None;
-                self.deploy_message_since = None;
-            }
+        if let Some(f) = NOTIFY_MESSAGE.get() {
+            f("Xime", &msg);
         }
     }
 
@@ -643,7 +651,6 @@ impl SettingsState {
         self.poll_model_task();
         self.poll_plugin_task();
         self.poll_download_progress();
-        self.expire_deploy_message();
         self.expire_install_messages();
     }
 
@@ -908,7 +915,7 @@ impl SettingsState {
     pub fn delete_market_package(&mut self, schema_id: &str) {
         let sid = schema_id.to_string();
         std::thread::spawn(move || {
-            let pkg_dir = cache_dir().join(&sid);
+            let pkg_dir = markets_dir().join(&sid);
             let _ = std::fs::remove_dir_all(&pkg_dir);
             let task = MarketTaskResult::DeleteDone(sid);
             *market_task_result().lock().unwrap() = Some(task);
@@ -986,7 +993,7 @@ impl SettingsState {
     }
 
     fn get_cached_schema_ids(&self) -> Vec<String> {
-        scan_dir_ids(&cache_dir())
+        scan_dir_ids(&markets_dir())
     }
 
     fn get_cached_model_ids(&self) -> Vec<String> {
@@ -1359,7 +1366,7 @@ fn get_download_info(schema: &MarketSchema) -> Option<(&MarketDownloadUrl, Strin
 
 fn do_uninstall(schema_id: &str) -> anyhow::Result<()> {
     let (_, user_data_dir) = get_data_dirs();
-    let market_dir = cache_dir();
+    let market_dir = markets_dir();
     let registry_path = market_dir.join(".registry.yaml");
 
     // Read registry to find installed files
@@ -1416,7 +1423,7 @@ fn do_download(schema: &MarketSchema) -> anyhow::Result<()> {
     let (download, filename) =
         get_download_info(schema).ok_or_else(|| anyhow::anyhow!("无可用下载地址或不支持的格式"))?;
 
-    let dest_dir = cache_dir().join(&schema.id);
+    let dest_dir = markets_dir().join(&schema.id);
     std::fs::create_dir_all(&dest_dir)?;
 
     let dest = dest_dir.join(&filename);
@@ -1469,7 +1476,7 @@ fn do_download_model(model: &MarketModel) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 下载插件 .xipk 到市场缓存（market/<id>.xipk，文件非目录，避免与方案缓存混淆）。
+/// 下载插件 .xipk 到插件目录（plugins/<id>.xipk，与已安装插件 plugins/<id>/ 目录同根）。
 fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<()> {
     let version = plugin
         .versions
@@ -1483,7 +1490,7 @@ fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("缺少下载地址"))?;
     anyhow::ensure!(!download.url.is_empty(), "缺少下载地址");
 
-    let dest = cache_dir().join(format!("{}.xipk", plugin.id));
+    let dest = plugins_dir().join(format!("{}.xipk", plugin.id));
     download_file(
         &download.url,
         &dest,
@@ -1495,10 +1502,10 @@ fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 从市场缓存安装插件包。
+/// 从插件目录安装已下载的插件包。
 fn do_install_plugin(plugin_id: &str) -> anyhow::Result<()> {
-    let xipk = cache_dir().join(format!("{plugin_id}.xipk"));
-    anyhow::ensure!(xipk.exists(), "未找到缓存的插件包，请先下载");
+    let xipk = plugins_dir().join(format!("{plugin_id}.xipk"));
+    anyhow::ensure!(xipk.exists(), "未找到下载的插件包，请先下载");
 
     let manager = plugin_manager();
     manager
@@ -1562,7 +1569,7 @@ fn download_file(
 }
 
 fn do_install(schema_id: &str) -> anyhow::Result<()> {
-    let cache_schema_dir = cache_dir().join(schema_id);
+    let cache_schema_dir = markets_dir().join(schema_id);
     anyhow::ensure!(cache_schema_dir.exists(), "未找到缓存的下载文件");
 
     let archive = std::fs::read_dir(&cache_schema_dir)?

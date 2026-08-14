@@ -1,5 +1,5 @@
 use crate::components::widgets::{
-    badge, button_danger, button_primary, card_style, semibold, switch, text_button,
+    badge, button_danger, button_primary, card_style, semibold, switch, text_button, RADIUS_MD,
 };
 use crate::state::{
     MarketModel, MarketModelState, MarketPlugin, MarketPluginState, MarketSchema,
@@ -180,6 +180,29 @@ fn chip<'a>(tag: String, active: bool, colors: &'a ThemeColors) -> Element<'a, M
 
 // ---- 方案 Tab ----
 
+/// 把子元素排成 3 列的网格：每 3 个一行，行高统一，行内均分宽度。
+/// 最后一行不足 3 个时，用透明占位补齐到 3 份，卡片保持单列宽度。
+fn grid_rows<'a>(
+    children: impl IntoIterator<Item = Element<'a, Message, iced::Theme, iced::Renderer>>,
+) -> Element<'a, Message, iced::Theme, iced::Renderer> {
+    let cards: Vec<_> = children.into_iter().collect();
+    let mut list = column![].spacing(8).width(Length::Fill);
+    let mut iter = cards.into_iter();
+    while iter.len() > 0 {
+        let taken: Vec<_> = iter.by_ref().take(3).collect();
+        let missing = 3 - taken.len();
+        let mut line = row![].spacing(8).width(Length::Fill).height(160);
+        for card in taken {
+            line = line.push(container(card).width(Length::FillPortion(1)).height(Length::Fill));
+        }
+        for _ in 0..missing {
+            line = line.push(iced::widget::Space::new().width(Length::FillPortion(1)));
+        }
+        list = list.push(line);
+    }
+    list.into()
+}
+
 fn schemes_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     let store = &settings.market_schema;
 
@@ -240,9 +263,11 @@ fn schema_list<'a>(store: &'a MarketSchemaState, colors: &'a ThemeColors) -> Ele
     if !tags.is_empty() {
         list = list.push(chip_bar(tags, &store.selected_tag, colors));
     }
-    for schema in schemas {
-        list = list.push(schema_card(schema, store, colors));
-    }
+    list = list.push(grid_rows(
+        schemas
+            .iter()
+            .map(|schema| schema_card(schema, store, colors)),
+    ));
     list.into()
 }
 
@@ -289,49 +314,49 @@ fn schema_card<'a>(
         .or_else(|| schema.name.chars().next())
         .unwrap_or('方');
 
-    let mut title = row![
-        glyph_box(glyph, colors),
-        column![row![
-            text(if schema.name.is_empty() {
-                schema.id.clone()
-            } else {
-                schema.name.clone()
-            })
-            .size(15)
-            .font(semibold())
-            .color(colors.foreground),
-            text(version.to_string()).size(12).color(colors.primary),
+    let mut meta = String::new();
+    if !schema.author.is_empty() {
+        meta.push_str(&format!("作者：{}", schema.author));
+    }
+    if !size_label.is_empty() {
+        if !meta.is_empty() {
+            meta.push_str("  ·  ");
+        }
+        meta.push_str(size_label.as_str());
+    }
+
+    let header = row![
+        glyph_box(glyph, schema_icon_color(colors)),
+        column![
+            row![
+                text(if schema.name.is_empty() {
+                    schema.id.clone()
+                } else {
+                    schema.name.clone()
+                })
+                .size(15)
+                .font(semibold())
+                .color(colors.foreground),
+                if schema.schema_type == "built-in" {
+                    badge("内置", colors.on_primary, colors.primary)
+                } else {
+                    text("").size(15).into()
+                },
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+            text(truncate(&schema.description, DESC_MAX_CHARS))
+                .size(12)
+                .color(colors.foreground_muted),
         ]
-        .spacing(8)
-        .align_y(Alignment::Center),]
+        .spacing(2)
         .width(Length::Fill),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
     .width(Length::Fill);
 
-    if schema.schema_type == "built-in" {
-        title = title.push(badge("内置", colors.on_primary, colors.primary));
-    }
-
-    let mut body = column![title].spacing(8).width(Length::Fill);
-
-    if !schema.description.is_empty() {
-        body = body.push(
-            text(schema.description.to_string())
-                .size(13)
-                .color(colors.foreground_muted),
-        );
-    }
-
-    let author_line = if schema.author.is_empty() {
-        schema.tags.join("、")
-    } else {
-        format!("作者：{}　{}", schema.author, schema.tags.join("、"))
-    };
-    if !author_line.trim().is_empty() {
-        body = body.push(text(author_line).size(12).color(colors.foreground_muted));
-    }
+    let mut body = column![header].spacing(10).width(Length::Fill);
 
     if !deps.is_empty() {
         let mut deps_row = row![].spacing(4);
@@ -347,29 +372,29 @@ fn schema_card<'a>(
         }
     }
 
-    let size_text = if !size_label.is_empty() {
-        format!("大小: {}", size_label)
-    } else {
-        String::new()
-    };
+    body = body.push(
+        row![
+            if meta.is_empty() {
+                text("").size(12)
+            } else {
+                text(meta).size(12).color(colors.foreground_muted)
+            },
+            container(text("")).width(Length::Fill),
+            version_selector(
+                schema.id.clone(),
+                versions,
+                version,
+                colors,
+                Message::SchemaVersionSelected
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
+    );
 
     body = body.push(
         row![
-            column![
-                if size_text.is_empty() {
-                    text("").size(12)
-                } else {
-                    text(size_text).size(12).color(colors.foreground_muted)
-                },
-                version_selector(
-                    schema.id.clone(),
-                    versions,
-                    version,
-                    colors,
-                    Message::SchemaVersionSelected
-                ),
-            ]
-            .spacing(4),
             container(text("")).width(Length::Fill),
             schema_action(
                 schema.id.clone(),
@@ -381,8 +406,8 @@ fn schema_card<'a>(
                 colors,
             ),
         ]
-        .width(Length::Fill)
-        .align_y(Alignment::End),
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
     );
 
     container(body)
@@ -484,7 +509,7 @@ fn model_list<'a>(store: &'a MarketModelState, colors: &'a ThemeColors) -> Eleme
     if !tags.is_empty() {
         list = list.push(chip_bar(tags, &store.selected_tag, colors));
     }
-    for model in models {
+    list = list.push(grid_rows(models.iter().map(|model| {
         let is_downloaded = store.downloaded_ids.contains(&model.id);
         let is_downloading = store.downloading.as_deref() == Some(model.id.as_str());
         let progress = if is_downloading {
@@ -492,15 +517,15 @@ fn model_list<'a>(store: &'a MarketModelState, colors: &'a ThemeColors) -> Eleme
         } else {
             None
         };
-        list = list.push(model_card(
+        model_card(
             model,
             is_downloaded,
             is_downloading,
             progress,
             store.selected_versions.get(&model.id).cloned(),
             colors,
-        ));
-    }
+        )
+    })));
     list.into()
 }
 
@@ -545,13 +570,19 @@ fn model_card<'a>(
     }
     if !size_label.is_empty() {
         if !meta.is_empty() {
-            meta.push_str(" · ");
+            meta.push_str("  ·  ");
         }
         meta.push_str(size_label.as_str());
     }
+    if !version.is_empty() {
+        if !meta.is_empty() {
+            meta.push_str("  ·  ");
+        }
+        meta.push_str(&format!("v{version}"));
+    }
 
     let mut body = column![row![
-        glyph_box(glyph, colors),
+        glyph_box(glyph, model_icon_color(&model.category, colors)),
         column![
             text(if model.name.is_empty() {
                 model.id.clone()
@@ -564,41 +595,47 @@ fn model_card<'a>(
             if model.description.is_empty() {
                 text("").size(12)
             } else {
-                text(model.description.to_string())
-                    .size(13)
+                text(truncate(&model.description, DESC_MAX_CHARS))
+                    .size(12)
                     .color(colors.foreground_muted)
             },
-            if meta.is_empty() {
-                text("").size(12)
-            } else {
-                text(meta).size(12).color(colors.foreground_muted)
-            },
         ]
-        .spacing(3)
+        .spacing(2)
         .width(Length::Fill),
-        model_action(model.id.clone(), downloaded, downloading, progress, colors,),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
     .width(Length::Fill),]
-    .spacing(8)
+    .spacing(10)
     .width(Length::Fill);
 
-    if !model.versions.is_empty() {
-        body = body.push(
-            row![
-                version_selector(
-                    model.id.clone(),
-                    versions,
-                    version,
-                    colors,
-                    Message::ModelVersionSelected
-                ),
-                container(text("")).width(Length::Fill),
-            ]
-            .align_y(Alignment::Center),
-        );
-    }
+    let footer = row![
+        if meta.is_empty() {
+            text("").size(12)
+        } else {
+            text(meta).size(12).color(colors.foreground_muted)
+        },
+        container(text("")).width(Length::Fill),
+        version_selector(
+            model.id.clone(),
+            versions,
+            version,
+            colors,
+            Message::ModelVersionSelected
+        ),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    body = body.push(footer);
+    body = body.push(
+        row![
+            container(text("")).width(Length::Fill),
+            model_action(model.id.clone(), downloaded, downloading, progress, colors,),
+        ]
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
+    );
 
     container(body)
         .width(Length::Fill)
@@ -701,8 +738,12 @@ fn plugin_list<'a>(store: &'a MarketPluginState, colors: &'a ThemeColors) -> Ele
     if !tags.is_empty() {
         list = list.push(chip_bar(tags, &store.selected_tag, colors));
     }
-    for plugin in plugins {
-        let installed = store.installed.iter().find(|r| r.id == plugin.id).cloned();
+    list = list.push(grid_rows(plugins.iter().map(|plugin| {
+        let installed = store
+            .installed
+            .iter()
+            .find(|r| r.id == plugin.id)
+            .cloned();
         let is_downloading = store.downloading.as_deref() == Some(plugin.id.as_str());
         let is_installing = store.installing.as_deref() == Some(plugin.id.as_str());
         let progress = if is_downloading {
@@ -711,7 +752,7 @@ fn plugin_list<'a>(store: &'a MarketPluginState, colors: &'a ThemeColors) -> Ele
             None
         };
         let downloaded = store.downloaded_ids.contains(&plugin.id);
-        list = list.push(plugin_card(
+        plugin_card(
             plugin,
             installed,
             downloaded,
@@ -719,8 +760,8 @@ fn plugin_list<'a>(store: &'a MarketPluginState, colors: &'a ThemeColors) -> Ele
             is_installing,
             progress,
             colors,
-        ));
-    }
+        )
+    })));
     list.into()
 }
 
@@ -786,7 +827,7 @@ fn plugin_card<'a>(
     let enabled = installed.as_ref().map(|r| r.enabled).unwrap_or(false);
 
     let mut body = column![row![
-        glyph_box(glyph, colors),
+        glyph_box(glyph, plugin_icon_color(kind, colors)),
         column![
             text(if plugin.name.is_empty() {
                 plugin.id.clone()
@@ -799,56 +840,64 @@ fn plugin_card<'a>(
             if plugin.description.is_empty() {
                 text("").size(12)
             } else {
-                text(plugin.description.to_string())
-                    .size(13)
+                text(truncate(&plugin.description, DESC_MAX_CHARS))
+                    .size(12)
                     .color(colors.foreground_muted)
             },
-            if meta.is_empty() {
-                text("").size(12)
-            } else {
-                text(meta).size(12).color(colors.foreground_muted)
-            },
         ]
-        .spacing(3)
+        .spacing(2)
         .width(Length::Fill),
-        plugin_action(
-            plugin.id.clone(),
-            is_installed,
-            downloaded,
-            downloading,
-            installing,
-            progress,
-            colors,
-        ),
     ]
     .spacing(10)
     .align_y(Alignment::Center)
     .width(Length::Fill),]
+    .spacing(10)
+    .width(Length::Fill);
+
+    let mut footer = row![
+        if meta.is_empty() {
+            text("").size(12)
+        } else {
+            text(meta).size(12).color(colors.foreground_muted)
+        },
+        container(text("")).width(Length::Fill),
+    ]
     .spacing(8)
+    .align_y(Alignment::Center)
     .width(Length::Fill);
 
     if is_installed {
-        let row = row![
-            switch(enabled, colors, move |on| {
-                Message::TogglePlugin(plugin.id.clone(), on)
-            }),
-            text(if enabled { "已启用" } else { "已禁用" })
+        footer = footer.push(switch(enabled, colors, move |on| {
+            Message::TogglePlugin(plugin.id.clone(), on)
+        }));
+        footer = footer.push(text(if enabled { "已启用" } else { "已禁用" })
+            .size(12)
+            .color(colors.foreground_muted));
+    } else if !installed_version.is_empty() {
+        footer = footer.push(
+            text(format!("已安装 v{installed_version}"))
                 .size(12)
                 .color(colors.foreground_muted),
-            container(text("")).width(Length::Fill),
-            if !installed_version.is_empty() {
-                text(format!("已安装 v{installed_version}"))
-                    .size(12)
-                    .color(colors.foreground_muted)
-            } else {
-                text("已安装").size(12).color(colors.foreground_muted)
-            },
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
-        body = body.push(row);
+        );
     }
+
+    body = body.push(footer);
+    body = body.push(
+        row![
+            container(text("")).width(Length::Fill),
+            plugin_action(
+                plugin.id.clone(),
+                is_installed,
+                downloaded,
+                downloading,
+                installing,
+                progress,
+                colors,
+            ),
+        ]
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
+    );
 
     container(body)
         .width(Length::Fill)
@@ -921,29 +970,71 @@ fn footer<'a>(
     text(text_).size(11).color(colors.foreground_faint).into()
 }
 
-/// 彩色方块：分类字 + 主色浅底（商店卡片图标位）。
-fn glyph_box<'a>(glyph: char, colors: &'a ThemeColors) -> Element<'a, Message> {
-    let colors = *colors;
+/// 彩色方块：分类字 + 分类色浅底（商店卡片图标位，参考 Xime 48dp 圆角 12dp）。
+fn glyph_box<'a>(
+    glyph: char,
+    icon: (Color, Color),
+) -> Element<'a, Message> {
+    let (container_bg, content_color) = icon;
     container(
         text(glyph.to_string())
-            .size(16)
+            .size(13)
             .font(semibold())
-            .color(colors.primary),
+            .color(content_color),
     )
-    .width(40)
-    .height(40)
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
+    .width(28)
+    .height(28)
+    .align_x(Alignment::Center)
+    .align_y(Alignment::Center)
     .style(move |_| container::Style {
-        background: Some(Background::Color(colors.primary_dim)),
+        background: Some(Background::Color(container_bg)),
         border: Border {
             color: Color::TRANSPARENT,
             width: 0.0,
-            radius: border::radius(10.0),
+            radius: border::radius(RADIUS_MD),
         },
         ..container::Style::default()
     })
     .into()
+}
+
+/// 方案图标色：统一用主色容器。
+fn schema_icon_color(colors: &ThemeColors) -> (Color, Color) {
+    (colors.primary_dim, colors.primary)
+}
+
+/// 模型图标色：按分类区分（参照 Xime modelCategoryColors）。
+fn model_icon_color(category: &str, colors: &ThemeColors) -> (Color, Color) {
+    match category {
+        "prediction" => (colors.primary_dim, colors.primary),
+        "handwriting" => (colors.secondary_dim, colors.secondary),
+        "asr" => (colors.tertiary_dim, colors.tertiary),
+        _ => (colors.surface_variant, colors.foreground_muted),
+    }
+}
+
+/// 插件图标色：按类型区分（参照 Xime pluginCategoryColors）。
+fn plugin_icon_color(kind: &str, colors: &ThemeColors) -> (Color, Color) {
+    match kind {
+        "emoji" => (colors.tertiary_dim, colors.tertiary),
+        "speech" => (colors.primary_dim, colors.primary),
+        "prediction" => (colors.secondary_dim, colors.secondary),
+        _ => (colors.surface_variant, colors.foreground_muted),
+    }
+}
+
+/// 卡片描述最多显示的字符数（3 列卡片宽度下约 2 行中文）。
+const DESC_MAX_CHARS: usize = 36;
+
+/// 截断长文本（描述等），超出 `max_chars` 加省略号。
+fn truncate(s: &str, max_chars: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
 }
 
 /// 版本选择：多版本用下拉，单版本直接展示。

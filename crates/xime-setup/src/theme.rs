@@ -117,6 +117,14 @@ pub struct ThemeColors {
     pub primary_dim: Color,
     /// 主色上的文字色。
     pub on_primary: Color,
+    /// 次色（手写等分类图标文字色，偏青）。
+    pub secondary: Color,
+    /// 次色浅底（分类图标底色）。
+    pub secondary_dim: Color,
+    /// 第三色（表情/语音等分类图标文字色，偏橙）。
+    pub tertiary: Color,
+    /// 第三色浅底（分类图标底色）。
+    pub tertiary_dim: Color,
     /// 主文本。
     pub foreground: Color,
     /// 次级文本。
@@ -167,6 +175,10 @@ impl ThemeColors {
                 primary_hover,
                 primary_dim: Color::from_rgba(primary.r, primary.g, primary.b, 0.18),
                 on_primary: Color::WHITE,
+                secondary: Color::from_rgb8(0x6e, 0xd4, 0xc8),
+                secondary_dim: Color::from_rgba8(0x6e, 0xd4, 0xc8, 0.16),
+                tertiary: Color::from_rgb8(0xf2, 0xb8, 0x7d),
+                tertiary_dim: Color::from_rgba8(0xf2, 0xb8, 0x7d, 0.16),
                 foreground: Color::from_rgb8(0xf4, 0xf4, 0xf5),
                 foreground_muted: Color::from_rgb8(0xa1, 0xa1, 0xaa),
                 foreground_faint: Color::from_rgb8(0x71, 0x71, 0x7a),
@@ -192,6 +204,10 @@ impl ThemeColors {
                 primary_hover,
                 primary_dim: Color::from_rgba(base.r, base.g, base.b, 0.12),
                 on_primary: Color::WHITE,
+                secondary: Color::from_rgb8(0x14, 0x8a, 0x7d),
+                secondary_dim: Color::from_rgba8(0x14, 0x8a, 0x7d, 0.12),
+                tertiary: Color::from_rgb8(0xb4, 0x5e, 0x1e),
+                tertiary_dim: Color::from_rgba8(0xb4, 0x5e, 0x1e, 0.12),
                 foreground: Color::from_rgb8(0x18, 0x18, 0x1b),
                 foreground_muted: Color::from_rgb8(0x71, 0x71, 0x7a),
                 foreground_faint: Color::from_rgb8(0xa1, 0xa1, 0xaa),

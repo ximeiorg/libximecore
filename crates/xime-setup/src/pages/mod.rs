@@ -18,7 +18,7 @@ use crate::components::widgets::{nav_button_style, scroll_style, semibold, sideb
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, row, scrollable, svg, text, Space};
-use iced::{border, Alignment, Background, Border, Element, Length};
+use iced::{Alignment, Element, Length};
 
 pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
     let mut items = vec![
@@ -155,24 +155,6 @@ pub fn page_content<'a>(
         "剪贴板" => clipboard::view(settings, colors),
         _ => about::view(settings, colors),
     }
-}
-
-/// 状态行（部署/保存结果提示）。
-pub fn status_line<'a>(message: &'a str, colors: &ThemeColors) -> Element<'a, Message> {
-    let colors = *colors;
-    container(text(message).size(12).color(colors.foreground_muted))
-        .width(Length::Fill)
-        .padding([8, 20])
-        .style(move |_| container::Style {
-            background: Some(Background::Color(colors.surface_variant)),
-            border: Border {
-                color: colors.border,
-                width: 1.0,
-                radius: border::radius(10.0),
-            },
-            ..container::Style::default()
-        })
-        .into()
 }
 
 pub fn scrollable_content<'a>(

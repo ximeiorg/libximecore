@@ -157,6 +157,21 @@ impl SchemaManager {
         let content = std::fs::read_to_string(&default_custom).ok()?;
         extract_selected_schema(&content)
     }
+
+    /// 读取用户 `default.custom.yaml` 中 `schema_list` 的完整顺序。
+    pub fn get_schema_list_ids(&self) -> Vec<String> {
+        let default_custom = self.user_dir.join("default.custom.yaml");
+        if !default_custom.exists() {
+            return Vec::new();
+        }
+        let Ok(content) = std::fs::read_to_string(&default_custom) else {
+            return Vec::new();
+        };
+        content
+            .lines()
+            .filter_map(extract_schema_line)
+            .collect()
+    }
 }
 
 fn extract_selected_schema(content: &str) -> Option<String> {
@@ -171,6 +186,19 @@ fn extract_selected_schema(content: &str) -> Option<String> {
                     return Some(s);
                 }
             }
+        }
+    }
+    None
+}
+
+/// 从 `- schema: xxx` 行提取方案 id。
+fn extract_schema_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    let line = line.strip_prefix('-').unwrap_or(line).trim();
+    if let Some(rest) = line.strip_prefix("schema:") {
+        let id = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+        if !id.is_empty() {
+            return Some(id);
         }
     }
     None
@@ -228,5 +256,22 @@ mod tests {
             "system schema stroke must not appear: {:?}",
             ids
         );
+    }
+
+    #[test]
+    fn test_extract_schema_line_and_list_roundtrip() {
+        let yaml = "patch:\n  schema_list:\n    - schema: wubi86\n    - schema: \"luna_pinyin\"\n    - schema: 'cangjie'\n";
+        let ids: Vec<String> = yaml.lines().filter_map(extract_schema_line).collect();
+        assert_eq!(ids, vec!["wubi86", "luna_pinyin", "cangjie"]);
+
+        // 顺序保持 + 去重逻辑配合 save_schema
+        let mut list = ids;
+        list.retain(|id| id != "wubi86");
+        list.insert(0, "wubi86".to_string());
+        assert_eq!(list, vec!["wubi86", "luna_pinyin", "cangjie"]);
+
+        // 带前缀（非 schema 行）应被忽略
+        assert_eq!(extract_schema_line("  other: 1"), None);
+        assert_eq!(extract_schema_line("  - schema: \"\""), None);
     }
 }

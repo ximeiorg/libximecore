@@ -197,12 +197,8 @@ pub fn view(state: &SettingsApp) -> Element<'_, Message> {
         .current_page
         .min(items.len().saturating_sub(1));
 
-    let mut content =
+    let content =
         column![pages::page_content(&state.settings, current, colors)].width(Length::Fill);
-
-    if let Some(msg) = &state.settings.deploy_message {
-        content = content.push(pages::status_line(msg, colors));
-    }
 
     let content_scroll = pages::scrollable_content(content, colors);
 
