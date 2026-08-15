@@ -9,10 +9,13 @@ pub mod traits;
 
 pub use key::{
     get_key_modifiers, vk_to_xk, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT,
-    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+    VK_NEXT, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7, VK_OEM_COMMA,
+    VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB,
+    VK_UP, XK_SEMICOLON,
 };
 pub use key::{
-    KeyCode, Modifier, K_ALT_MASK, K_CONTROL_MASK, K_RELEASE_MASK, K_SHIFT_MASK, XK_SHIFT_L,
+    KeyCode, Modifier, K_ALT_MASK, K_CONTROL_MASK, K_LOCK_MASK, K_RELEASE_MASK, K_SHIFT_MASK,
+    XK_SHIFT_L,
 };
 pub use levers::{deploy_all, CustomSettings, SchemaInfo, SwitcherSettings};
 pub use librime_sys2::rime_struct;

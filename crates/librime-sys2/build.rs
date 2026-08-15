@@ -191,9 +191,15 @@ fn build_librime_source_win(librime_dir: &std::path::Path, _dist_lib_dir: &std::
     fn find_vswhere() -> PathBuf {
         if let Ok(output) = Command::new("where").arg("vswhere").output() {
             if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return PathBuf::from(path);
+                let output = String::from_utf8_lossy(&output.stdout);
+                for line in output.lines() {
+                    let path = line.trim();
+                    if !path.is_empty() {
+                        let p = PathBuf::from(path);
+                        if p.exists() {
+                            return p;
+                        }
+                    }
                 }
             }
         }
@@ -218,6 +224,12 @@ fn build_librime_source_win(librime_dir: &std::path::Path, _dist_lib_dir: &std::
         Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
         Err(e) => panic!("vswhere failed: {}", e),
     };
+    if vs_install.is_empty() || !std::path::Path::new(&vs_install).exists() {
+        panic!(
+            "vswhere returned invalid VS installation path: {:?}. Install Visual Studio 2022.",
+            vs_install
+        );
+    }
 
     let temp_bat = workspace_dir.join("temp-build-librime.bat");
     {

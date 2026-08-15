@@ -58,6 +58,7 @@ pub const XK_8: KeyCode = librime_sys2::RimeKeyCode_XK_8;
 pub const XK_9: KeyCode = librime_sys2::RimeKeyCode_XK_9;
 
 pub const K_SHIFT_MASK: Modifier = librime_sys2::RimeModifier_kShiftMask;
+pub const K_LOCK_MASK: Modifier = librime_sys2::RimeModifier_kLockMask;
 pub const K_CONTROL_MASK: Modifier = librime_sys2::RimeModifier_kControlMask;
 pub const K_ALT_MASK: Modifier = librime_sys2::RimeModifier_kAltMask;
 pub const K_RELEASE_MASK: Modifier = librime_sys2::RimeModifier_kReleaseMask;
@@ -76,6 +77,34 @@ pub const VK_TAB: u16 = 0x09;
 pub const VK_ESCAPE: u16 = 0x1B;
 pub const VK_SPACE: u16 = 0x20;
 pub const VK_DELETE: u16 = 0x2E;
+pub const VK_CAPITAL: u16 = 0x14;
+pub const VK_SHIFT: u16 = 0x10;
+pub const VK_CONTROL: u16 = 0x11;
+pub const VK_MENU: u16 = 0x12;
+pub const VK_OEM_1: u16 = 0xBA;
+pub const VK_OEM_7: u16 = 0xDE;
+pub const VK_OEM_4: u16 = 0xDB;
+pub const VK_OEM_6: u16 = 0xDD;
+pub const VK_OEM_COMMA: u16 = 0xBC;
+pub const VK_OEM_PERIOD: u16 = 0xBE;
+pub const VK_OEM_MINUS: u16 = 0xBD;
+pub const VK_OEM_PLUS: u16 = 0xBB;
+pub const VK_OEM_2: u16 = 0xBF;
+pub const VK_OEM_5: u16 = 0xDC;
+pub const VK_OEM_3: u16 = 0xC0;
+
+pub const XK_SEMICOLON: i32 = 0x3B;
+pub const XK_APOSTROPHE: i32 = 0x27;
+pub const XK_BRACKETLEFT: i32 = 0x5B;
+pub const XK_BRACKETRIGHT: i32 = 0x5D;
+pub const XK_COMMA: i32 = 0x2C;
+pub const XK_PERIOD: i32 = 0x2E;
+pub const XK_MINUS: i32 = 0x2D;
+pub const XK_EQUAL: i32 = 0x3D;
+pub const XK_SLASH: i32 = 0x2F;
+pub const XK_BACKSLASH: i32 = 0x5C;
+pub const XK_GRAVE: i32 = 0x60;
+pub const XK_CAPS_LOCK: i32 = 65509;
 
 pub fn vk_to_xk(vk: u16) -> i32 {
     match vk {
@@ -93,6 +122,18 @@ pub fn vk_to_xk(vk: u16) -> i32 {
         VK_UP => XK_UP as i32,
         VK_RIGHT => XK_RIGHT as i32,
         VK_DOWN => XK_DOWN as i32,
+        VK_CAPITAL => XK_CAPS_LOCK,
+        VK_OEM_1 => XK_SEMICOLON,
+        VK_OEM_7 => XK_APOSTROPHE,
+        VK_OEM_4 => XK_BRACKETLEFT,
+        VK_OEM_6 => XK_BRACKETRIGHT,
+        VK_OEM_COMMA => XK_COMMA,
+        VK_OEM_PERIOD => XK_PERIOD,
+        VK_OEM_MINUS => XK_MINUS,
+        VK_OEM_PLUS => XK_EQUAL,
+        VK_OEM_2 => XK_SLASH,
+        VK_OEM_5 => XK_BACKSLASH,
+        VK_OEM_3 => XK_GRAVE,
         0x41..=0x5A => XK_A as i32 + (vk - 0x41) as i32,
         0x61..=0x7A => XK_A as i32 + (vk - 0x61) as i32,
         0x30..=0x39 => XK_0 as i32 + (vk - 0x30) as i32,
@@ -102,26 +143,32 @@ pub fn vk_to_xk(vk: u16) -> i32 {
 }
 
 #[cfg(target_os = "windows")]
-pub fn get_key_modifiers() -> i32 {
-    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+pub fn get_key_modifiers(is_key_up: bool) -> i32 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState};
 
     unsafe {
         let mut modifiers = 0i32;
-        if GetAsyncKeyState(0x10) < 0 {
+        if GetAsyncKeyState(VK_SHIFT as i32) < 0 {
             modifiers |= K_SHIFT_MASK as i32;
         }
-        if GetAsyncKeyState(0x11) < 0 {
+        if GetAsyncKeyState(VK_CONTROL as i32) < 0 {
             modifiers |= K_CONTROL_MASK as i32;
         }
-        if GetAsyncKeyState(0x12) < 0 {
+        if GetAsyncKeyState(VK_MENU as i32) < 0 {
             modifiers |= K_ALT_MASK as i32;
+        }
+        if GetKeyState(VK_CAPITAL as i32) & 0x01 != 0 {
+            modifiers |= K_LOCK_MASK as i32;
+        }
+        if is_key_up {
+            modifiers |= K_RELEASE_MASK as i32;
         }
         modifiers
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn get_key_modifiers() -> i32 {
+pub fn get_key_modifiers(_is_key_up: bool) -> i32 {
     0
 }
 
@@ -210,6 +257,36 @@ mod tests {
         assert_eq!(XK_ESCAPE, librime_sys2::RimeKeyCode_XK_Escape);
         assert_eq!(XK_DELETE, librime_sys2::RimeKeyCode_XK_Delete);
         assert_eq!(XK_SPACE, librime_sys2::RimeKeyCode_XK_space);
+    }
+
+    #[test]
+    fn test_vk_to_xk_letters_lowercase() {
+        assert_eq!(vk_to_xk(0x41), XK_A as i32);
+        assert_eq!(vk_to_xk(0x5A), XK_A as i32 + 25);
+        assert_eq!(vk_to_xk(0x61), XK_A as i32);
+    }
+
+    #[test]
+    fn test_vk_to_xk_oem_punctuation() {
+        assert_eq!(vk_to_xk(VK_OEM_1), XK_SEMICOLON);
+        assert_eq!(vk_to_xk(VK_OEM_7), XK_APOSTROPHE);
+        assert_eq!(vk_to_xk(VK_OEM_4), XK_BRACKETLEFT);
+        assert_eq!(vk_to_xk(VK_OEM_6), XK_BRACKETRIGHT);
+        assert_eq!(vk_to_xk(VK_OEM_COMMA), XK_COMMA);
+        assert_eq!(vk_to_xk(VK_OEM_PERIOD), XK_PERIOD);
+        assert_eq!(vk_to_xk(VK_OEM_MINUS), XK_MINUS);
+        assert_eq!(vk_to_xk(VK_OEM_PLUS), XK_EQUAL);
+        assert_eq!(vk_to_xk(VK_OEM_2), XK_SLASH);
+        assert_eq!(vk_to_xk(VK_OEM_5), XK_BACKSLASH);
+        assert_eq!(vk_to_xk(VK_OEM_3), XK_GRAVE);
+        assert_eq!(vk_to_xk(VK_CAPITAL), XK_CAPS_LOCK);
+    }
+
+    #[test]
+    fn test_vk_to_xk_misc() {
+        assert_eq!(vk_to_xk(VK_TAB), XK_TAB as i32);
+        assert_eq!(vk_to_xk(VK_SPACE), XK_SPACE as i32);
+        assert_eq!(vk_to_xk(0x31), XK_1 as i32);
     }
 
     #[test]
