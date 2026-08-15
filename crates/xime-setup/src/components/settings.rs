@@ -5,11 +5,12 @@ use iced::{Alignment, Element, Length};
 
 /// 设置页：标题 + 一组卡片（分组）。
 pub fn settings_page<'a, Message: 'a>(
-    title: &'a str,
+    title: impl Into<String>,
     colors: &ThemeColors,
     groups: Vec<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let colors = *colors;
+    let title = title.into();
 
     column![
         text(title)
@@ -29,12 +30,13 @@ pub fn settings_page<'a, Message: 'a>(
 
 /// 设置分组卡片：标题 + 可选描述 + 条目/自定义内容。
 pub fn settings_group<'a, Message: 'a>(
-    title: &'a str,
-    description: Option<&'a str>,
+    title: impl Into<String>,
+    description: Option<impl Into<String>>,
     colors: &ThemeColors,
     items: Vec<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let colors = *colors;
+    let title = title.into();
 
     let mut body = column![
         text(title)
@@ -46,7 +48,7 @@ pub fn settings_group<'a, Message: 'a>(
     .width(Length::Fill);
 
     if let Some(desc) = description {
-        body = body.push(text(desc).size(12).color(colors.foreground_muted));
+        body = body.push(text(desc.into()).size(12).color(colors.foreground_muted));
     }
 
     for item in items {
@@ -62,12 +64,13 @@ pub fn settings_group<'a, Message: 'a>(
 
 /// 设置条目：左侧 label + 描述，右侧控件。
 pub fn settings_item<'a, Message: 'a>(
-    label: &'a str,
-    description: Option<&'a str>,
+    label: impl Into<String>,
+    description: Option<impl Into<String>>,
     colors: &ThemeColors,
     control: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let colors = *colors;
+    let label = label.into();
 
     let mut left = column![
         text(label).size(14).color(colors.foreground),
@@ -76,7 +79,7 @@ pub fn settings_item<'a, Message: 'a>(
     .width(Length::Fill);
 
     if let Some(desc) = description {
-        left = left.push(text(desc).size(12).color(colors.foreground_muted));
+        left = left.push(text(desc.into()).size(12).color(colors.foreground_muted));
     }
 
     row![left, control]

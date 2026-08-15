@@ -41,13 +41,17 @@ fn open_directory(dir: &std::path::Path) {
 pub fn run() -> iced::Result {
     let icon = crate::Assets::get("image/icon.png")
         .and_then(|f| iced::window::icon::from_file_data(&f.data, None).ok());
+    let meta = xime_config::app_metadata();
+    let title: &'static str = Box::leak(
+        format!("{} 设置", meta.display_name).into_boxed_str(),
+    );
     iced::application(SettingsApp::new, update, view)
-        .title("Xime 设置")
+        .title(title)
         .window(iced::window::Settings {
             icon,
             platform_specific: iced::window::settings::PlatformSpecific {
                 #[cfg(target_os = "linux")]
-                application_id: "xime-setup".to_string(),
+                application_id: format!("{}-setup", meta.config_dir_name),
                 ..Default::default()
             },
             ..Default::default()
@@ -118,6 +122,16 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         }
         Message::UninstallPlugin(id) => {
             state.settings.uninstall_market_plugin(&id);
+            state.settings.plugin_uninstall_confirm = None;
+        }
+        Message::ConfirmUninstallPlugin(id) => {
+            state.settings.plugin_uninstall_confirm = Some(id);
+        }
+        Message::CancelUninstallPlugin => {
+            state.settings.plugin_uninstall_confirm = None;
+        }
+        Message::RefreshPlugins => {
+            state.settings.refresh_installed_plugins();
         }
         Message::TogglePlugin(id, enabled) => {
             state.settings.toggle_market_plugin(&id, enabled);

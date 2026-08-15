@@ -234,6 +234,9 @@ impl ThemeColors {
             warning: Color::from_rgb8(0xfb, 0xb0, 0x24),
             danger: self.error,
         };
-        iced::Theme::custom("xime".to_string(), palette)
+        iced::Theme::custom(
+            xime_config::app_metadata().config_dir_name.to_string(),
+            palette,
+        )
     }
 }

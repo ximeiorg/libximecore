@@ -6,12 +6,13 @@ use iced::widget::{column, svg, text, Space};
 use iced::{Alignment, Element, Length};
 
 pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    let meta = xime_config::app_metadata();
     settings_page(
-        "关于 Xime",
+        format!("关于 {}", meta.display_name),
         colors,
         vec![settings_group(
-            "Xime 输入法",
-            None,
+            format!("{} 输入法", meta.display_name),
+            None::<String>,
             colors,
             vec![about_content(colors)],
         )],
@@ -19,6 +20,7 @@ pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Elemen
 }
 
 fn about_content(colors: &ThemeColors) -> Element<'static, Message> {
+    let meta = xime_config::app_metadata();
     let logo: Element<'static, Message> = match crate::Assets::get("icons/xime.svg") {
         Some(f) => svg(svg::Handle::from_memory(f.data))
             .width(64)
@@ -29,8 +31,8 @@ fn about_content(colors: &ThemeColors) -> Element<'static, Message> {
 
     column![
         logo,
-        text("Xime").size(16).font(semibold()).color(colors.foreground),
-        text("版本 0.2.0").size(12).color(colors.foreground_muted),
+        text(meta.display_name).size(16).font(semibold()).color(colors.foreground),
+        text(format!("版本 {}", meta.version)).size(12).color(colors.foreground_muted),
         text("基于 Rime 引擎的五笔输入法").size(12).color(colors.foreground_muted),
         text("使用 librime + Iced 构建").size(12).color(colors.foreground_muted),
     ]

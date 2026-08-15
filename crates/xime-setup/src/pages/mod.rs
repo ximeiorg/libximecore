@@ -3,6 +3,7 @@ pub mod appearance;
 pub mod dictionary;
 pub mod hotkeys;
 pub mod input_schema;
+pub mod plugins;
 pub mod store;
 
 #[cfg(feature = "clipboard-page")]
@@ -27,6 +28,7 @@ pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
         ("icons/command.svg", "快捷键"),
         ("icons/word.svg", "词典"),
         ("icons/store.svg", "扩展商店"),
+        ("icons/extension.svg", "插件管理"),
     ];
 
     #[cfg(feature = "smart-suggestion-page")]
@@ -82,7 +84,7 @@ fn brand(colors: &ThemeColors) -> Element<'static, Message> {
     row![
         logo,
         column![
-            text("Xime")
+            text(xime_config::app_metadata().display_name)
                 .size(15)
                 .font(semibold())
                 .color(colors.foreground),
@@ -145,6 +147,7 @@ pub fn page_content<'a>(
         "快捷键" => hotkeys::view(settings, colors),
         "词典" => dictionary::view(settings, colors),
         "扩展商店" => store::view(settings, colors),
+        "插件管理" => plugins::view(settings, colors),
         #[cfg(feature = "smart-suggestion-page")]
         "智能联想" => smart_suggestion::view(settings, colors),
         #[cfg(target_os = "linux")]

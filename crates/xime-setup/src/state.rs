@@ -66,7 +66,6 @@ enum ModelTaskResult {
 }
 
 enum PluginTaskResult {
-    DownloadDone(String),
     InstallDone(String),
     UninstallDone(String),
     ToggleDone(String, bool),
@@ -133,7 +132,8 @@ fn markets_dir() -> std::path::PathBuf {
             let base = std::env::var("LOCALAPPDATA")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir());
-            base.join("xime").join("markets")
+            base.join(xime_config::app_metadata().config_dir_name)
+                .join("markets")
         })
 }
 
@@ -164,6 +164,12 @@ pub enum Message {
     InstallPlugin(String),
     /// 扩展商店：卸载插件。
     UninstallPlugin(String),
+    /// 插件管理：确认卸载（二次确认状态）。
+    ConfirmUninstallPlugin(String),
+    /// 插件管理：刷新已安装插件列表。
+    RefreshPlugins,
+    /// 插件管理：取消卸载确认。
+    CancelUninstallPlugin,
     /// 扩展商店：启用 / 禁用插件。
     TogglePlugin(String, bool),
     /// 扩展商店：方案市场 / 模型市场加载失败后重试。
@@ -195,7 +201,6 @@ pub enum Message {
     /// 订阅轮询：后台任务结果。
     BackgroundPoll,
 }
-
 #[derive(Clone)]
 pub struct SettingsState {
     pub appearance: AppearanceState,
@@ -205,6 +210,8 @@ pub struct SettingsState {
     pub market_schema: MarketSchemaState,
     pub market_model: MarketModelState,
     pub market_plugin: MarketPluginState,
+    /// 插件管理：等待确认卸载的插件 id（None=无）。
+    pub plugin_uninstall_confirm: Option<String>,
     pub current_page: usize,
     #[cfg(feature = "smart-suggestion-page")]
     pub smart_suggestion: SmartSuggestionState,
@@ -230,6 +237,7 @@ impl SettingsState {
             market_schema: MarketSchemaState::default(),
             market_model: MarketModelState::default(),
             market_plugin: MarketPluginState::default(),
+            plugin_uninstall_confirm: None,
             system_theme: SystemTheme::detect(),
             schemas_loaded: false,
             current_page: 0,
@@ -245,6 +253,7 @@ impl SettingsState {
         state.load_color_schemes();
         state.load_schemas();
         state.load_schema_config();
+        state.refresh_installed_plugins();
         state.start_load_market();
         state.start_load_models();
         state.start_load_plugins();
@@ -426,7 +435,7 @@ impl SettingsState {
     /// 显示结果消息：触发系统通知回调（若宿主注册了 `set_notify_message`）。
     pub fn show_message(&mut self, msg: String) {
         if let Some(f) = NOTIFY_MESSAGE.get() {
-            f("Xime", &msg);
+            f(xime_config::app_metadata().display_name, &msg);
         }
     }
 
@@ -760,9 +769,6 @@ impl SettingsState {
             return false;
         };
         match result {
-            PluginTaskResult::DownloadDone(id) => {
-                self.market_plugin.downloaded_ids.push(id);
-            }
             PluginTaskResult::InstallDone(id) => {
                 self.market_plugin.installed = self.installed_plugins();
                 self.market_plugin.downloaded_ids.retain(|i| i != &id);
@@ -805,10 +811,18 @@ impl SettingsState {
         self.market_plugin.download_progress = None;
         self.market_plugin.install_message = None;
 
+        // 下载即安装：下载到临时 .xipk 后立即解压注册，成功后删除临时包。
         std::thread::spawn(move || {
-            let result = do_download_plugin(&plugin);
+            let result = do_download_plugin(&plugin).and_then(|xipk| {
+                let install = plugin_manager()
+                    .install_from_zip(&xipk, true)
+                    .map(|_| ())
+                    .map_err(|e| anyhow::anyhow!("{}", e));
+                std::fs::remove_file(&xipk).ok();
+                install
+            });
             let task = match result {
-                Ok(()) => PluginTaskResult::DownloadDone(plugin.id.clone()),
+                Ok(()) => PluginTaskResult::InstallDone(plugin.id.clone()),
                 Err(e) => PluginTaskResult::Error(e.to_string()),
             };
             *plugin_task_result().lock().unwrap() = Some(task);
@@ -860,8 +874,13 @@ impl SettingsState {
         });
     }
 
-    fn installed_plugins(&self) -> Vec<xime_plugin::PluginRecord> {
+    pub fn installed_plugins(&self) -> Vec<xime_plugin::PluginRecord> {
         plugin_manager().list()
+    }
+
+    /// 插件管理页：重新扫描已安装插件列表。
+    pub fn refresh_installed_plugins(&mut self) {
+        self.market_plugin.installed = self.installed_plugins();
     }
 
     pub fn download_market_schema(&mut self, schema_id: &str) {
@@ -1032,7 +1051,8 @@ fn models_dir() -> std::path::PathBuf {
             let base = std::env::var("LOCALAPPDATA")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir());
-            base.join("xime").join("models")
+            base.join(xime_config::app_metadata().config_dir_name)
+                .join("models")
         })
 }
 
@@ -1046,7 +1066,8 @@ fn plugins_dir() -> std::path::PathBuf {
             let base = std::env::var("LOCALAPPDATA")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir());
-            base.join("xime").join("plugins")
+            base.join(xime_config::app_metadata().config_dir_name)
+                .join("plugins")
         })
 }
 
@@ -1477,7 +1498,8 @@ fn do_download_model(model: &MarketModel) -> anyhow::Result<()> {
 }
 
 /// 下载插件 .xipk 到插件目录（plugins/<id>.xipk，与已安装插件 plugins/<id>/ 目录同根）。
-fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<()> {
+/// 下载插件包到临时文件并返回路径（调用方负责安装后删除）。
+fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<std::path::PathBuf> {
     let version = plugin
         .versions
         .iter()
@@ -1490,7 +1512,7 @@ fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("缺少下载地址"))?;
     anyhow::ensure!(!download.url.is_empty(), "缺少下载地址");
 
-    let dest = plugins_dir().join(format!("{}.xipk", plugin.id));
+    let dest = std::env::temp_dir().join(format!("{}.xipk", plugin.id));
     download_file(
         &download.url,
         &dest,
@@ -1499,7 +1521,7 @@ fn do_download_plugin(plugin: &MarketPlugin) -> anyhow::Result<()> {
             *download_progress().lock().unwrap() = Some((plugin.id.clone(), progress as f32));
         },
     )?;
-    Ok(())
+    Ok(dest)
 }
 
 /// 从插件目录安装已下载的插件包。
@@ -1534,6 +1556,10 @@ fn download_file(
 
     let mut reader = response.body_mut().as_reader();
     let mut hasher = sha256.map(|_| sha2::Sha256::new());
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("创建目录失败: {}", e))?;
+    }
     let mut output =
         std::fs::File::create(dest).map_err(|e| anyhow::anyhow!("创建文件失败: {}", e))?;
 

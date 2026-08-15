@@ -306,18 +306,12 @@ fn schema_card<'a>(
         })
         .unwrap_or_default();
 
-    let deps = schema.dependencies.clone().unwrap_or_default();
     let glyph = schema
         .tags
         .first()
         .and_then(|t| t.chars().next())
         .or_else(|| schema.name.chars().next())
         .unwrap_or('方');
-
-    let mut meta = String::new();
-    if !size_label.is_empty() {
-        meta.push_str(size_label.as_str());
-    }
 
     let header = row![
         glyph_box(glyph, schema_icon_color(colors)),
@@ -337,16 +331,19 @@ fn schema_card<'a>(
                     text("").size(15).into()
                 },
                 container(text("")).width(Length::Fill),
-                if schema.author.is_empty() {
+                if size_label.is_empty() {
                     text("").size(12)
                 } else {
-                    text(schema.author.clone())
-                        .size(12)
-                        .color(colors.foreground_muted)
+                    text(size_label).size(12).color(colors.foreground_muted)
                 },
             ]
             .spacing(6)
             .align_y(Alignment::Center),
+            if schema.author.is_empty() && schema.tags.is_empty() {
+                iced::widget::Space::new().height(12).into()
+            } else {
+                author_tags_row(&schema.author, &schema.tags, colors)
+            },
             text(truncate(&schema.description, DESC_MAX_CHARS))
                 .size(12)
                 .color(colors.foreground_muted),
@@ -360,14 +357,6 @@ fn schema_card<'a>(
 
     let mut body = column![header].spacing(10).width(Length::Fill);
 
-    if !deps.is_empty() {
-        let mut deps_row = row![].spacing(4);
-        for dep in deps.iter().take(4) {
-            deps_row = deps_row.push(pill(dep, colors));
-        }
-        body = body.push(deps_row);
-    }
-
     if let Some(warning) = &schema.warning {
         if !warning.is_empty() {
             body = body.push(warning_box(warning, colors));
@@ -376,12 +365,6 @@ fn schema_card<'a>(
 
     body = body.push(
         row![
-            if meta.is_empty() {
-                text("").size(12)
-            } else {
-                text(meta).size(12).color(colors.foreground_muted)
-            },
-            container(text("")).width(Length::Fill),
             version_selector(
                 schema.id.clone(),
                 versions,
@@ -389,14 +372,6 @@ fn schema_card<'a>(
                 colors,
                 Message::SchemaVersionSelected
             ),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill),
-    );
-
-    body = body.push(
-        row![
             container(text("")).width(Length::Fill),
             schema_action(
                 schema.id.clone(),
@@ -408,6 +383,7 @@ fn schema_card<'a>(
                 colors,
             ),
         ]
+        .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill),
     );
@@ -438,15 +414,9 @@ fn schema_action<'a>(
         };
         disabled_button(label, colors)
     } else if installed {
-        row![
-            button_primary("部署", &colors, Message::DeploySchemas),
-            text("已安装").size(12).color(colors.foreground_muted),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+        text("已安装").size(12).color(colors.foreground_muted).into()
     } else if downloaded {
-        button_primary("安装", &colors, Message::InstallSchema(schema_id)).into()
+        text("已下载").size(12).color(colors.foreground_muted).into()
     } else {
         button_primary("下载", &colors, Message::DownloadSchema(schema_id)).into()
     }
@@ -566,22 +536,11 @@ fn model_card<'a>(
         .or_else(|| model.name.chars().next())
         .unwrap_or('模');
 
-    let mut meta = String::new();
-    if !category_label.is_empty() {
-        meta.push_str(&category_label);
-    }
-    if !size_label.is_empty() {
-        if !meta.is_empty() {
-            meta.push_str("  ·  ");
-        }
-        meta.push_str(size_label.as_str());
-    }
-    if !version.is_empty() {
-        if !meta.is_empty() {
-            meta.push_str("  ·  ");
-        }
-        meta.push_str(&format!("v{version}"));
-    }
+    let tags = if category_label.is_empty() {
+        Vec::new()
+    } else {
+        vec![category_label]
+    };
 
     let mut body = column![row![
         glyph_box(glyph, model_icon_color(&model.category, colors)),
@@ -596,16 +555,19 @@ fn model_card<'a>(
                 .font(semibold())
                 .color(colors.foreground),
                 container(text("")).width(Length::Fill),
-                if model.author.is_empty() {
+                if size_label.is_empty() {
                     text("").size(12)
                 } else {
-                    text(model.author.clone())
-                        .size(12)
-                        .color(colors.foreground_muted)
+                    text(size_label).size(12).color(colors.foreground_muted)
                 },
             ]
             .spacing(6)
             .align_y(Alignment::Center),
+            if model.author.is_empty() && tags.is_empty() {
+                iced::widget::Space::new().height(12).into()
+            } else {
+                author_tags_row(&model.author, &tags, colors)
+            },
             if model.description.is_empty() {
                 text("").size(12)
             } else {
@@ -623,30 +585,19 @@ fn model_card<'a>(
     .spacing(10)
     .width(Length::Fill);
 
-    let footer = row![
-        if meta.is_empty() {
-            text("").size(12)
-        } else {
-            text(meta).size(12).color(colors.foreground_muted)
-        },
-        container(text("")).width(Length::Fill),
-        version_selector(
-            model.id.clone(),
-            versions,
-            version,
-            colors,
-            Message::ModelVersionSelected
-        ),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-
-    body = body.push(footer);
     body = body.push(
         row![
+            version_selector(
+                model.id.clone(),
+                versions,
+                version,
+                colors,
+                Message::ModelVersionSelected
+            ),
             container(text("")).width(Length::Fill),
             model_action(model.id.clone(), downloaded, downloading, progress, colors,),
         ]
+        .spacing(8)
         .align_y(Alignment::Center)
         .width(Length::Fill),
     );
@@ -816,16 +767,11 @@ fn plugin_card<'a>(
     let kind_label = plugin_category_label(kind);
     let glyph = kind_label.chars().next().unwrap_or('插');
 
-    let mut meta = String::new();
-    if !kind_label.is_empty() {
-        meta.push_str(&kind_label);
-    }
-    if !version.is_empty() {
-        if !meta.is_empty() {
-            meta.push('　');
-        }
-        meta.push_str(&format!("v{version}"));
-    }
+    let tags = if kind_label.is_empty() {
+        Vec::new()
+    } else {
+        vec![kind_label]
+    };
 
     let installed_version = installed
         .as_ref()
@@ -846,17 +792,14 @@ fn plugin_card<'a>(
                 .size(15)
                 .font(semibold())
                 .color(colors.foreground),
-                container(text("")).width(Length::Fill),
-                if plugin.author.is_empty() {
-                    text("").size(12)
-                } else {
-                    text(plugin.author.clone())
-                        .size(12)
-                        .color(colors.foreground_muted)
-                },
             ]
             .spacing(6)
             .align_y(Alignment::Center),
+            if plugin.author.is_empty() && tags.is_empty() {
+                iced::widget::Space::new().height(12).into()
+            } else {
+                author_tags_row(&plugin.author, &tags, colors)
+            },
             if plugin.description.is_empty() {
                 text("").size(12)
             } else {
@@ -875,10 +818,21 @@ fn plugin_card<'a>(
     .width(Length::Fill);
 
     let mut footer = row![
-        if meta.is_empty() {
+        if version.is_empty() {
             text("").size(12)
         } else {
-            text(meta).size(12).color(colors.foreground_muted)
+            text(format!("v{version}")).size(12).color(colors.primary)
+        },
+        if is_installed {
+            text(if enabled { "已启用" } else { "已禁用" })
+                .size(12)
+                .color(colors.foreground_muted)
+        } else if !installed_version.is_empty() {
+            text(format!("已安装 v{installed_version}"))
+                .size(12)
+                .color(colors.foreground_muted)
+        } else {
+            text("").size(12)
         },
         container(text("")).width(Length::Fill),
     ]
@@ -890,34 +844,18 @@ fn plugin_card<'a>(
         footer = footer.push(switch(enabled, colors, move |on| {
             Message::TogglePlugin(plugin.id.clone(), on)
         }));
-        footer = footer.push(text(if enabled { "已启用" } else { "已禁用" })
-            .size(12)
-            .color(colors.foreground_muted));
-    } else if !installed_version.is_empty() {
-        footer = footer.push(
-            text(format!("已安装 v{installed_version}"))
-                .size(12)
-                .color(colors.foreground_muted),
-        );
     }
+    footer = footer.push(plugin_action(
+        plugin.id.clone(),
+        is_installed,
+        downloaded,
+        downloading,
+        installing,
+        progress,
+        colors,
+    ));
 
     body = body.push(footer);
-    body = body.push(
-        row![
-            container(text("")).width(Length::Fill),
-            plugin_action(
-                plugin.id.clone(),
-                is_installed,
-                downloaded,
-                downloading,
-                installing,
-                progress,
-                colors,
-            ),
-        ]
-        .align_y(Alignment::Center)
-        .width(Length::Fill),
-    );
 
     container(body)
         .width(Length::Fill)
@@ -954,6 +892,26 @@ fn plugin_action<'a>(
 }
 
 // ---- 公共小组件 ----
+
+/// 卡片标题下方的「作者 + 标签」行。
+fn author_tags_row<'a>(
+    author: &str,
+    tags: &[String],
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    let mut row = row![].spacing(6).align_y(Alignment::Center);
+    if !author.is_empty() {
+        row = row.push(
+            text(author.to_string())
+                .size(12)
+                .color(colors.foreground_muted),
+        );
+    }
+    for tag in tags.iter().take(3) {
+        row = row.push(pill(tag, colors));
+    }
+    row.into()
+}
 
 fn center_msg<'a>(colors: &'a ThemeColors, msg: &'a str) -> Element<'a, Message> {
     container(text(msg).size(14).color(colors.foreground_muted))

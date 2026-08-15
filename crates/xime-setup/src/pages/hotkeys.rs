@@ -6,13 +6,14 @@ use iced::widget::row;
 use iced::Element;
 
 pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    let display_name = xime_config::app_metadata().display_name;
     settings_page(
         "快捷键",
         colors,
         vec![
             settings_group(
                 "常用快捷键",
-                Some("Xime 输入法快捷键配置"),
+                Some(format!("{display_name} 输入法快捷键配置")),
                 colors,
                 vec![
                     settings_item(
@@ -62,7 +63,7 @@ pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Elemen
             ),
             settings_group(
                 "操作",
-                None,
+                None::<String>,
                 colors,
                 vec![
                     settings_item(

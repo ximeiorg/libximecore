@@ -36,7 +36,7 @@ pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Elemen
                     "远程目录",
                     Some("远程存储目录名称"),
                     colors,
-                    label("xime", colors),
+                    label(xime_config::app_metadata().config_dir_name, colors),
                 ),
             ],
         )],

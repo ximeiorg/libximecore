@@ -24,7 +24,7 @@ pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Elemen
             ),
             settings_group(
                 "操作",
-                None,
+                None::<String>,
                 colors,
                 vec![row![button_primary("开始配对", colors, Message::StartPairing)].into()],
             ),
