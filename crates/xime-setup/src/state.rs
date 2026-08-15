@@ -76,6 +76,7 @@ static NOTIFY_DEPLOY: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_RELOAD_STYLE: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_SELECT_SCHEMA: OnceLock<fn(&str) -> bool> = OnceLock::new();
 static NOTIFY_MESSAGE: OnceLock<fn(&str, &str)> = OnceLock::new();
+static NOTIFY_RELOAD_PLUGINS: OnceLock<fn()> = OnceLock::new();
 
 /// 设置宿主进程的「部署后重载」回调（daemon 重载配置）。
 pub fn set_notify_deploy(f: fn()) {
@@ -97,6 +98,17 @@ pub fn set_notify_select_schema(f: fn(&str) -> bool) {
 /// 宿主可用它发系统通知；未注册则消息仅在页面底部显示。
 pub fn set_notify_message(f: fn(&str, &str)) {
     let _ = NOTIFY_MESSAGE.set(f);
+}
+
+/// 设置宿主进程的「插件变更」回调（daemon 重载插件：安装/卸载/启停后触发）。
+pub fn set_notify_reload_plugins(f: fn()) {
+    let _ = NOTIFY_RELOAD_PLUGINS.set(f);
+}
+
+fn notify_daemon_reload_plugins() {
+    if let Some(f) = NOTIFY_RELOAD_PLUGINS.get() {
+        f();
+    }
 }
 
 fn notify_daemon_reload() -> bool {
@@ -772,15 +784,18 @@ impl SettingsState {
             PluginTaskResult::InstallDone(id) => {
                 self.market_plugin.installed = self.installed_plugins();
                 self.market_plugin.downloaded_ids.retain(|i| i != &id);
+                notify_daemon_reload_plugins();
             }
             PluginTaskResult::UninstallDone(id) => {
                 self.market_plugin.installed = self.installed_plugins();
                 self.market_plugin.downloaded_ids.retain(|i| i != &id);
+                notify_daemon_reload_plugins();
             }
             PluginTaskResult::ToggleDone(id, enabled) => {
                 if let Some(p) = self.market_plugin.installed.iter_mut().find(|p| p.id == id) {
                     p.enabled = enabled;
                 }
+                notify_daemon_reload_plugins();
             }
             PluginTaskResult::Error(e) => {
                 self.market_plugin.install_message = Some(e);
