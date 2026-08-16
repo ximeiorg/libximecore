@@ -167,10 +167,7 @@ impl SchemaManager {
         let Ok(content) = std::fs::read_to_string(&default_custom) else {
             return Vec::new();
         };
-        content
-            .lines()
-            .filter_map(extract_schema_line)
-            .collect()
+        content.lines().filter_map(extract_schema_line).collect()
     }
 }
 

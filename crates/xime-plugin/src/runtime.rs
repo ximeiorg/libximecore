@@ -6,6 +6,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+use base64::Engine;
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
+
 /// 运行时错误。
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -397,6 +401,47 @@ fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::R
     )?;
     host.set("zlib", zlib)?;
 
+    // ---- crypto（契约同 Android CryptoHostApi；clipboard_sync 协议插件签名用）----
+    let crypto = lua.create_table()?;
+    crypto.set(
+        "sha256",
+        lua.create_function(|lua, data: mlua::LuaString| -> LuaResult<Value> {
+            let digest = Sha256::digest(data.as_bytes());
+            Ok(Value::String(lua.create_string(digest.as_slice())?))
+        })?,
+    )?;
+    crypto.set(
+        "hmacSha256",
+        lua.create_function(
+            |lua, (key, data): (mlua::LuaString, mlua::LuaString)| -> LuaResult<Value> {
+                let mut mac = Hmac::<Sha256>::new_from_slice(&key.as_bytes())
+                    .map_err(|_| mlua::Error::RuntimeError("invalid hmac key".into()))?;
+                mac.update(&data.as_bytes());
+                let out = mac.finalize().into_bytes();
+                Ok(Value::String(lua.create_string(out.as_slice())?))
+            },
+        )?,
+    )?;
+    crypto.set(
+        "hex",
+        lua.create_function(|_, data: mlua::LuaString| -> LuaResult<String> {
+            Ok(hex::encode(data.as_bytes()))
+        })?,
+    )?;
+    crypto.set(
+        "base64",
+        lua.create_function(|_, data: mlua::LuaString| -> LuaResult<String> {
+            Ok(base64::engine::general_purpose::STANDARD.encode(data.as_bytes()))
+        })?,
+    )?;
+    crypto.set(
+        "utcTime",
+        lua.create_function(|_, format: String| -> LuaResult<String> {
+            Ok(format_utc_time(&format))
+        })?,
+    )?;
+    host.set("crypto", crypto)?;
+
     // ---- http（同步白名单请求，20s 超时）----
     let http = lua.create_table()?;
     http.set(
@@ -486,6 +531,63 @@ fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::R
     host.set("http", http)?;
 
     Ok(host)
+}
+
+/// 当前 UTC 时间按 SigV4 占位符格式化（同 Android CryptoHostApi）：
+/// `"YYYYMMDDTHHMMSSZ"` → `"20260816T123000Z"`，`"YYYYMMDD"` → `"20260816"`。
+fn format_utc_time(format: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    format_utc_time_from_epoch(now, format)
+}
+
+/// 按给定 epoch 秒格式化（占位符按出现顺序解析：YYYY=年、MM=月/分（HH 之后为分）、
+/// DD=日、HH=时、SS=秒，其余字符字面输出）。civil-from-days 算法（Howard Hinnant）。
+fn format_utc_time_from_epoch(now_secs: i64, format: &str) -> String {
+    let days = now_secs.div_euclid(86_400);
+    let rem = now_secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y0 = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = y0 + i64::from(m <= 2);
+
+    let mut out = String::with_capacity(format.len() + 8);
+    let bytes = format.as_bytes();
+    let mut i = 0;
+    let mut saw_hour = false;
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"YYYY") {
+            out.push_str(&format!("{y:04}"));
+            i += 4;
+        } else if bytes[i..].starts_with(b"MM") {
+            out.push_str(&format!("{:02}", if saw_hour { mm } else { m }));
+            i += 2;
+        } else if bytes[i..].starts_with(b"DD") {
+            out.push_str(&format!("{d:02}"));
+            i += 2;
+        } else if bytes[i..].starts_with(b"HH") {
+            saw_hour = true;
+            out.push_str(&format!("{hh:02}"));
+            i += 2;
+        } else if bytes[i..].starts_with(b"SS") {
+            out.push_str(&format!("{ss:02}"));
+            i += 2;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 fn load_config(path: &Path) -> Result<HashMap<String, String>, RuntimeError> {
@@ -723,6 +825,73 @@ return plugin
         // 不存在的模块报错
         let err: mlua::Result<String> = lua.load("return require('nope')").eval();
         assert!(err.is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn format_utc_time_matches_sigv4_shapes() {
+        // epoch 0 = 1970-01-01T00:00:00Z
+        assert_eq!(
+            format_utc_time_from_epoch(0, "YYYYMMDDTHHMMSSZ"),
+            "19700101T000000Z"
+        );
+        assert_eq!(format_utc_time_from_epoch(0, "YYYYMMDD"), "19700101");
+        // 已知日期：2023-08-11T12:00:00Z = 1691755200
+        assert_eq!(
+            format_utc_time_from_epoch(1_691_755_200, "YYYYMMDDTHHMMSSZ"),
+            "20230811T120000Z"
+        );
+        assert_eq!(
+            format_utc_time_from_epoch(1_691_755_200, "YYYYMMDD"),
+            "20230811"
+        );
+        // 未知占位符按字面输出
+        assert_eq!(format_utc_time_from_epoch(0, "T"), "T");
+    }
+
+    #[test]
+    fn host_crypto_roundtrip() {
+        let dir = extract_kaomoji("crypto");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let lua = &runtime.lua;
+
+        // sha256("abc") 已知摘要
+        let sha: String = lua
+            .load("return host.crypto.hex(host.crypto.sha256('abc'))")
+            .eval()
+            .unwrap();
+        assert_eq!(
+            sha,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        // base64（Basic Auth 用）
+        let b64: String = lua
+            .load("return host.crypto.base64('user:pass')")
+            .eval()
+            .unwrap();
+        assert_eq!(b64, "dXNlcjpwYXNz");
+
+        // hmacSha256（RFC 4231 测试向量 key="key" data="The quick brown fox jumps over the lazy dog"）
+        let hmac: String = lua
+            .load(
+                "return host.crypto.hex(host.crypto.hmacSha256('key', 'The quick brown fox jumps over the lazy dog'))",
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            hmac,
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+
+        // utcTime 格式形状
+        let now: String = lua
+            .load("return host.crypto.utcTime('YYYYMMDDTHHMMSSZ')")
+            .eval()
+            .unwrap();
+        assert_eq!(now.len(), 16);
+        assert!(now.ends_with('Z') && now.as_bytes()[8] == b'T');
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

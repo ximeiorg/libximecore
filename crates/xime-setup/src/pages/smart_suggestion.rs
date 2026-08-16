@@ -34,7 +34,12 @@ pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Elemen
                 "操作",
                 None::<String>,
                 colors,
-                vec![row![button_primary("保存设置", colors, Message::SaveSmartSuggestion)].into()],
+                vec![row![button_primary(
+                    "保存设置",
+                    colors,
+                    Message::SaveSmartSuggestion
+                )]
+                .into()],
             ),
         ],
     )

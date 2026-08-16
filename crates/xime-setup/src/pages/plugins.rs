@@ -1,4 +1,6 @@
-use crate::components::widgets::{button_danger, card_style, semibold, switch, text_button, RADIUS_MD};
+use crate::components::widgets::{
+    button_danger, card_style, semibold, switch, text_button, RADIUS_MD,
+};
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{column, container, row, text};
@@ -8,18 +10,16 @@ use iced::{border, Alignment, Background, Border, Color, Element, Length};
 pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     let installed = &settings.market_plugin.installed;
 
-    let mut content = column![
-        row![
-            text("插件管理")
-                .size(20)
-                .font(semibold())
-                .color(colors.foreground)
-                .width(Length::Fill),
-            text_button("刷新", colors, Message::RefreshPlugins),
-        ]
-        .align_y(Alignment::Center)
-        .width(Length::Fill),
+    let mut content = column![row![
+        text("插件管理")
+            .size(20)
+            .font(semibold())
+            .color(colors.foreground)
+            .width(Length::Fill),
+        text_button("刷新", colors, Message::RefreshPlugins),
     ]
+    .align_y(Alignment::Center)
+    .width(Length::Fill),]
     .spacing(16)
     .padding(20)
     .width(Length::Fill);
@@ -40,7 +40,9 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
 fn empty_state<'a>(colors: &'a ThemeColors) -> Element<'a, Message> {
     container(
         column![
-            text("暂无已安装的插件").size(14).color(colors.foreground_muted),
+            text("暂无已安装的插件")
+                .size(14)
+                .color(colors.foreground_muted),
             text("从扩展商店下载插件后会显示在这里")
                 .size(12)
                 .color(colors.foreground_faint),
@@ -65,11 +67,9 @@ fn plugin_row<'a>(
 
     let confirming = settings.plugin_uninstall_confirm.as_deref() == Some(plugin.id.as_str());
 
-    let mut right = row![
-        switch(enabled, colors, move |on| {
-            Message::TogglePlugin(plugin.id.clone(), on)
-        }),
-    ]
+    let mut right = row![switch(enabled, colors, move |on| {
+        Message::TogglePlugin(plugin.id.clone(), on)
+    }),]
     .spacing(8)
     .align_y(Alignment::Center);
 
@@ -77,13 +77,21 @@ fn plugin_row<'a>(
         right = right.push(
             row![
                 text_button("取消", colors, Message::CancelUninstallPlugin),
-                button_danger("确认卸载", colors, Message::UninstallPlugin(plugin.id.clone())),
+                button_danger(
+                    "确认卸载",
+                    colors,
+                    Message::UninstallPlugin(plugin.id.clone())
+                ),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
         );
     } else {
-        right = right.push(button_danger("卸载", colors, Message::ConfirmUninstallPlugin(plugin.id.clone())));
+        right = right.push(button_danger(
+            "卸载",
+            colors,
+            Message::ConfirmUninstallPlugin(plugin.id.clone()),
+        ));
     }
 
     let body = row![

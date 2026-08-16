@@ -1,8 +1,9 @@
-pub use librime::levers::SchemaInfo;
 use crate::metadata::app_metadata;
+pub use librime::levers::SchemaInfo;
 use librime::{
     create_session, get_api, initialize, join_maintenance_thread, setup, start_maintenance, Traits,
-};use std::ffi::CString;
+};
+use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::{Once, OnceLock};
 
@@ -145,6 +146,9 @@ mod tests {
             "user dir: {}",
             user.display()
         );
-        assert_ne!(shared, user, "shared/user 必须分离，默认文件不得落入用户目录");
+        assert_ne!(
+            shared, user,
+            "shared/user 必须分离，默认文件不得落入用户目录"
+        );
     }
 }

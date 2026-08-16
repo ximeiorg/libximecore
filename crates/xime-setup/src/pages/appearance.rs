@@ -62,9 +62,12 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                 "操作",
                 None::<String>,
                 colors,
-                vec![
-                    row![button_primary("保存外观设置", colors, Message::SaveAppearance)].into(),
-                ],
+                vec![row![button_primary(
+                    "保存外观设置",
+                    colors,
+                    Message::SaveAppearance
+                )]
+                .into()],
             ),
         ],
     )

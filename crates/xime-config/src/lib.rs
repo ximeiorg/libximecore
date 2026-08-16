@@ -94,7 +94,11 @@ impl XimeConfig {
 
         // Linux: /usr/share/xime/xime.yaml
         if cfg!(unix) {
-            paths.push(PathBuf::from("/usr/share").join(config_dir).join(&config_file));
+            paths.push(
+                PathBuf::from("/usr/share")
+                    .join(config_dir)
+                    .join(&config_file),
+            );
         }
 
         // Windows: data/xime.yaml next to exe
@@ -117,7 +121,9 @@ impl XimeConfig {
         // macOS: ~/Library/Application Support/Xime/xime.custom.yaml
         if cfg!(target_os = "macos") {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-            let base = PathBuf::from(&home).join("Library/Application Support").join(config_dir);
+            let base = PathBuf::from(&home)
+                .join("Library/Application Support")
+                .join(config_dir);
             for path in &[base.join(&custom_file), base.join(&config_file)] {
                 if path.exists() {
                     return path.clone();

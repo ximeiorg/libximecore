@@ -47,18 +47,8 @@ pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Elemen
                 Some("候选词翻页和选择"),
                 colors,
                 vec![
-                    settings_item(
-                        "下一页",
-                        Some("候选词翻到下一页"),
-                        colors,
-                        kbd("[", colors),
-                    ),
-                    settings_item(
-                        "上一页",
-                        Some("候选词翻到上一页"),
-                        colors,
-                        kbd("]", colors),
-                    ),
+                    settings_item("下一页", Some("候选词翻到下一页"), colors, kbd("[", colors)),
+                    settings_item("上一页", Some("候选词翻到上一页"), colors, kbd("]", colors)),
                 ],
             ),
             settings_group(

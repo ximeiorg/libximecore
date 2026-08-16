@@ -130,10 +130,11 @@ fn link_librime(dist: Option<PathBuf>) {
         println!("cargo:rustc-link-search=native={}", lib.display());
         println!("cargo:rustc-link-lib=dylib=rime");
         // 运行时优先加载子模块构建的 librime（如 dist 不存在则该 rpath 条目被忽略）。
-        let rpath = lib
-            .canonicalize()
-            .unwrap_or_else(|_| lib.clone());
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", rpath.to_string_lossy());
+        let rpath = lib.canonicalize().unwrap_or_else(|_| lib.clone());
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            rpath.to_string_lossy()
+        );
     } else {
         println!("cargo:rustc-link-lib=dylib=rime");
         if let Ok(lib_dir) = env::var("RIME_LIB_DIR") {

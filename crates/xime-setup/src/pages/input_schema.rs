@@ -1,6 +1,4 @@
-use crate::components::widgets::{
-    badge, button_danger, button_primary, card_style, semibold,
-};
+use crate::components::widgets::{badge, button_danger, button_primary, card_style, semibold};
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, row, text};

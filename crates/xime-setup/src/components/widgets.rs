@@ -291,24 +291,31 @@ pub fn text_button<'a, Message: Clone>(
 
 /// 普通文本标签。
 pub fn label<'a, Message: 'a>(text_: &'a str, colors: &ThemeColors) -> Element<'a, Message> {
-    text(text_.to_string()).size(14).color(colors.foreground).into()
+    text(text_.to_string())
+        .size(14)
+        .color(colors.foreground)
+        .into()
 }
 
 /// 键盘按键样式（kbd）。
 pub fn kbd<'a, Message: 'a>(key: &'a str, colors: &ThemeColors) -> Element<'a, Message> {
     let colors = *colors;
-    container(text(key.to_string()).size(12).color(colors.foreground_muted))
-        .padding([3, 8])
-        .style(move |_| container::Style {
-            background: Some(Background::Color(colors.surface_variant)),
-            border: Border {
-                color: colors.border,
-                width: 1.0,
-                radius: border::radius(6.0),
-            },
-            ..container::Style::default()
-        })
-        .into()
+    container(
+        text(key.to_string())
+            .size(12)
+            .color(colors.foreground_muted),
+    )
+    .padding([3, 8])
+    .style(move |_| container::Style {
+        background: Some(Background::Color(colors.surface_variant)),
+        border: Border {
+            color: colors.border,
+            width: 1.0,
+            radius: border::radius(6.0),
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 
 /// 状态胶囊：圆角标签。
@@ -371,15 +378,11 @@ pub fn number_input<'a, Message: Clone + 'a>(
     let can_dec = value > min;
     let can_inc = value < max;
 
-    let dec_btn = button(
-        text("−")
-            .size(16)
-            .color(if can_dec {
-                colors.foreground
-            } else {
-                colors.disabled
-            }),
-    )
+    let dec_btn = button(text("−").size(16).color(if can_dec {
+        colors.foreground
+    } else {
+        colors.disabled
+    }))
     .padding([5, 12])
     .style(move |_theme, status| number_button_style(&colors, status));
     let dec_btn = if can_dec {
@@ -388,15 +391,11 @@ pub fn number_input<'a, Message: Clone + 'a>(
         dec_btn
     };
 
-    let inc_btn = button(
-        text("+")
-            .size(16)
-            .color(if can_inc {
-                colors.foreground
-            } else {
-                colors.disabled
-            }),
-    )
+    let inc_btn = button(text("+").size(16).color(if can_inc {
+        colors.foreground
+    } else {
+        colors.disabled
+    }))
     .padding([5, 12])
     .style(move |_theme, status| number_button_style(&colors, status));
     let inc_btn = if can_inc {

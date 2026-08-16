@@ -208,6 +208,20 @@ pub enum Message {
     SaveSmartSuggestion,
     #[cfg(feature = "clipboard-page")]
     ClearClipboardHistory,
+    #[cfg(feature = "clipboard-page")]
+    ServerStart,
+    #[cfg(feature = "clipboard-page")]
+    ServerStop,
+    #[cfg(feature = "clipboard-page")]
+    ServerRestart,
+    #[cfg(feature = "clipboard-page")]
+    ServerAddrChanged(String),
+    #[cfg(feature = "clipboard-page")]
+    ServerUsernameChanged(String),
+    #[cfg(feature = "clipboard-page")]
+    ServerPasswordChanged(String),
+    #[cfg(feature = "clipboard-page")]
+    OpenSyncDataDir,
     #[cfg(feature = "pair-page")]
     StartPairing,
     /// 订阅轮询：后台任务结果。
@@ -377,8 +391,7 @@ impl SettingsState {
         manager.set_schema_list(&refs)?;
         manager.save()?;
 
-        xime_config::rime_deploy::deploy_all_schemas()
-            .map_err(|e| format!("部署失败: {}", e))
+        xime_config::rime_deploy::deploy_all_schemas().map_err(|e| format!("部署失败: {}", e))
     }
 
     pub fn save_schema_config(&self) -> Result<(), String> {
@@ -673,6 +686,8 @@ impl SettingsState {
         self.poll_plugin_task();
         self.poll_download_progress();
         self.expire_install_messages();
+        #[cfg(feature = "clipboard-page")]
+        self.clipboard.poll();
     }
 
     /// 扩展商店安装/卸载消息 4 秒后自动消失。
@@ -1106,8 +1121,223 @@ pub struct SmartSuggestionState {
 pub struct PairState {}
 
 #[cfg(feature = "clipboard-page")]
-#[derive(Clone, Default)]
-pub struct ClipboardState {}
+pub struct ClipboardState {
+    /// 同步服务器配置文件（~/.config/xime/xime-sync.toml）。
+    pub config_path: std::path::PathBuf,
+    /// 监听地址（server.addr）。
+    pub server_addr: String,
+    /// 认证用户名（auth.username）。
+    pub username: String,
+    /// 认证密码（auth.password，写入配置文件，权限 0600）。
+    pub password: String,
+    /// 数据目录（server.data_dir）。
+    pub data_dir: String,
+    /// 服务器子进程是否运行。
+    pub running: bool,
+    /// 最近一次操作的状态消息。
+    pub status_message: Option<String>,
+    /// 服务器子进程句柄（仅启动后持有）。
+    child: Option<std::process::Child>,
+}
+
+/// 设置程序管理的 server 配置片段（字段名与 xime-sync-server 配置对齐，
+/// 其余字段由 server 用内嵌默认值补全）。
+#[cfg(feature = "clipboard-page")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SyncConfigFile {
+    #[serde(default)]
+    server: SyncServerSection,
+    #[serde(default)]
+    auth: SyncAuthSection,
+}
+
+#[cfg(feature = "clipboard-page")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SyncServerSection {
+    addr: Option<String>,
+    data_dir: Option<String>,
+}
+
+#[cfg(feature = "clipboard-page")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SyncAuthSection {
+    username: Option<String>,
+    password: Option<String>,
+}
+
+#[cfg(feature = "clipboard-page")]
+impl Default for ClipboardState {
+    fn default() -> Self {
+        Self::load()
+    }
+}
+
+#[cfg(feature = "clipboard-page")]
+impl Clone for ClipboardState {
+    fn clone(&self) -> Self {
+        Self {
+            config_path: self.config_path.clone(),
+            server_addr: self.server_addr.clone(),
+            username: self.username.clone(),
+            password: self.password.clone(),
+            data_dir: self.data_dir.clone(),
+            running: self.running,
+            status_message: self.status_message.clone(),
+            child: None,
+        }
+    }
+}
+
+#[cfg(feature = "clipboard-page")]
+impl ClipboardState {
+    pub fn load() -> Self {
+        let config_path = sync_config_path();
+        let mut st = Self {
+            config_path,
+            server_addr: "0.0.0.0:8443".to_string(),
+            username: "xime".to_string(),
+            password: String::new(),
+            data_dir: sync_data_dir().to_string_lossy().into_owned(),
+            running: false,
+            status_message: None,
+            child: None,
+        };
+        st.read_config();
+        st
+    }
+
+    /// 从配置文件读取已有设置（缺失走默认值）。
+    fn read_config(&mut self) {
+        let Ok(content) = std::fs::read_to_string(&self.config_path) else {
+            return;
+        };
+        let Ok(cfg) = toml::from_str::<SyncConfigFile>(&content) else {
+            return;
+        };
+        if let Some(addr) = cfg.server.addr {
+            self.server_addr = addr;
+        }
+        if let Some(dir) = cfg.server.data_dir {
+            self.data_dir = dir;
+        }
+        if let Some(u) = cfg.auth.username {
+            self.username = u;
+        }
+        if let Some(p) = cfg.auth.password {
+            self.password = p;
+        }
+    }
+
+    /// 保存配置到配置文件（0600 权限，密码明文仅本地可读）。
+    fn write_config(&self) -> Result<(), String> {
+        let cfg = SyncConfigFile {
+            server: SyncServerSection {
+                addr: Some(self.server_addr.clone()),
+                data_dir: Some(self.data_dir.clone()),
+            },
+            auth: SyncAuthSection {
+                username: Some(self.username.clone()),
+                password: Some(self.password.clone()),
+            },
+        };
+        let content = toml::to_string(&cfg).map_err(|e| e.to_string())?;
+        let parent = self.config_path.parent().ok_or("配置目录无效")?;
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::write(&self.config_path, content).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&self.config_path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    /// 启动 xime-sync-server 子进程（派生独立进程，不随设置窗口关闭）。
+    ///
+    /// 密码为空时自动生成随机密码并持久化到配置（零配置启动，同 ximed 行为）。
+    pub fn spawn_server(&mut self) -> Result<(), String> {
+        if self.running {
+            return Ok(());
+        }
+        if self.password.is_empty() {
+            self.password = random_password();
+            self.status_message = Some("已生成随机密码，客户端请使用设置页显示的密码".to_string());
+        }
+        self.write_config()?;
+        let bin = std::env::var("XIME_SYNC_SERVER_BIN").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let candidate = std::path::PathBuf::from(&home).join(".local/bin/xime-sync-server");
+            if candidate.exists() {
+                candidate.to_string_lossy().into_owned()
+            } else {
+                "xime-sync-server".to_string()
+            }
+        });
+        let child = std::process::Command::new(&bin)
+            .arg("--config")
+            .arg(&self.config_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| format!("启动同步服务器失败: {e}"))?;
+        let pid = child.id();
+        self.running = true;
+        self.child = Some(child);
+        self.status_message = Some(format!("服务器已启动 (PID {pid})"));
+        Ok(())
+    }
+
+    /// 停止服务器子进程。
+    pub fn stop_server(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.running = false;
+            self.status_message = Some("服务器已停止".to_string());
+        }
+    }
+
+    /// 轮询子进程状态（外部崩溃/被手动结束后更新 UI）。
+    pub fn poll(&mut self) {
+        if let Some(child) = &mut self.child {
+            if let Ok(Some(status)) = child.try_wait() {
+                self.running = false;
+                self.child = None;
+                self.status_message = Some(format!("服务器已退出 ({status})"));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "clipboard-page")]
+fn config_base_dir() -> std::path::PathBuf {
+    let (_, user_data_dir) = get_data_dirs();
+    user_data_dir
+        .parent()
+        .unwrap_or(&user_data_dir)
+        .to_path_buf()
+}
+
+#[cfg(feature = "clipboard-page")]
+fn sync_config_path() -> std::path::PathBuf {
+    config_base_dir().join("xime-sync.toml")
+}
+
+#[cfg(feature = "clipboard-page")]
+fn sync_data_dir() -> std::path::PathBuf {
+    config_base_dir().join("sync-data")
+}
+
+/// 生成随机认证密码（16 字节随机 → URL 安全 base64）。
+#[cfg(feature = "clipboard-page")]
+fn random_password() -> String {
+    let mut buf = [0u8; 16];
+    getrandom::fill(&mut buf).expect("getrandom");
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Default)]
@@ -1572,8 +1802,7 @@ fn download_file(
     let mut reader = response.body_mut().as_reader();
     let mut hasher = sha256.map(|_| sha2::Sha256::new());
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("创建目录失败: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| anyhow::anyhow!("创建目录失败: {}", e))?;
     }
     let mut output =
         std::fs::File::create(dest).map_err(|e| anyhow::anyhow!("创建文件失败: {}", e))?;

@@ -38,12 +38,10 @@ pub fn settings_group<'a, Message: 'a>(
     let colors = *colors;
     let title = title.into();
 
-    let mut body = column![
-        text(title)
-            .size(16)
-            .font(semibold())
-            .color(colors.foreground),
-    ]
+    let mut body = column![text(title)
+        .size(16)
+        .font(semibold())
+        .color(colors.foreground),]
     .spacing(8)
     .width(Length::Fill);
 
@@ -72,11 +70,9 @@ pub fn settings_item<'a, Message: 'a>(
     let colors = *colors;
     let label = label.into();
 
-    let mut left = column![
-        text(label).size(14).color(colors.foreground),
-    ]
-    .spacing(4)
-    .width(Length::Fill);
+    let mut left = column![text(label).size(14).color(colors.foreground),]
+        .spacing(4)
+        .width(Length::Fill);
 
     if let Some(desc) = description {
         left = left.push(text(desc.into()).size(12).color(colors.foreground_muted));

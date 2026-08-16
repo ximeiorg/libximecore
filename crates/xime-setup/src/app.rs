@@ -42,9 +42,7 @@ pub fn run() -> iced::Result {
     let icon = crate::Assets::get("image/icon.png")
         .and_then(|f| iced::window::icon::from_file_data(&f.data, None).ok());
     let meta = xime_config::app_metadata();
-    let title: &'static str = Box::leak(
-        format!("{} 设置", meta.display_name).into_boxed_str(),
-    );
+    let title: &'static str = Box::leak(format!("{} 设置", meta.display_name).into_boxed_str());
     iced::application(SettingsApp::new, update, view)
         .title(title)
         .window(iced::window::Settings {
@@ -84,7 +82,9 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             state.settings.load_schema_config();
             match state.settings.save_schema() {
                 Ok(_) => {
-                    state.settings.show_message("已切换当前输入方案".to_string());
+                    state
+                        .settings
+                        .show_message("已切换当前输入方案".to_string());
                 }
                 Err(e) => {
                     state.settings.show_message(format!("切换方案失败: {}", e));
@@ -178,7 +178,9 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         }
         Message::SaveAppearance => match state.settings.save_appearance() {
             Ok(_) => {
-                state.settings.show_message("外观设置已保存并重载".to_string());
+                state
+                    .settings
+                    .show_message("外观设置已保存并重载".to_string());
             }
             Err(e) => {
                 state.settings.show_message(format!("保存失败: {}", e));
@@ -191,6 +193,41 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         #[cfg(feature = "clipboard-page")]
         Message::ClearClipboardHistory => {
             state.settings.show_message("功能开发中".to_string());
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ServerStart => match state.settings.clipboard.spawn_server() {
+            Ok(()) => {}
+            Err(e) => state.settings.show_message(e),
+        },
+        #[cfg(feature = "clipboard-page")]
+        Message::ServerStop => {
+            state.settings.clipboard.stop_server();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ServerRestart => {
+            state.settings.clipboard.stop_server();
+            match state.settings.clipboard.spawn_server() {
+                Ok(()) => {}
+                Err(e) => state.settings.show_message(e),
+            }
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ServerAddrChanged(v) => {
+            state.settings.clipboard.server_addr = v;
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ServerUsernameChanged(v) => {
+            state.settings.clipboard.username = v;
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ServerPasswordChanged(v) => {
+            state.settings.clipboard.password = v;
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::OpenSyncDataDir => {
+            let dir = std::path::PathBuf::from(&state.settings.clipboard.data_dir);
+            std::fs::create_dir_all(&dir).ok();
+            open_directory(&dir);
         }
         #[cfg(feature = "pair-page")]
         Message::StartPairing => {

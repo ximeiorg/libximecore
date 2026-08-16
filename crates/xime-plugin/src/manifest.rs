@@ -24,6 +24,8 @@ pub enum PluginType {
     Speech,
     /// 智能联想（预留）。
     Prediction,
+    /// 剪贴板同步（单选激活，契约同 Android `clipboard_sync`：push/pull/testConnection）。
+    ClipboardSync,
     /// 其他 / 未知。
     Other,
 }
@@ -102,6 +104,7 @@ impl PluginManifest {
             "emoji" => PluginType::Emoji,
             "speech" => PluginType::Speech,
             "prediction" => PluginType::Prediction,
+            "clipboard_sync" => PluginType::ClipboardSync,
             _ => PluginType::Other,
         }
     }
@@ -151,6 +154,19 @@ network:
             m.capabilities["emoji"]["supportsSearch"],
             serde_yaml::Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn parse_clipboard_sync_type() {
+        let m = PluginManifest::parse(
+            "id: com.kingzcheung.xime.plugin.ximed_sync\n\
+             name: ximed 剪贴板同步\n\
+             version: 0.1.0\n\
+             type: clipboard_sync\n\
+             activation: single\n",
+        )
+        .unwrap();
+        assert_eq!(m.plugin_type(), PluginType::ClipboardSync);
     }
 
     #[test]

@@ -193,7 +193,11 @@ fn grid_rows<'a>(
         let missing = 2 - taken.len();
         let mut line = row![].spacing(8).width(Length::Fill).height(160);
         for card in taken {
-            line = line.push(container(card).width(Length::FillPortion(1)).height(Length::Fill));
+            line = line.push(
+                container(card)
+                    .width(Length::FillPortion(1))
+                    .height(Length::Fill),
+            );
         }
         for _ in 0..missing {
             line = line.push(iced::widget::Space::new().width(Length::FillPortion(1)));
@@ -414,9 +418,15 @@ fn schema_action<'a>(
         };
         disabled_button(label, colors)
     } else if installed {
-        text("已安装").size(12).color(colors.foreground_muted).into()
+        text("已安装")
+            .size(12)
+            .color(colors.foreground_muted)
+            .into()
     } else if downloaded {
-        text("已下载").size(12).color(colors.foreground_muted).into()
+        text("已下载")
+            .size(12)
+            .color(colors.foreground_muted)
+            .into()
     } else {
         button_primary("下载", &colors, Message::DownloadSchema(schema_id)).into()
     }
@@ -704,11 +714,7 @@ fn plugin_list<'a>(store: &'a MarketPluginState, colors: &'a ThemeColors) -> Ele
         list = list.push(chip_bar(tags, &store.selected_tag, colors));
     }
     list = list.push(grid_rows(plugins.iter().map(|plugin| {
-        let installed = store
-            .installed
-            .iter()
-            .find(|r| r.id == plugin.id)
-            .cloned();
+        let installed = store.installed.iter().find(|r| r.id == plugin.id).cloned();
         let is_downloading = store.downloading.as_deref() == Some(plugin.id.as_str());
         let is_installing = store.installing.as_deref() == Some(plugin.id.as_str());
         let progress = if is_downloading {
@@ -783,16 +789,14 @@ fn plugin_card<'a>(
     let mut body = column![row![
         glyph_box(glyph, plugin_icon_color(kind, colors)),
         column![
-            row![
-                text(if plugin.name.is_empty() {
-                    plugin.id.clone()
-                } else {
-                    plugin.name.clone()
-                })
-                .size(15)
-                .font(semibold())
-                .color(colors.foreground),
-            ]
+            row![text(if plugin.name.is_empty() {
+                plugin.id.clone()
+            } else {
+                plugin.name.clone()
+            })
+            .size(15)
+            .font(semibold())
+            .color(colors.foreground),]
             .spacing(6)
             .align_y(Alignment::Center),
             if plugin.author.is_empty() && tags.is_empty() {
@@ -949,10 +953,7 @@ fn footer<'a>(
 }
 
 /// 彩色方块：分类字 + 分类色浅底（商店卡片图标位，参考 Xime 48dp 圆角 12dp）。
-fn glyph_box<'a>(
-    glyph: char,
-    icon: (Color, Color),
-) -> Element<'a, Message> {
+fn glyph_box<'a>(glyph: char, icon: (Color, Color)) -> Element<'a, Message> {
     let (container_bg, content_color) = icon;
     container(
         text(glyph.to_string())
