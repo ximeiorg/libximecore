@@ -258,6 +258,24 @@ fn build_librime_source_win(librime_dir: &std::path::Path, _dist_lib_dir: &std::
         writeln!(file, "build.bat deps librime shared").unwrap();
     }
 
+    // librime 的 build.bat 会优先使用 env.bat（若存在则跳过 env.bat.template）。
+    // template 写死 VS2019 + Win32，与 CI 上的 VS2022 不兼容，这里生成适配版本。
+    let env_bat = librime_dir.join("env.bat");
+    {
+        let mut file = std::fs::File::create(&env_bat).unwrap();
+        writeln!(file, "set RIME_ROOT={}", librime_dir.display()).unwrap();
+        writeln!(
+            file,
+            "set BOOST_ROOT={}\\deps\\boost-1.89.0",
+            librime_dir.display()
+        )
+        .unwrap();
+        writeln!(file, "set ARCH=x64").unwrap();
+        writeln!(file, "set BJAM_TOOLSET=msvc-14.3").unwrap();
+        writeln!(file, "set CMAKE_GENERATOR=\"Visual Studio 17 2022\"").unwrap();
+        writeln!(file, "set PLATFORM_TOOLSET=v143").unwrap();
+    }
+
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
     let progress_thread = thread::spawn(move || {
