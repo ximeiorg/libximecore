@@ -187,6 +187,31 @@ impl PluginRuntime {
             item_height: t.get("itemHeightDp").ok().flatten(),
         })
     }
+
+    // ---- clipboard_sync 契约（同 Android LuaClipboardSyncPluginAdapter）----
+
+    /// 推送 profile（JSON 对象）到远端；插件返回 false / 函数缺失视为失败。
+    /// profile 字段为 snake_case，与 [`xime_sync_domain::profile::Profile`] JSON 一致。
+    pub fn clipboard_push(&self, profile: &serde_json::Value) -> bool {
+        let Ok(value) = self.lua.to_value(profile) else {
+            return false;
+        };
+        self.call_fn::<bool>("push", value).unwrap_or(false)
+    }
+
+    /// 拉取远端 profile（JSON 对象）；插件返回 nil（无变更）时返回 None。
+    pub fn clipboard_pull(&self) -> Option<serde_json::Value> {
+        let table: Table = self.call_fn("pull", ())?;
+        self.lua
+            .from_value::<serde_json::Value>(Value::Table(table))
+            .ok()
+    }
+
+    /// 测试连接；返回 `None` 表示成功，`Some(消息)` 表示失败原因。
+    pub fn test_connection(&self) -> Option<String> {
+        self.call_fn::<String>("testConnection", ())
+            .filter(|s| !s.is_empty())
+    }
 }
 
 /// 受限 require：只能加载 `libs/<name>.lua`，禁止路径穿越。
@@ -893,6 +918,78 @@ return plugin
         assert_eq!(now.len(), 16);
         assert!(now.ends_with('Z') && now.as_bytes()[8] == b'T');
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn extract_clipboard_sync_plugin(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xime_plugin_clipboard_{}_{}",
+            std::process::id(),
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.clipboard_sync\n\
+             name: Test Sync\n\
+             version: 1.0.0\n\
+             type: clipboard_sync\n\
+             activation: single\n",
+        )
+        .unwrap();
+        // 用 host.config 充当远端存储，验证 push/pull/testConnection 契约桥接
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"
+local plugin = {}
+function plugin.push(profile)
+    host.config.set("remote", host.json.encode(profile))
+    return true
+end
+function plugin.pull()
+    local raw = host.config.get("remote")
+    if raw == nil then return nil end
+    return host.json.decode(raw)
+end
+function plugin.testConnection()
+    return nil
+end
+return plugin
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn clipboard_sync_contract_roundtrip() {
+        let dir = extract_clipboard_sync_plugin("roundtrip");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let profile = serde_json::json!({
+            "type": "text",
+            "hash": "abc",
+            "text": "你好",
+            "has_data": false,
+            "data_name": null,
+            "size": 6,
+            "source": "dev-a"
+        });
+        assert!(runtime.clipboard_push(&profile));
+        let pulled = runtime.clipboard_pull().expect("pull must return profile");
+        assert_eq!(pulled["text"], "你好");
+        assert_eq!(pulled["hash"], "abc");
+        assert_eq!(pulled["source"], "dev-a");
+        // testConnection 返回 nil → None（成功）
+        assert!(runtime.test_connection().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn clipboard_sync_contract_empty_pull_is_none() {
+        let dir = extract_clipboard_sync_plugin("empty");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        assert!(runtime.clipboard_pull().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
