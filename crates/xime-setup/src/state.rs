@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Mutex, OnceLock};
 use xime_config::{
-    deploy_all, get_data_dirs, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager,
-    XimeConfig,
+    deploy_all, get_data_dirs, ColorSchemeConfig, DarkMode, SchemaConfig, SchemaConfigManager,
+    SchemaInfo, SchemaManager, XimeConfig,
 };
 
 static MARKET_TASK_RESULT: OnceLock<Mutex<Option<MarketTaskResult>>> = OnceLock::new();
@@ -202,6 +202,12 @@ pub enum Message {
     CandidateCountChanged(i32),
     /// 外观：圆角大小变更。
     CornerRadiusChanged(f64),
+    /// 外观：浅色模式配色方案变更。
+    ColorSchemeLightChanged(String),
+    /// 外观：深色模式配色方案变更。
+    ColorSchemeDarkChanged(String),
+    /// 外观：深色模式变更（0=浅色, 1=深色, 2=跟随系统）。
+    DarkModeChanged(u8),
     /// 外观：保存。
     SaveAppearance,
     #[cfg(feature = "smart-suggestion-page")]
@@ -292,10 +298,12 @@ impl SettingsState {
     }
 
     fn get_primary_color(&self) -> u32 {
+        let is_dark = self.appearance.dark_mode.is_dark(self.system_theme.is_dark());
+        let scheme_name = self.appearance.color_scheme.scheme_name(is_dark);
         self.appearance
             .available_color_schemes
             .iter()
-            .find(|(id, _, _)| id == &self.appearance.color_scheme)
+            .find(|(id, _, _)| *id == scheme_name)
             .map(|(_, _, color)| *color)
             .unwrap_or(0x8F73E2)
     }
@@ -332,6 +340,7 @@ impl SettingsState {
         }
         let config = XimeConfig::load();
         self.appearance.color_scheme = config.style.color_scheme.clone();
+        self.appearance.dark_mode = config.style.dark_mode;
         self.appearance.available_color_schemes = config
             .color_schemes
             .iter()
@@ -346,6 +355,7 @@ impl SettingsState {
     pub fn save_color_scheme(&self) -> Result<(), String> {
         let mut config = XimeConfig::load();
         config.style.color_scheme = self.appearance.color_scheme.clone();
+        config.style.dark_mode = self.appearance.dark_mode;
         config.save()?;
         notify_daemon_reload_style();
         Ok(())
@@ -1359,14 +1369,29 @@ pub enum SyncStatus {
     Error,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppearanceState {
     pub font_size: f64,
     pub candidate_count: i32,
     pub corner_radius: f64,
-    pub color_scheme: String,
+    pub color_scheme: ColorSchemeConfig,
+    pub dark_mode: DarkMode,
     pub available_color_schemes: Vec<(String, String, u32)>,
     pub color_schemes_loaded: bool,
+}
+
+impl Default for AppearanceState {
+    fn default() -> Self {
+        Self {
+            font_size: 14.0,
+            candidate_count: 5,
+            corner_radius: 8.0,
+            color_scheme: ColorSchemeConfig::default(),
+            dark_mode: DarkMode::default(),
+            available_color_schemes: Vec::new(),
+            color_schemes_loaded: false,
+        }
+    }
 }
 
 #[derive(Clone, Default)]

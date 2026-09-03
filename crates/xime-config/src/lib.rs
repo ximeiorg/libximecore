@@ -23,6 +23,8 @@ pub use schema_config::{
 };
 pub use schema_manager::SchemaManager;
 pub use style::ColorScheme;
+pub use style::ColorSchemeConfig;
+pub use style::DarkMode;
 pub use style::StyleConfig;
 pub use wubi_radicals::{KeyRadicalsConfig, WubiRadicalsConfig};
 
@@ -210,8 +212,14 @@ impl XimeConfig {
     }
 
     pub fn get_primary_color(&self) -> (u8, u8, u8) {
-        let scheme_name = &self.style.color_scheme;
-        if let Some(scheme) = self.color_schemes.get(scheme_name) {
+        // Default to light mode
+        self.get_primary_color_for_theme(false)
+    }
+
+    pub fn get_primary_color_for_theme(&self, system_is_dark: bool) -> (u8, u8, u8) {
+        let is_dark = self.style.dark_mode.is_dark(system_is_dark);
+        let scheme_name = self.style.color_scheme.scheme_name(is_dark);
+        if let Some(scheme) = self.color_schemes.get(&scheme_name) {
             let r = (scheme.primary_color >> 16) as u8;
             let g = (scheme.primary_color >> 8) as u8;
             let b = scheme.primary_color as u8;
@@ -219,6 +227,42 @@ impl XimeConfig {
         } else {
             (0x8F, 0x73, 0xE2)
         }
+    }
+
+    /// Get the resolved color scheme name based on dark_mode setting.
+    pub fn get_color_scheme_name(&self, system_is_dark: bool) -> String {
+        let is_dark = self.style.dark_mode.is_dark(system_is_dark);
+        self.style.color_scheme.scheme_name(is_dark)
+    }
+
+    /// Get keyboard background color for the current theme.
+    pub fn get_keyboard_bg_color(&self, system_is_dark: bool) -> Option<u32> {
+        let is_dark = self.style.dark_mode.is_dark(system_is_dark);
+        let scheme_name = self.style.color_scheme.scheme_name(is_dark);
+        if let Some(scheme) = self.color_schemes.get(&scheme_name) {
+            if let Some(ref bg) = scheme.keyboard_background {
+                if is_dark {
+                    return bg.color_dark;
+                } else {
+                    return bg.color;
+                }
+            }
+        }
+        None
+    }
+
+    /// Get key background color for the current theme.
+    pub fn get_key_bg_color(&self, system_is_dark: bool) -> Option<u32> {
+        let is_dark = self.style.dark_mode.is_dark(system_is_dark);
+        let scheme_name = self.style.color_scheme.scheme_name(is_dark);
+        if let Some(scheme) = self.color_schemes.get(&scheme_name) {
+            if is_dark {
+                return scheme.key_bg_color_dark;
+            } else {
+                return scheme.key_bg_color;
+            }
+        }
+        None
     }
 
     /// Get wubi root text for a key press in the given schema.

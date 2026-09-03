@@ -176,14 +176,49 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::CornerRadiusChanged(v) => {
             state.settings.appearance.corner_radius = v;
         }
-        Message::SaveAppearance => match state.settings.save_appearance() {
-            Ok(_) => {
-                state
-                    .settings
-                    .show_message("外观设置已保存并重载".to_string());
-            }
+        Message::ColorSchemeLightChanged(scheme) => {
+            use xime_config::ColorSchemeConfig;
+            state.settings.appearance.color_scheme = match &state.settings.appearance.color_scheme {
+                ColorSchemeConfig::Simple(_) => ColorSchemeConfig::Named {
+                    light: scheme,
+                    dark: "slate_gray".to_string(),
+                },
+                ColorSchemeConfig::Named { dark, .. } => ColorSchemeConfig::Named {
+                    light: scheme,
+                    dark: dark.clone(),
+                },
+            };
+        }
+        Message::ColorSchemeDarkChanged(scheme) => {
+            use xime_config::ColorSchemeConfig;
+            state.settings.appearance.color_scheme = match &state.settings.appearance.color_scheme {
+                ColorSchemeConfig::Simple(_) => ColorSchemeConfig::Named {
+                    light: "lavender_purple".to_string(),
+                    dark: scheme,
+                },
+                ColorSchemeConfig::Named { light, .. } => ColorSchemeConfig::Named {
+                    light: light.clone(),
+                    dark: scheme,
+                },
+            };
+        }
+        Message::DarkModeChanged(mode) => {
+            state.settings.appearance.dark_mode = xime_config::DarkMode::Simple(mode);
+        }
+        Message::SaveAppearance => match state.settings.save_color_scheme() {
+            Ok(()) => match state.settings.save_appearance() {
+                Ok(_) => {
+                    state.colors = state.settings.colors();
+                    state
+                        .settings
+                        .show_message("外观设置已保存并重载".to_string());
+                }
+                Err(e) => {
+                    state.settings.show_message(format!("保存失败: {}", e));
+                }
+            },
             Err(e) => {
-                state.settings.show_message(format!("保存失败: {}", e));
+                state.settings.show_message(format!("保存配色失败: {}", e));
             }
         },
         #[cfg(feature = "smart-suggestion-page")]
