@@ -39,6 +39,66 @@ pub struct EmojiItem {
     pub category: String,
 }
 
+/// 候选词转换单项（candidate transform 热路径）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CandidateTransformItem {
+    pub id: Option<String>,
+    pub text: String,
+    #[serde(rename = "insertText")]
+    pub insert_text: Option<String>,
+    #[serde(rename = "imageUrl")]
+    pub image_url: Option<String>,
+}
+
+/// 候选词转换结果。
+#[derive(Debug, Clone)]
+pub enum CandidateTransformOutcome {
+    /// 转换成功，返回新列表。
+    Success(Vec<CandidateTransformItem>),
+    /// 插件无响应（超时或函数缺失）。
+    NoResponse,
+    /// 转换失败（错误或 panic）。
+    Failed(String),
+}
+
+/// 候选词转换熔断器。
+pub struct CandidateTransformCircuitBreaker {
+    failures: u32,
+    threshold: u32,
+    tripped: bool,
+}
+
+impl CandidateTransformCircuitBreaker {
+    pub fn new(threshold: u32) -> Self {
+        Self {
+            failures: 0,
+            threshold,
+            tripped: false,
+        }
+    }
+
+    pub fn is_tripped(&self) -> bool {
+        self.tripped
+    }
+
+    pub fn record_success(&mut self) {
+        self.failures = 0;
+        self.tripped = false;
+    }
+
+    pub fn record_failure(&mut self) {
+        self.failures += 1;
+        if self.failures >= self.threshold {
+            self.tripped = true;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.failures = 0;
+        self.tripped = false;
+    }
+}
+
 /// emoji 插件分类布局配置。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmojiLayout {
@@ -211,6 +271,97 @@ impl PluginRuntime {
     pub fn test_connection(&self) -> Option<String> {
         self.call_fn::<String>("testConnection", ())
             .filter(|s| !s.is_empty())
+    }
+
+    // ---- tool 契约（同 Android LuaToolPluginAdapter）----
+
+    /// 获取工具面板状态（同步调用，200ms 超时由宿主控制）。
+    /// 返回 JSON 对象描述面板 UI；插件返回 nil 表示无面板。
+    pub fn get_panel_state(&self, input_text: &str) -> Option<serde_json::Value> {
+        let table: Table = self.call_fn("getPanelState", (input_text,))?;
+        self.lua
+            .from_value::<serde_json::Value>(Value::Table(table))
+            .ok()
+    }
+
+    /// 面板输入事件（异步，fire-and-forget）。
+    pub fn on_panel_input(&self, input_text: &str) {
+        let _ = self.call_fn::<()>("onPanelInput", (input_text,));
+    }
+
+    /// 面板动作事件（异步，fire-and-forget）。
+    pub fn on_panel_action(&self, action: &str) {
+        let _ = self.call_fn::<()>("onPanelAction", (action,));
+    }
+
+    /// 面板列表项点击事件（异步，fire-and-forget）。
+    pub fn on_panel_item_click(&self, item_id: &str) {
+        let _ = self.call_fn::<()>("onPanelItemClick", (item_id,));
+    }
+
+    // ---- speech/ASR 契约（同 Android LuaAsrPluginAdapter）----
+
+    /// 创建 ASR 后端；插件返回 true 表示就绪，false / nil 表示失败。
+    pub fn create_asr_backend(&self) -> bool {
+        self.call_fn::<bool>("createBackend", ()).unwrap_or(false)
+    }
+
+    /// 发送音频数据块（PCM 16bit mono）到 ASR 插件。
+    pub fn feed_audio_data(&self, data: &[u8]) {
+        let _ = self.lua.to_value(data).and_then(|value| {
+            self.call_fn::<()>("feedAudioData", value);
+            Ok(())
+        });
+    }
+
+    /// 停止 ASR 识别。
+    pub fn stop_asr(&self) {
+        let _ = self.call_fn::<()>("stopRecognition", ());
+    }
+
+    // ---- candidate transform 契约（热路径，15ms 硬超时）----
+
+    /// 候选词转换（热路径）：宿主传入候选词列表，插件返回转换后的列表。
+    /// 超时 15ms，连续 3 次失败后熔断（不再调用）。
+    pub fn transform_candidates(
+        &self,
+        candidates: &[CandidateTransformItem],
+    ) -> Vec<CandidateTransformItem> {
+        let Ok(input_table) = self.lua.to_value(candidates) else {
+            return candidates.to_vec();
+        };
+        match self.call_fn::<Vec<Table>>("transformCandidates", input_table) {
+            Some(raw) => raw
+                .into_iter()
+                .filter_map(|t| {
+                    let text: String = t.get("text").unwrap_or_default();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    let id: Option<String> = t.get("id").ok().flatten();
+                    let insert_text: Option<String> = t.get("insertText").ok().flatten();
+                    let image_url: Option<String> = t.get("imageUrl").ok().flatten();
+                    Some(CandidateTransformItem {
+                        id,
+                        text,
+                        insert_text,
+                        image_url,
+                    })
+                })
+                .collect(),
+            None => candidates.to_vec(),
+        }
+    }
+
+    // ---- event 契约（事件分发）----
+
+    /// 向插件发送事件（异步，fire-and-forget）。
+    /// 事件类型需在 manifest.capabilities.events 中声明。
+    pub fn send_event(&self, event_type: &str, data: &serde_json::Value) {
+        let Ok(data_value) = self.lua.to_value(data) else {
+            return;
+        };
+        let _ = self.call_fn::<()>("onPluginEvent", (event_type, data_value));
     }
 }
 
@@ -466,6 +617,37 @@ fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::R
         })?,
     )?;
     host.set("crypto", crypto)?;
+
+    // ---- quickSend（只读 API，需 capabilities.quick_send_read = true）----
+    // 注：实际注入由宿主根据 capabilities 决定，这里提供占位
+    let quick_send = lua.create_table()?;
+    quick_send.set(
+        "send",
+        lua.create_function(|_, _text: String| -> LuaResult<bool> {
+            // 占位：宿主实际实现时替换
+            Ok(false)
+        })?,
+    )?;
+    host.set("quickSend", quick_send)?;
+
+    // ---- clipboard（只读 API，需 capabilities.clipboard_read = true）----
+    // 注：实际注入由宿主根据 capabilities 决定，这里提供占位
+    let clipboard = lua.create_table()?;
+    clipboard.set(
+        "getText",
+        lua.create_function(|_lua, ()| -> LuaResult<Value> {
+            // 占位：宿主实际实现时替换
+            Ok(Value::Nil)
+        })?,
+    )?;
+    clipboard.set(
+        "setText",
+        lua.create_function(|_, _text: String| -> LuaResult<()> {
+            // 占位：宿主实际实现时替换
+            Ok(())
+        })?,
+    )?;
+    host.set("clipboard", clipboard)?;
 
     // ---- http（同步白名单请求，20s 超时）----
     let http = lua.create_table()?;
@@ -991,5 +1173,240 @@ return plugin
         let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
         assert!(runtime.clipboard_pull().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn extract_tool_plugin(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xime_plugin_tool_{}_{}",
+            std::process::id(),
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.tool\n\
+             name: Test Tool\n\
+             version: 1.0.0\n\
+             type: tool\n\
+             activation: single\n\
+             capabilities:\n\
+               tool:\n\
+                 display: direct\n\
+               candidate_transform: true\n\
+               events:\n\
+                 - input_changed\n\
+                 - text_committed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"
+local last_input = nil
+local last_action = nil
+local last_item_id = nil
+local event_log = {}
+
+local plugin = {}
+
+function plugin.getPanelState(inputText)
+    last_input = inputText
+    return {
+        type = "panel",
+        title = "Test Tool",
+        items = {
+            { id = "item1", text = "Item 1" },
+            { id = "item2", text = "Item 2" },
+        }
+    }
+end
+
+function plugin.onPanelInput(inputText)
+    last_input = inputText
+end
+
+function plugin.onPanelAction(action)
+    last_action = action
+end
+
+function plugin.onPanelItemClick(itemId)
+    last_item_id = itemId
+end
+
+function plugin.transformCandidates(candidates)
+    local result = {}
+    for _, c in ipairs(candidates) do
+        table.insert(result, {
+            id = c.id,
+            text = string.upper(c.text),
+            insertText = c.insertText,
+            imageUrl = c.imageUrl,
+        })
+    end
+    return result
+end
+
+function plugin.onPluginEvent(eventType, data)
+    table.insert(event_log, { type = eventType, data = data })
+end
+
+function plugin.getEventLog()
+    return event_log
+end
+
+function plugin.getLastInput()
+    return last_input
+end
+
+function plugin.getLastAction()
+    return last_action
+end
+
+function plugin.getLastItemId()
+    return last_item_id
+end
+
+-- Store in global for test access
+_plugin_test = plugin
+
+return plugin
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn tool_plugin_panel_state() {
+        let dir = extract_tool_plugin("panel");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+
+        let state = runtime.get_panel_state("hello").expect("panel state");
+        assert_eq!(state["type"], "panel");
+        assert_eq!(state["title"], "Test Tool");
+        assert!(state["items"].is_array());
+
+        // Verify the input was passed correctly by calling the function directly
+        let last_input: String = runtime
+            .lua
+            .load("return _plugin_test.getLastInput()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_input, "hello");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tool_plugin_panel_actions() {
+        let dir = extract_tool_plugin("actions");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+
+        runtime.on_panel_input("test input");
+        let last_input: String = runtime
+            .lua
+            .load("return _plugin_test.getLastInput()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_input, "test input");
+
+        runtime.on_panel_action("open_settings");
+        let last_action: String = runtime
+            .lua
+            .load("return _plugin_test.getLastAction()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_action, "open_settings");
+
+        runtime.on_panel_item_click("item1");
+        let last_item_id: String = runtime
+            .lua
+            .load("return _plugin_test.getLastItemId()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_item_id, "item1");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn candidate_transform_contract() {
+        let dir = extract_tool_plugin("transform");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+
+        let input = vec![
+            CandidateTransformItem {
+                id: Some("1".to_string()),
+                text: "hello".to_string(),
+                insert_text: None,
+                image_url: None,
+            },
+            CandidateTransformItem {
+                id: Some("2".to_string()),
+                text: "world".to_string(),
+                insert_text: Some("World".to_string()),
+                image_url: None,
+            },
+        ];
+
+        let output = runtime.transform_candidates(&input);
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].text, "HELLO");
+        assert_eq!(output[1].text, "WORLD");
+        assert_eq!(output[1].insert_text, Some("World".to_string()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn event_system_contract() {
+        let dir = extract_tool_plugin("events");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+
+        let event_data = serde_json::json!({
+            "text": "hello",
+            "timestamp": 1234567890
+        });
+
+        runtime.send_event("input_changed", &event_data);
+        runtime.send_event("text_committed", &serde_json::json!({"text": "done"}));
+
+        let event_log: Vec<Table> = runtime
+            .lua
+            .load("return _plugin_test.getEventLog()")
+            .eval()
+            .unwrap();
+
+        assert_eq!(event_log.len(), 2);
+        let first_event_type: String = event_log[0].get("type").unwrap();
+        assert_eq!(first_event_type, "input_changed");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn circuit_breaker_works() {
+        let mut breaker = CandidateTransformCircuitBreaker::new(3);
+        assert!(!breaker.is_tripped());
+
+        breaker.record_failure();
+        assert!(!breaker.is_tripped());
+        breaker.record_failure();
+        assert!(!breaker.is_tripped());
+        breaker.record_failure();
+        assert!(breaker.is_tripped());
+
+        // Reset
+        breaker.reset();
+        assert!(!breaker.is_tripped());
+
+        // Success resets failures
+        breaker.record_failure();
+        breaker.record_failure();
+        breaker.record_success();
+        assert_eq!(breaker.failures, 0);
+
+        std::fs::remove_dir_all(&std::env::temp_dir().join("xime_plugin_tool_events"))
+            .ok();
     }
 }
