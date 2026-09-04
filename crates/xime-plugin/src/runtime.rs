@@ -150,6 +150,8 @@ pub struct PluginRuntime {
     lua: Lua,
     plugin: Table,
     plugin_id: String,
+    /// manifest capabilities 的强类型快照（事件订阅门禁等）。
+    caps: RuntimeCaps,
 }
 
 impl PluginRuntime {
@@ -217,10 +219,13 @@ impl PluginRuntime {
         let chunk = lua.load(entry_path);
         let plugin = chunk.eval::<Table>()?;
 
+        let caps = RuntimeCaps::from_manifest(&manifest.capabilities);
+
         Ok(Self {
             lua,
             plugin,
             plugin_id: plugin_id.clone(),
+            caps,
         })
     }
 
@@ -323,6 +328,32 @@ impl PluginRuntime {
         self.call_fn::<Option<String>>("testConnection", ())
             .and_then(|opt| opt)
             .filter(|s| !s.is_empty())
+    }
+
+    // ---- 下行事件（capabilities.events 门禁，同 Android PluginEventDispatcher）----
+
+    /// 插件是否订阅了指定事件。
+    pub fn subscribes(&self, event_type: &str) -> bool {
+        self.caps.events.iter().any(|e| e == event_type)
+    }
+
+    /// 投递下行事件：同步调用插件的 `onPluginEvent(eventType, payload)`。
+    ///
+    /// 仅当插件在 manifest `capabilities.events` 中声明了该事件且实现了
+    /// `onPluginEvent` 时才调用；返回 true 表示插件已处理。
+    /// payload 为 JSON 对象（如 `{"text": "..."}`）。
+    pub fn deliver_event(&self, event_type: &str, payload: &serde_json::Value) -> bool {
+        if !self.subscribes(event_type) {
+            return false;
+        }
+        if !self.has_fn("onPluginEvent") {
+            return false;
+        }
+        let Ok(value) = self.lua.to_value(payload) else {
+            return false;
+        };
+        self.call_fn::<bool>("onPluginEvent", (event_type, value))
+            .unwrap_or(false)
     }
 }
 
@@ -947,6 +978,54 @@ mod tests {
             PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let hidden: bool = runtime.call_fn("run", ()).unwrap();
         assert!(hidden);
+    }
+
+    /// 事件投递：订阅 + 实现 onPluginEvent 才会被调用。
+    #[test]
+    fn test_deliver_event_capability_gated() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        // onPluginEvent 把事件记进 host.config（返回 true 表示已处理）
+        std::fs::write(
+            dir.join("main.lua"),
+            "return { onPluginEvent = function(eventType, payload)\n  host.config.set('last', eventType .. ':' .. payload.text)\n  return true\nend, __last = function() return host.config.get('last') or '' end }",
+        )
+        .unwrap();
+        let manifest = PluginManifest::parse(
+            "id: com.test\nentry: main.lua\ncapabilities:\n  events:\n    - text_committed\n",
+        )
+        .unwrap();
+        let runtime =
+            PluginRuntime::load(dir, &manifest, &dir.join("config.yaml")).unwrap();
+        assert!(runtime.subscribes("text_committed"));
+        assert!(!runtime.subscribes("input_changed"));
+
+        let payload = serde_json::json!({ "text": "你好" });
+        assert!(runtime.deliver_event("text_committed", &payload));
+        // 记录验证：经 host.config 读回
+        let record: String = runtime
+            .call_fn("__last", ())
+            .unwrap_or_default();
+        assert_eq!(record, "text_committed:你好");
+
+        // 未订阅的事件：不调用
+        assert!(!runtime.deliver_event("input_changed", &payload));
+    }
+
+    /// 未声明 events 能力 → deliver_event 恒 false。
+    #[test]
+    fn test_deliver_event_without_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        std::fs::write(
+            dir.join("main.lua"),
+            "return { onPluginEvent = function() return true end }",
+        )
+        .unwrap();
+        let runtime =
+            PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let payload = serde_json::json!({ "text": "x" });
+        assert!(!runtime.deliver_event("text_committed", &payload));
     }
 
     /// Lua 层：白名单外的 host 同样被拒绝。
