@@ -6,6 +6,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+use crate::manifest::PluginManifest;
+
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -46,6 +48,53 @@ pub struct EmojiLayout {
     pub item_height: Option<i64>,
 }
 
+/// 插件网络访问策略（fail-closed：无声明 = 禁止联网）。
+///
+/// 对齐 Android 版三重门的宿主侧语义：
+/// - `allowCustomHosts: true` → 用户已显式授权任意域名（AllowAll）；
+/// - `hosts` 非空且未授权自定义 → 仅白名单域名；
+/// - 两者皆无 → 禁止所有请求。
+#[derive(Debug, Clone, PartialEq)]
+pub enum NetworkPolicy {
+    /// 仅允许白名单域名（不含 scheme，忽略大小写）。
+    Restrict(Vec<String>),
+    /// manifest 显式声明 allowCustomHosts: true。
+    AllowAll,
+}
+
+impl NetworkPolicy {
+    pub fn from_manifest(network: &crate::manifest::NetworkDecl) -> Self {
+        if network.allow_custom_hosts {
+            Self::AllowAll
+        } else if network.hosts.is_empty() {
+            // fail-closed：未声明任何网络能力 = 禁止
+            Self::Restrict(Vec::new())
+        } else {
+            Self::Restrict(network.hosts.iter().map(|h| normalize_host(h)).collect())
+        }
+    }
+
+    /// 请求 URL 的 host 是否允许访问。
+    pub fn allows(&self, host: Option<&str>) -> bool {
+        let Some(host) = host else {
+            return false;
+        };
+        match self {
+            Self::AllowAll => true,
+            Self::Restrict(list) => list.iter().any(|h| h == &normalize_host(host)),
+        }
+    }
+}
+
+/// 归一化域名：去 scheme、去路径、去端口后缀、小写。
+fn normalize_host(raw: &str) -> String {
+    let h = raw.trim();
+    let h = h.rsplit("://").next().unwrap_or(h);
+    let h = h.split('/').next().unwrap_or(h);
+    let h = h.split(':').next().unwrap_or(h);
+    h.to_ascii_lowercase()
+}
+
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn uuid_string() -> String {
@@ -75,9 +124,20 @@ impl PluginRuntime {
     /// 加载入口脚本并取得导出表。
     ///
     /// - `plugin_dir`: 已解压的插件目录
-    /// - `entry`: manifest 的 entry 字段（相对 plugin_dir）
+    /// - `manifest`: 已解析的 manifest（entry / 网络声明等）
     /// - `config_file`: host.config 的持久化文件路径
-    pub fn load(plugin_dir: &Path, entry: &str, config_file: &Path) -> RuntimeResult<Self> {
+    pub fn load(plugin_dir: &Path, manifest: &PluginManifest, config_file: &Path) -> RuntimeResult<Self> {
+        Self::load_with_policy(plugin_dir, manifest, config_file, NetworkPolicy::from_manifest(&manifest.network))
+    }
+
+    /// 以显式网络策略加载（宿主可在 manifest 之外收紧策略）。
+    pub fn load_with_policy(
+        plugin_dir: &Path,
+        manifest: &PluginManifest,
+        config_file: &Path,
+        net: NetworkPolicy,
+    ) -> RuntimeResult<Self> {
+        let entry = &manifest.entry;
         let lua = Lua::new_with(
             StdLib::COROUTINE | StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH,
             LuaOptions::default(),
@@ -104,7 +164,7 @@ impl PluginRuntime {
 
         setup_require(&lua, &plugin_dir.join("libs"))?;
 
-        let host = build_host_table(&lua, plugin_dir, config_file)?;
+        let host = build_host_table(&lua, plugin_dir, config_file, net)?;
         globals.set("host", host)?;
 
         let entry_path = plugin_dir.join(entry);
@@ -148,6 +208,11 @@ impl PluginRuntime {
                 None
             }
         }
+    }
+
+    /// 插件导出表是否实现了指定函数。
+    pub fn has_fn(&self, name: &str) -> bool {
+        matches!(self.plugin.get(name), Ok(Value::Function(_)))
     }
 
     // ---- emoji 契约 ----
@@ -208,8 +273,12 @@ impl PluginRuntime {
     }
 
     /// 测试连接；返回 `None` 表示成功，`Some(消息)` 表示失败原因。
+    /// 插件按契约返回 nil（成功）或错误消息字符串；未实现时亦返回 `None`
+    /// （宿主可用 [`PluginRuntime::has_fn`] 先行区分）。
     pub fn test_connection(&self) -> Option<String> {
-        self.call_fn::<String>("testConnection", ())
+        // nil（成功）→ Option<String> 转换为 None，避免误走类型错误路径
+        self.call_fn::<Option<String>>("testConnection", ())
+            .and_then(|opt| opt)
             .filter(|s| !s.is_empty())
     }
 }
@@ -247,7 +316,12 @@ fn setup_require(lua: &Lua, libs_dir: &Path) -> mlua::Result<()> {
 }
 
 /// 构造注入的 host 白名单 API 表。
-fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::Result<Table> {
+fn build_host_table(
+    lua: &Lua,
+    plugin_dir: &Path,
+    config_file: &Path,
+    net: NetworkPolicy,
+) -> mlua::Result<Table> {
     let host = lua.create_table()?;
     host.set("sdkVersion", SDK_VERSION)?;
 
@@ -471,7 +545,7 @@ fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::R
     let http = lua.create_table()?;
     http.set(
         "request",
-        lua.create_function(|lua, args: MultiValue| -> LuaResult<Value> {
+        lua.create_function(move |lua, args: MultiValue| -> LuaResult<Value> {
             let arg_string = |i: usize| -> Option<String> {
                 args.get(i)
                     .filter(|v| !v.is_nil())
@@ -480,6 +554,16 @@ fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::R
 
             let method = arg_string(0).unwrap_or_else(|| "GET".to_string());
             let url = arg_string(1).unwrap_or_default();
+
+            // 网络白名单（fail-closed）：host 不在声明内直接拒绝
+            let uri_host = url.parse::<ureq::http::Uri>().ok().and_then(|u| u.host().map(str::to_owned));
+            if !net.allows(uri_host.as_deref()) {
+                tracing::warn!(
+                    "[plugin http] 拒绝未授权请求: host={:?}（manifest network.hosts 未声明）",
+                    uri_host
+                );
+                return Ok(Value::Nil);
+            }
 
             let body: Vec<u8> = match args.get(3) {
                 Some(Value::String(s)) => s.as_bytes().to_vec(),
@@ -641,6 +725,74 @@ fn lua_err(e: RuntimeError) -> mlua::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::{NetworkDecl, PluginManifest};
+
+    /// 测试用最小 manifest（无网络声明 → fail-closed 禁网）。
+    fn test_manifest() -> PluginManifest {
+        PluginManifest::parse("id: com.test\nentry: main.lua\n").unwrap()
+    }
+
+    #[test]
+    fn test_normalize_host() {
+        assert_eq!(normalize_host("https://dav.example.com/path"), "dav.example.com");
+        assert_eq!(normalize_host("HTTP://Example.COM:8080"), "example.com");
+        assert_eq!(normalize_host("example.com"), "example.com");
+        assert_eq!(normalize_host(" example.com "), "example.com");
+    }
+
+    #[test]
+    fn test_network_policy_allows() {
+        // 未声明 → fail-closed 全禁
+        let deny = NetworkPolicy::from_manifest(&NetworkDecl::default());
+        assert_eq!(deny, NetworkPolicy::Restrict(vec![]));
+        assert!(!deny.allows(Some("example.com")));
+        assert!(!deny.allows(None));
+
+        // 白名单：host 匹配（忽略大小写/端口/scheme）
+        let decl = NetworkDecl {
+            hosts: vec!["https://dav.example.com/".into()],
+            allow_custom_hosts: false,
+        };
+        let policy = NetworkPolicy::from_manifest(&decl);
+        assert!(policy.allows(Some("dav.example.com")));
+        assert!(policy.allows(Some("DAV.EXAMPLE.COM")));
+        assert!(!policy.allows(Some("evil.example.com")));
+
+        // allowCustomHosts → 全放行
+        let decl = NetworkDecl {
+            hosts: vec![],
+            allow_custom_hosts: true,
+        };
+        assert_eq!(
+            NetworkPolicy::from_manifest(&decl),
+            NetworkPolicy::AllowAll
+        );
+    }
+
+    /// Lua 层：未声明网络的插件调用 host.http.request 应被拒绝（返回 nil，不发请求）。
+    #[test]
+    fn test_http_denied_without_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        std::fs::write(dir.join("main.lua"), "return { run = function() return host.http.request('GET', 'http://example.com/') end }").unwrap();
+        let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let result: Option<mlua::Value> = runtime.call_fn("run", ());
+        assert!(result.is_none() || matches!(result, Some(mlua::Value::Nil)), "deny 应返回 nil");
+    }
+
+    /// Lua 层：白名单外的 host 同样被拒绝。
+    #[test]
+    fn test_http_denied_host_not_in_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        std::fs::write(dir.join("main.lua"), "return { run = function() return host.http.request('GET', 'http://evil.example.com/') end }").unwrap();
+        let manifest = PluginManifest::parse("id: com.test\nentry: main.lua\nnetwork:\n  hosts:\n    - dav.example.com\n").unwrap();
+        let runtime = PluginRuntime::load(dir, &manifest, &dir.join("config.yaml")).unwrap();
+        let result: Option<mlua::Value> = runtime.call_fn("run", ());
+        assert!(result.is_none() || matches!(result, Some(mlua::Value::Nil)));
+    }
+
+    use super::*;
     use std::path::PathBuf;
 
     /// 用真实 kaomoji 插件包（Xime 仓库构建产物）做端到端验证。
@@ -710,7 +862,7 @@ return plugin
     #[test]
     fn load_and_call_kaomoji_contract() {
         let dir = extract_kaomoji("main");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
 
         let categories = runtime.get_categories();
         assert_eq!(categories, vec!["颜文字".to_string()]);
@@ -748,7 +900,7 @@ return plugin
     #[test]
     fn sandbox_strips_dangerous_libs() {
         let dir = extract_kaomoji("sandbox");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
 
         let io_absent: bool = runtime
             .lua
@@ -779,7 +931,7 @@ return plugin
     fn host_config_and_json_roundtrip() {
         let dir = extract_kaomoji("config");
         let config_file = dir.join("config.yaml");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &config_file).unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &config_file).unwrap();
         let lua = &runtime.lua;
 
         lua.load(
@@ -827,7 +979,7 @@ return plugin
         )
         .unwrap();
 
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let lua = &runtime.lua;
 
         let doubled: i64 = lua
@@ -878,7 +1030,7 @@ return plugin
     #[test]
     fn host_crypto_roundtrip() {
         let dir = extract_kaomoji("crypto");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let lua = &runtime.lua;
 
         // sha256("abc") 已知摘要
@@ -965,7 +1117,7 @@ return plugin
     #[test]
     fn clipboard_sync_contract_roundtrip() {
         let dir = extract_clipboard_sync_plugin("roundtrip");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let profile = serde_json::json!({
             "type": "text",
             "hash": "abc",
@@ -988,8 +1140,39 @@ return plugin
     #[test]
     fn clipboard_sync_contract_empty_pull_is_none() {
         let dir = extract_clipboard_sync_plugin("empty");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         assert!(runtime.clipboard_pull().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_connection_distinguishes_nil_and_message_and_missing() {
+        // 返回错误消息字符串 → Some(消息)
+        let dir = extract_clipboard_sync_plugin("msg");
+        std::fs::write(
+            dir.join("main.lua"),
+            "local plugin = {}\n\
+             function plugin.testConnection()\n\
+             \x20 return '未配置服务器地址'\n\
+             end\n\
+             return plugin\n",
+        )
+        .unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        assert!(runtime.has_fn("testConnection"));
+        assert_eq!(
+            runtime.test_connection(),
+            Some("未配置服务器地址".to_string())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // 未实现 testConnection → has_fn false（test_connection 语义上也是 None 成功，
+        // 宿主须先 has_fn 区分，避免把"未实现"误报为"连接成功"）
+        let dir = extract_clipboard_sync_plugin("missing");
+        std::fs::write(dir.join("main.lua"), "local plugin = {}\nreturn plugin\n").unwrap();
+        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        assert!(!runtime.has_fn("testConnection"));
+        assert!(runtime.test_connection().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
