@@ -60,7 +60,7 @@ pub struct PluginManifest {
     #[serde(default)]
     pub capabilities: serde_yaml::Value,
     /// 配置字段声明（宿主渲染表单，宽松解析）。
-    #[serde(default)]
+    #[serde(rename = "configSchema", alias = "config_schema", default)]
     pub config_schema: serde_yaml::Value,
     /// 网络访问声明。
     #[serde(default)]
@@ -154,6 +154,17 @@ network:
             m.capabilities["emoji"]["supportsSearch"],
             serde_yaml::Value::Bool(true)
         );
+        // configSchema 为 camelCase 键，必须解析进 config_schema（宽松 Value）
+        assert!(m.config_schema.is_sequence());
+    }
+
+    #[test]
+    fn parse_config_schema_snake_case_alias() {
+        let m = PluginManifest::parse(
+            "id: a\nversion: 1\ntype: clipboard_sync\nconfig_schema:\n  - key: k\n",
+        )
+        .unwrap();
+        assert!(m.config_schema.is_sequence());
     }
 
     #[test]
