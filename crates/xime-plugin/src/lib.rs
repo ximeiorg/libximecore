@@ -6,12 +6,17 @@
 //! 入口脚本 `return` 一个导出表，宿主按类型调用 `getCategories`/`getEmojis` 等函数；
 //! 沙箱剥离 io/os/loadfile/dofile，插件只能访问注入的 `host` 白名单 API。
 
-mod manifest;
+pub mod manifest;
+pub mod host_api;
 mod runtime;
 
 pub mod manager;
 
 pub use manifest::{NetworkDecl, PluginManifest, PluginType};
-pub use runtime::{EmojiItem, EmojiLayout, PluginRuntime, RuntimeError, RuntimeResult};
+pub use runtime::NetworkPolicy;
+pub use host_api::{
+    ClipboardEntryInfo, ClipboardReadApi, HostApis, QuickSendItemInfo, QuickSendReadApi,
+};
+pub use runtime::{EmojiItem, EmojiLayout, PluginRuntime, RuntimeError, RuntimeResult, RuntimeCaps};
 
 pub use manager::{PluginManager, PluginRecord, PluginRecordState};

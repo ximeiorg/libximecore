@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+use crate::host_api::HostApis;
 use crate::manifest::PluginManifest;
 
 use base64::Engine;
@@ -95,6 +96,37 @@ fn normalize_host(raw: &str) -> String {
     h.to_ascii_lowercase()
 }
 
+/// manifest capabilities 的强类型解析（宿主据此门禁注入 host API / 事件）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuntimeCaps {
+    pub clipboard_read: bool,
+    pub quick_send_read: bool,
+    /// 订阅的下行事件（如 `text_committed`）。
+    pub events: Vec<String>,
+}
+
+impl RuntimeCaps {
+    pub fn from_manifest(caps: &serde_yaml::Value) -> Self {
+        let get_bool = |key: &str| {
+            caps.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
+        };
+        let events = caps
+            .get("events")
+            .and_then(|x| x.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|i| i.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self {
+            clipboard_read: get_bool("clipboard_read"),
+            quick_send_read: get_bool("quick_send_read"),
+            events,
+        }
+    }
+}
+
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn uuid_string() -> String {
@@ -127,15 +159,25 @@ impl PluginRuntime {
     /// - `manifest`: 已解析的 manifest（entry / 网络声明等）
     /// - `config_file`: host.config 的持久化文件路径
     pub fn load(plugin_dir: &Path, manifest: &PluginManifest, config_file: &Path) -> RuntimeResult<Self> {
-        Self::load_with_policy(plugin_dir, manifest, config_file, NetworkPolicy::from_manifest(&manifest.network))
+        Self::load_with_apis(
+            plugin_dir,
+            manifest,
+            config_file,
+            NetworkPolicy::from_manifest(&manifest.network),
+            HostApis::default(),
+        )
     }
 
-    /// 以显式网络策略加载（宿主可在 manifest 之外收紧策略）。
-    pub fn load_with_policy(
+    /// 以显式网络策略与宿主 API 加载。
+    ///
+    /// host API 按 manifest capabilities 门禁注入：未声明能力或宿主未提供
+    /// 实现时，对应 `host.*` 表不注入（Lua 侧不可见）。
+    pub fn load_with_apis(
         plugin_dir: &Path,
         manifest: &PluginManifest,
         config_file: &Path,
         net: NetworkPolicy,
+        apis: HostApis,
     ) -> RuntimeResult<Self> {
         let entry = &manifest.entry;
         let lua = Lua::new_with(
@@ -164,7 +206,8 @@ impl PluginRuntime {
 
         setup_require(&lua, &plugin_dir.join("libs"))?;
 
-        let host = build_host_table(&lua, plugin_dir, config_file, net)?;
+        let caps = RuntimeCaps::from_manifest(&manifest.capabilities);
+        let host = build_host_table(&lua, plugin_dir, config_file, net, &apis, &caps)?;
         globals.set("host", host)?;
 
         let entry_path = plugin_dir.join(entry);
@@ -321,6 +364,8 @@ fn build_host_table(
     plugin_dir: &Path,
     config_file: &Path,
     net: NetworkPolicy,
+    apis: &HostApis,
+    caps: &RuntimeCaps,
 ) -> mlua::Result<Table> {
     let host = lua.create_table()?;
     host.set("sdkVersion", SDK_VERSION)?;
@@ -639,6 +684,51 @@ fn build_host_table(
     http.set("lastError", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
     host.set("http", http)?;
 
+    // ---- clipboard（只读；capability: clipboard_read 且宿主提供实现）----
+    if caps.clipboard_read {
+        if let Some(api) = apis.clipboard.clone() {
+            let clipboard = lua.create_table()?;
+            clipboard.set(
+                "recent",
+                lua.create_function(move |lua, limit: usize| -> LuaResult<Value> {
+                    let entries = api.recent(limit);
+                    let out = lua.create_table()?;
+                    for (i, e) in entries.iter().enumerate() {
+                        let item = lua.create_table()?;
+                        item.set("text", e.text.clone())?;
+                        item.set("timestamp", e.timestamp)?;
+                        item.set("isPinned", e.is_pinned)?;
+                        out.set(i + 1, item)?;
+                    }
+                    Ok(Value::Table(out))
+                })?,
+            )?;
+            host.set("clipboard", clipboard)?;
+        }
+    }
+
+    // ---- quickSend（只读；capability: quick_send_read 且宿主提供实现）----
+    if caps.quick_send_read {
+        if let Some(api) = apis.quick_send.clone() {
+            let quick_send = lua.create_table()?;
+            quick_send.set(
+                "list",
+                lua.create_function(move |lua, ()| -> LuaResult<Value> {
+                    let items = api.list();
+                    let out = lua.create_table()?;
+                    for (i, e) in items.iter().enumerate() {
+                        let item = lua.create_table()?;
+                        item.set("text", e.text.clone())?;
+                        item.set("code", e.code.clone())?;
+                        out.set(i + 1, item)?;
+                    }
+                    Ok(Value::Table(out))
+                })?,
+            )?;
+            host.set("quickSend", quick_send)?;
+        }
+    }
+
     Ok(host)
 }
 
@@ -778,6 +868,85 @@ mod tests {
         let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let result: Option<mlua::Value> = runtime.call_fn("run", ());
         assert!(result.is_none() || matches!(result, Some(mlua::Value::Nil)), "deny 应返回 nil");
+    }
+
+    /// Lua 层：声明 clipboard_read/quick_send_read 且宿主提供 API → 注入 host 表。
+    #[test]
+    fn test_host_apis_injected_with_capability() {
+        use crate::host_api::{
+            ClipboardEntryInfo, ClipboardReadApi, HostApis, QuickSendItemInfo, QuickSendReadApi,
+        };
+        use std::sync::Arc;
+
+        struct FakeClipboard;
+        impl ClipboardReadApi for FakeClipboard {
+            fn recent(&self, limit: usize) -> Vec<ClipboardEntryInfo> {
+                (0..limit)
+                    .map(|i| ClipboardEntryInfo {
+                        text: format!("t{i}"),
+                        timestamp: 100 + i as i64,
+                        is_pinned: false,
+                    })
+                    .collect()
+            }
+        }
+        struct FakeQuickSend;
+        impl QuickSendReadApi for FakeQuickSend {
+            fn list(&self) -> Vec<QuickSendItemInfo> {
+                vec![QuickSendItemInfo {
+                    text: "地址".into(),
+                    code: "dz".into(),
+                }]
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        std::fs::write(
+            dir.join("main.lua"),
+            "return { run = function()\n  local clip = host.clipboard and host.clipboard.recent(2) or nil\n  local qs = host.quickSend and host.quickSend.list() or nil\n  return clip, qs\nend }",
+        )
+        .unwrap();
+        let manifest = PluginManifest::parse(
+            "id: com.test\nentry: main.lua\ncapabilities:\n  clipboard_read: true\n  quick_send_read: true\n",
+        )
+        .unwrap();
+        let apis = HostApis {
+            clipboard: Some(Arc::new(FakeClipboard)),
+            quick_send: Some(Arc::new(FakeQuickSend)),
+        };
+        let runtime = PluginRuntime::load_with_apis(
+            dir,
+            &manifest,
+            &dir.join("config.yaml"),
+            NetworkPolicy::from_manifest(&manifest.network),
+            apis,
+        )
+        .unwrap();
+        let (clip, qs): (Option<Vec<mlua::Table>>, Option<Vec<mlua::Table>>) =
+            runtime.call_fn("run", ()).unwrap();
+        let clip = clip.unwrap();
+        assert_eq!(clip.len(), 2);
+        assert_eq!(clip[0].get::<String>("text").unwrap(), "t0");
+        let qs = qs.unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].get::<String>("code").unwrap(), "dz");
+    }
+
+    /// Lua 层：未声明能力 → host.clipboard / host.quickSend 不可见。
+    #[test]
+    fn test_host_apis_hidden_without_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        std::fs::write(
+            dir.join("main.lua"),
+            "return { run = function() return host.clipboard == nil and host.quickSend == nil end }",
+        )
+        .unwrap();
+        let runtime =
+            PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let hidden: bool = runtime.call_fn("run", ()).unwrap();
+        assert!(hidden);
     }
 
     /// Lua 层：白名单外的 host 同样被拒绝。
