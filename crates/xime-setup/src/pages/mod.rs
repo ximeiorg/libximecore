@@ -6,6 +6,8 @@ pub mod input_schema;
 pub mod plugins;
 pub mod store;
 
+#[cfg(feature = "backup-page")]
+pub mod backup;
 #[cfg(feature = "clipboard-page")]
 pub mod clipboard;
 #[cfg(feature = "pair-page")]
@@ -51,7 +53,12 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
     #[cfg(feature = "smart-suggestion-page")]
     groups.push(("智能", vec![("icons/thinking.svg", "智能联想")]));
 
-    #[cfg(any(target_os = "linux", feature = "pair-page", feature = "clipboard-page"))]
+    #[cfg(any(
+        target_os = "linux",
+        feature = "pair-page",
+        feature = "clipboard-page",
+        feature = "backup-page"
+    ))]
     {
         let mut sync_items: Vec<(&'static str, &'static str)> = Vec::new();
         #[cfg(target_os = "linux")]
@@ -60,8 +67,10 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
         sync_items.push(("icons/sync.svg", "设备关联"));
         #[cfg(feature = "clipboard-page")]
         sync_items.push(("icons/clipboard.svg", "剪贴板"));
+        #[cfg(feature = "backup-page")]
+        sync_items.push(("icons/backup.svg", "云备份"));
         if !sync_items.is_empty() {
-            groups.push(("同步", sync_items));
+            groups.push(("同步与备份", sync_items));
         }
     }
 
@@ -199,6 +208,8 @@ pub fn page_content<'a>(
         "设备关联" => pair::view(settings, colors),
         #[cfg(feature = "clipboard-page")]
         "剪贴板" => clipboard::view(settings, colors),
+        #[cfg(feature = "backup-page")]
+        "云备份" => backup::view(settings, colors),
         _ => about::view(settings, colors),
     }
 }

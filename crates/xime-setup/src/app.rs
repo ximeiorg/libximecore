@@ -264,6 +264,46 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             std::fs::create_dir_all(&dir).ok();
             open_directory(&dir);
         }
+        #[cfg(feature = "backup-page")]
+        Message::BackupUrlChanged(v) => {
+            state.settings.backup.url = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupUsernameChanged(v) => {
+            state.settings.backup.username = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupPasswordChanged(v) => {
+            state.settings.backup.password = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupDirChanged(v) => {
+            state.settings.backup.remote_dir = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupModeChanged(v) => {
+            state.settings.backup.mode = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupTest => {
+            state.settings.backup.start_test();
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupNow => {
+            state.settings.backup.start_backup();
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupList => {
+            state.settings.backup.start_list();
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupRestore(path) => {
+            state.settings.backup.start_restore(path);
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupDelete(path) => {
+            state.settings.backup.start_delete(path);
+        }
         #[cfg(feature = "pair-page")]
         Message::StartPairing => {
             state.settings.show_message("功能开发中".to_string());
