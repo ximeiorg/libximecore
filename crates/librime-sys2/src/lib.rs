@@ -459,18 +459,14 @@ pub fn rime_get_levers_api() -> Option<*const RimeLeversApi> {
     }
     unsafe {
         let find_module = (*api).find_module;
-        if find_module.is_none() {
-            return None;
-        }
+        find_module?;
         let module_name_c = std::ffi::CString::new("levers").ok()?;
         let levers_module = find_module.unwrap()(module_name_c.as_ptr());
         if levers_module.is_null() {
             return None;
         }
         let get_api = (*levers_module).get_api;
-        if get_api.is_none() {
-            return None;
-        }
+        get_api?;
         let levers_api_ptr = get_api.unwrap()();
         if levers_api_ptr.is_null() {
             return None;

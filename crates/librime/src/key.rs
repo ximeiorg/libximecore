@@ -106,6 +106,9 @@ pub const XK_BACKSLASH: i32 = 0x5C;
 pub const XK_GRAVE: i32 = 0x60;
 pub const XK_CAPS_LOCK: i32 = 65509;
 
+// 0x61..=0x7A（ASCII 小写字母）与 0x60..=0x69（VK 小键盘）区间有意重叠，
+// 字母分支在前优先命中，重叠是刻意安排。
+#[allow(clippy::match_overlapping_arm)]
 pub fn vk_to_xk(vk: u16) -> i32 {
     match vk {
         VK_BACK => XK_BACK_SPACE as i32,

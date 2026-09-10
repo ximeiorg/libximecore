@@ -308,9 +308,8 @@ impl PluginRuntime {
 
     /// 发送音频数据块（PCM 16bit mono）到 ASR 插件。
     pub fn feed_audio_data(&self, data: &[u8]) {
-        let _ = self.lua.to_value(data).and_then(|value| {
+        let _ = self.lua.to_value(data).map(|value| {
             self.call_fn::<()>("feedAudioData", value);
-            Ok(())
         });
     }
 

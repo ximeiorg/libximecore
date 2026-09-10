@@ -21,49 +21,92 @@ use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, row, scrollable, svg, text, Space};
 use iced::{Alignment, Element, Length};
 
-pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
-    let mut items = vec![
-        ("icons/keyboard.svg", "输入方案"),
-        ("icons/palette.svg", "外观"),
-        ("icons/command.svg", "快捷键"),
-        ("icons/word.svg", "词典"),
-        ("icons/store.svg", "扩展商店"),
-        ("icons/extension.svg", "插件管理"),
+/// 侧栏分组：对齐 Android 版设置页的分组语义
+/// （方案与词库 / 外观与交互 / 扩展 / 智能 / 同步 / 关于）。
+pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    let mut groups: Vec<(&'static str, Vec<(&'static str, &'static str)>)> = vec![
+        (
+            "方案与词库",
+            vec![
+                ("icons/keyboard.svg", "输入方案"),
+                ("icons/word.svg", "词典"),
+            ],
+        ),
+        (
+            "外观与交互",
+            vec![
+                ("icons/palette.svg", "外观"),
+                ("icons/command.svg", "快捷键"),
+            ],
+        ),
+        (
+            "扩展",
+            vec![
+                ("icons/store.svg", "扩展商店"),
+                ("icons/extension.svg", "插件管理"),
+            ],
+        ),
     ];
 
     #[cfg(feature = "smart-suggestion-page")]
-    items.push(("icons/thinking.svg", "智能联想"));
+    groups.push(("智能", vec![("icons/thinking.svg", "智能联想")]));
 
-    #[cfg(target_os = "linux")]
-    items.push(("icons/sync.svg", "同步"));
+    #[cfg(any(target_os = "linux", feature = "pair-page", feature = "clipboard-page"))]
+    {
+        let mut sync_items: Vec<(&'static str, &'static str)> = Vec::new();
+        #[cfg(target_os = "linux")]
+        sync_items.push(("icons/sync.svg", "同步"));
+        #[cfg(feature = "pair-page")]
+        sync_items.push(("icons/sync.svg", "设备关联"));
+        #[cfg(feature = "clipboard-page")]
+        sync_items.push(("icons/clipboard.svg", "剪贴板"));
+        if !sync_items.is_empty() {
+            groups.push(("同步", sync_items));
+        }
+    }
 
-    #[cfg(feature = "pair-page")]
-    items.push(("icons/sync.svg", "设备关联"));
-
-    #[cfg(feature = "clipboard-page")]
-    items.push(("icons/clipboard.svg", "剪贴板"));
-
-    items.push(("icons/about.svg", "关于"));
-    items
+    groups.push(("关于", vec![("icons/about.svg", "关于")]));
+    groups
 }
 
-/// 侧栏导航。
+/// 扁平导航项（分组拍平，页序 = 分组顺序内逐项）。
+pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
+    sidebar_groups()
+        .into_iter()
+        .flat_map(|(_, items)| items)
+        .collect()
+}
+
+/// 侧栏导航：品牌区 + 分组标题 + 各组导航项（点击仍发扁平下标）。
 pub fn sidebar(current: usize, colors: &ThemeColors) -> Element<'static, Message> {
-    let items = sidebar_items();
+    let groups = sidebar_groups();
     let colors = *colors;
 
-    let mut nav = column![
-        brand(&colors),
-        Space::new().height(20),
-        text("菜单").size(11).color(colors.foreground_faint),
-        Space::new().height(4),
-    ]
-    .spacing(2)
-    .padding([20, 14]);
+    let mut nav = column![brand(&colors), Space::new().height(20)]
+        .spacing(2)
+        .padding([20, 14]);
 
-    for (i, (icon_path, name)) in items.iter().enumerate() {
-        nav = nav.push(nav_button(icon_path, name, i, i == current, &colors));
+    let mut flat = 0usize;
+    for (title, items) in &groups {
+        nav = nav.push(
+            container(text(*title).size(11).color(colors.foreground_faint))
+                .width(Length::Fill)
+                .padding([0, 10]),
+        );
+        nav = nav.push(Space::new().height(4));
+        for (icon_path, name) in items {
+            nav = nav.push(nav_button(icon_path, name, flat, flat == current, &colors));
+            flat += 1;
+        }
+        nav = nav.push(Space::new().height(12));
     }
+
+    // 分组标题增加侧栏高度，窗口过矮时可滚动。
+    let nav: Element<'static, Message> = scrollable(nav)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |theme, status| scroll_style(&colors, theme, status))
+        .into();
 
     container(nav)
         .width(200)
