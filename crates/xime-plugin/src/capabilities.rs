@@ -22,6 +22,9 @@ pub struct PluginCapabilities {
     /// 剪贴板同步插件能力。
     #[serde(default)]
     pub clipboard_sync: Option<ClipboardSyncCapabilities>,
+    /// 云备份插件能力。
+    #[serde(default)]
+    pub backup: Option<BackupCapabilities>,
     /// 候选词转换热路径（15ms 超时）。
     #[serde(default)]
     pub candidate_transform: bool,
@@ -79,6 +82,14 @@ pub struct ToolCapabilities {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ClipboardSyncCapabilities {
     /// 支持的协议列表（如 "webdav", "s3", "ximed"）。
+    #[serde(default)]
+    pub protocols: Vec<String>,
+}
+
+/// 云备份插件能力（宿主打包，插件只承载传输协议）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct BackupCapabilities {
+    /// 支持的协议列表（如 "webdav", "s3"）。
     #[serde(default)]
     pub protocols: Vec<String>,
 }

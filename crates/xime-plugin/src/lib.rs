@@ -18,8 +18,9 @@ pub use capabilities::{
 };
 pub use manifest::{NetworkDecl, PluginManifest, PluginType, ToolbarButton};
 pub use runtime::{
-    CandidateTransformCircuitBreaker, CandidateTransformItem, CandidateTransformOutcome,
-    EmojiItem, EmojiLayout, PluginRuntime, RuntimeError, RuntimeResult,
+    BackupUploadResult, CandidateTransformCircuitBreaker, CandidateTransformItem,
+    CandidateTransformOutcome, EmojiItem, EmojiLayout, PluginRuntime, RemoteBackupEntry,
+    RuntimeError, RuntimeResult, SettingField,
 };
 
 pub use manager::{PluginManager, PluginRecord, PluginRecordState};

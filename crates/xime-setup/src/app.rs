@@ -281,6 +281,14 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             state.settings.backup.remote_dir = v;
         }
         #[cfg(feature = "backup-page")]
+        Message::BackupProviderChanged(v) => {
+            state.settings.backup.select_provider(v);
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupFieldChanged(key, value) => {
+            state.settings.backup.set_plugin_field(key, value);
+        }
+        #[cfg(feature = "backup-page")]
         Message::BackupModeChanged(v) => {
             state.settings.backup.mode = v;
         }
@@ -303,6 +311,22 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         #[cfg(feature = "backup-page")]
         Message::BackupDelete(path) => {
             state.settings.backup.start_delete(path);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::SyncPluginEnabled(v) => {
+            state.settings.sync_plugin.set_enabled(v);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::SyncPluginSelected(v) => {
+            state.settings.sync_plugin.select(v);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::SyncPluginFieldChanged(key, value) => {
+            state.settings.sync_plugin.set_field(key, value);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::SyncPluginTest => {
+            state.settings.sync_plugin.start_test();
         }
         #[cfg(feature = "pair-page")]
         Message::StartPairing => {

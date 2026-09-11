@@ -39,6 +39,50 @@ pub struct EmojiItem {
     pub category: String,
 }
 
+/// 云备份上传结果（契约同 Android `BackupResult`）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackupUploadResult {
+    pub ok: bool,
+    pub id: Option<String>,
+    pub message: Option<String>,
+}
+
+impl BackupUploadResult {
+    fn failed(message: &str) -> Self {
+        Self {
+            ok: false,
+            id: None,
+            message: Some(message.to_string()),
+        }
+    }
+}
+
+/// 远端备份条目（契约同 Android `RemoteBackupEntry`）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RemoteBackupEntry {
+    /// 条目 id（由插件定义，如 WebDAV 的远端绝对路径）。
+    pub id: String,
+    /// 展示名。
+    pub name: String,
+    /// 创建时间（Unix 秒；插件未返回为 0）。
+    pub created_at: i64,
+    /// 字节大小（插件未返回为 -1）。
+    pub size: i64,
+}
+
+/// 插件配置表单字段（`getSettingsSchema` 的 text/secret/button 子集）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SettingField {
+    pub key: String,
+    pub label: String,
+    /// "text" | "secret" | "button"（其余类型按 text 处理）。
+    pub ftype: String,
+    pub placeholder: Option<String>,
+    pub help_text: Option<String>,
+    pub required: bool,
+    pub default_value: Option<String>,
+}
+
 /// 候选词转换单项（candidate transform 热路径）。
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CandidateTransformItem {
@@ -274,32 +318,91 @@ impl PluginRuntime {
     }
 
     // ---- backup 契约（同 Android LuaBackupPluginAdapter）----
-    // 备份包生成/恢复由宿主完成，插件只做远端传输（PUT/GET/PROPFIND/DELETE）。
+    // 宿主打包/恢复，插件只承载传输协议（WebDAV/S3/自建 HTTP）。
 
-    /// 推送备份包（二进制）；返回插件结果 JSON（{ok, id?, message?}）。
-    pub fn backup_push(&self, name: &str, archive: &[u8]) -> Option<serde_json::Value> {
-        let args = self.lua.create_table().ok()?;
-        args.set("name", name).ok()?;
-        args.set("archive", self.lua.create_string(archive).ok()?).ok()?;
-        let table: Table = self.call_fn("pushBackup", args)?;
-        self.lua.from_value(Value::Table(table)).ok()
+    /// 上传备份包。插件返回 bool 或 {ok, id, message} 两种形态。
+    pub fn push_backup(&self, name: &str, archive: &[u8]) -> BackupUploadResult {
+        let Some(value) = (|lua: &Lua| -> Option<Value> {
+            let table = lua.create_table().ok()?;
+            table.set("name", name).ok()?;
+            table.set("archive", lua.create_string(archive).ok()?).ok();
+            Some(Value::Table(table))
+        })(&self.lua) else {
+            return BackupUploadResult::failed("构造上传参数失败");
+        };
+        let Some(result) = self.call_fn::<Value>("pushBackup", value) else {
+            return BackupUploadResult::failed("pushBackup 调用失败");
+        };
+        match result {
+            Value::Boolean(ok) => BackupUploadResult {
+                ok,
+                id: None,
+                message: None,
+            },
+            Value::Table(t) => BackupUploadResult {
+                ok: t.get("ok").unwrap_or(false),
+                id: t.get("id").ok().flatten(),
+                message: t.get("message").ok().flatten(),
+            },
+            _ => BackupUploadResult::failed("pushBackup 返回类型无效"),
+        }
     }
 
-    /// 拉取备份包内容（二进制）；远端不存在/失败返回 None。
-    pub fn backup_pull(&self, id: &str) -> Option<Vec<u8>> {
-        let data: LuaString = self.call_fn("pullBackup", id)?;
-        Some(data.as_bytes().to_vec())
+    /// 下载备份包（id = 插件 listBackups 返回的条目 id）；nil/失败返回 None。
+    pub fn pull_backup(&self, id: &str) -> Option<Vec<u8>> {
+        let value = self.call_fn::<Value>("pullBackup", id)?;
+        match value {
+            Value::String(s) => Some(s.as_bytes().to_vec()),
+            _ => None,
+        }
     }
 
-    /// 列出远端备份条目（[{id, name, createdAt, size}]）。
-    pub fn backup_list(&self) -> Option<serde_json::Value> {
-        let table: Table = self.call_fn("listBackups", ())?;
-        self.lua.from_value(Value::Table(table)).ok()
+    /// 列出远端备份条目；失败返回 None（与 Android 语义一致，区别于空列表）。
+    pub fn list_backups(&self) -> Option<Vec<RemoteBackupEntry>> {
+        let raw = self.call_fn::<Vec<Table>>("listBackups", ())?;
+        let mut out = Vec::new();
+        for t in raw {
+            let id: String = match t.get::<String>("id") {
+                Ok(v) if !v.is_empty() => v,
+                _ => continue,
+            };
+            out.push(RemoteBackupEntry {
+                name: t
+                    .get("name")
+                    .ok()
+                    .filter(|s: &String| !s.is_empty())
+                    .unwrap_or(id.clone()),
+                id,
+                created_at: t.get("createdAt").unwrap_or(0),
+                size: t.get("size").unwrap_or(-1),
+            });
+        }
+        Some(out)
     }
 
-    /// 删除远端备份条目；函数缺失/失败返回 None。
-    pub fn backup_delete(&self, id: &str) -> Option<bool> {
-        self.call_fn("deleteBackup", id)
+    /// 删除远端备份条目。
+    pub fn delete_backup(&self, id: &str) -> bool {
+        self.call_fn::<bool>("deleteBackup", id).unwrap_or(false)
+    }
+
+    /// 配置表单 schema（UiNode 契约的 text/secret/button 子集）。
+    pub fn get_settings_schema(&self) -> Vec<SettingField> {
+        let raw = self.call_fn::<Vec<Table>>("getSettingsSchema", ());
+        raw.unwrap_or_default()
+            .into_iter()
+            .filter_map(|t| {
+                let key: String = t.get("key").ok()?;
+                Some(SettingField {
+                    label: t.get("label").unwrap_or_else(|_| key.clone()),
+                    key,
+                    ftype: t.get("type").unwrap_or_else(|_| "text".to_string()),
+                    placeholder: t.get("placeholder").ok().flatten(),
+                    help_text: t.get("helpText").ok().flatten(),
+                    required: t.get("required").unwrap_or(false),
+                    default_value: t.get("defaultValue").ok().flatten(),
+                })
+            })
+            .collect()
     }
 
     // ---- tool 契约（同 Android LuaToolPluginAdapter）----
@@ -1195,78 +1298,31 @@ return plugin
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    fn extract_backup_plugin(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "xime_plugin_backup_{}_{}",
-            std::process::id(),
-            label
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("manifest.yaml"),
-            "id: com.example.backup\n\
-             name: Test Backup\n\
-             version: 1.0.0\n\
-             type: backup\n\
-             activation: single\n",
-        )
-        .unwrap();
-        // 用 host.config 充当远端存储，验证 pushBackup/pullBackup/listBackups 契约桥接
-        // （二进制备份包以 Lua string 往返）
-        std::fs::write(
-            dir.join("main.lua"),
-            r#"
-local plugin = {}
-local store = {}
-function plugin.pushBackup(args)
-    local id = "remote/" .. args.name
-    store[id] = args.archive
-    return { ok = true, id = id }
-end
-function plugin.pullBackup(id)
-    return store[id]
-end
-function plugin.listBackups()
-    local items = {}
-    for id, data in pairs(store) do
-        items[#items + 1] = { id = id, name = id, createdAt = 0, size = #data }
-    end
-    return items
-end
-function plugin.deleteBackup(id)
-    store[id] = nil
-    return true
-end
-return plugin
-"#,
-        )
-        .unwrap();
-        dir
-    }
-
     #[test]
     fn backup_contract_binary_roundtrip() {
-        let dir = extract_backup_plugin("roundtrip");
+        let dir = std::env::temp_dir().join(format!(
+            "xime_plugin_backup_{}_roundtrip",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_backup_plugin(&dir);
         let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         // 含 0 字节与多字节 UTF-8 的二进制备份包
         let archive: Vec<u8> = vec![0, 1, 2, 0xFF, 0xE4, 0xBD, 0xA0, 0x00, 0x7F];
-        let result = runtime
-            .backup_push("Xime配置-test.zip", &archive)
-            .expect("pushBackup must return result table");
-        assert_eq!(result["ok"], serde_json::json!(true));
-        let id = result["id"].as_str().expect("id must be string");
+        let result = runtime.push_backup("Xime配置-test.zip", &archive);
+        assert!(result.ok, "push failed: {:?}", result.message);
+        let id = result.id.expect("id must be set");
 
-        let pulled = runtime.backup_pull(id).expect("pull must return bytes");
+        let pulled = runtime.pull_backup(&id).expect("pull must return bytes");
         assert_eq!(pulled, archive);
 
-        let list = runtime.backup_list().expect("listBackups must return list");
-        assert_eq!(list.as_array().map(|a| a.len()), Some(1));
-        assert_eq!(list[0]["size"], serde_json::json!(archive.len()));
+        let list = runtime.list_backups().expect("listBackups must return list");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].size, archive.len() as i64);
 
-        assert_eq!(runtime.backup_delete(id), Some(true));
-        assert!(runtime.backup_pull(id).is_none());
+        assert!(runtime.delete_backup(&id));
+        assert!(runtime.pull_backup(&id).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1279,11 +1335,8 @@ return plugin
     }
 
     fn extract_tool_plugin(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "xime_plugin_tool_{}_{}",
-            std::process::id(),
-            label
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("xime_plugin_tool_{}_{}", std::process::id(), label));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1509,7 +1562,96 @@ return plugin
         breaker.record_success();
         assert_eq!(breaker.failures, 0);
 
-        std::fs::remove_dir_all(&std::env::temp_dir().join("xime_plugin_tool_events"))
-            .ok();
+        std::fs::remove_dir_all(std::env::temp_dir().join("xime_plugin_tool_events")).ok();
+    }
+    /// 写一个最小 backup 契约插件（内存态存储），验证宿主侧桥接。
+    fn write_backup_plugin(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: test.backup\nname: TestBackup\nversion: 1.0.0\ntype: backup\nentry: main.lua\ncapabilities:\n  backup:\n    protocols:\n      - webdav\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"
+    local store = {}
+    local plugin = {}
+    function plugin.pushBackup(args)
+        store[args.name] = args.archive
+        return { ok = true, id = args.name }
+    end
+    function plugin.listBackups()
+        local out = {}
+        for name, data in pairs(store) do
+            out[#out + 1] = { id = name, name = name, createdAt = 1700000000, size = #data }
+        end
+        return out
+    end
+    function plugin.pullBackup(id)
+        return store[id]
+    end
+    function plugin.deleteBackup(id)
+        store[id] = nil
+        return true
+    end
+    function plugin.getSettingsSchema()
+        return {
+            { type = "text", key = "url", label = "地址", required = true },
+            { type = "secret", key = "password", label = "密码" },
+            { type = "button", key = "testConnection", label = "测试连接" },
+        }
+    end
+    function plugin.testConnection()
+        return nil
+    end
+    return plugin
+    "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn backup_contract_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("xime_plugin_backup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_backup_plugin(&dir);
+
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+
+        // 上传（table 返回形态）。
+        let result = runtime.push_backup("ximeyi-1.tar.gz", b"payload");
+        assert!(result.ok, "push failed: {:?}", result.message);
+        assert_eq!(result.id.as_deref(), Some("ximeyi-1.tar.gz"));
+
+        // 列表。
+        let list = runtime.list_backups().expect("list failed");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "ximeyi-1.tar.gz");
+        assert_eq!(list[0].size, 7);
+        assert_eq!(list[0].created_at, 1_700_000_000);
+
+        // 下载 + 字节一致。
+        let data = runtime.pull_backup("ximeyi-1.tar.gz").expect("pull failed");
+        assert_eq!(data, b"payload");
+
+        // 删除后列表为空。
+        assert!(runtime.delete_backup("ximeyi-1.tar.gz"));
+        assert_eq!(runtime.list_backups().unwrap().len(), 0);
+
+        // schema：text/secret/button 三类字段。
+        let schema = runtime.get_settings_schema();
+        assert_eq!(schema.len(), 3);
+        assert_eq!(schema[0].key, "url");
+        assert_eq!(schema[0].ftype, "text");
+        assert!(schema[0].required);
+        assert_eq!(schema[1].ftype, "secret");
+        assert_eq!(schema[2].ftype, "button");
+
+        // bool 形态的 pushBackup 返回值 + manifest 类型解析。
+        let manifest = crate::PluginManifest::from_dir(&dir).unwrap();
+        assert_eq!(manifest.plugin_type(), crate::PluginType::Backup);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
