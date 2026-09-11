@@ -70,7 +70,7 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                     Some("服务器存储目录（历史记录等）"),
                     colors,
                     row![
-                        text(&c.data_dir).size(13).color(colors.foreground_muted),
+                        text(&c.data_dir).size(14).color(colors.foreground_muted),
                         text_button("打开", colors, Message::OpenSyncDataDir),
                     ]
                     .spacing(8)

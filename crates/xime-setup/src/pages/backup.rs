@@ -123,7 +123,7 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     let mut remote_items: Vec<Element<'a, Message>> = Vec::new();
     if b.remote.is_empty() {
         remote_items.push(
-            container(text("远端暂无备份").size(13).color(colors.foreground_muted))
+            container(text("远端暂无备份").size(14).color(colors.foreground_muted))
                 .width(Length::Fill)
                 .into(),
         );
@@ -140,8 +140,8 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                 sub.push_str(if tag == "full" { "全量" } else { "仅配置" });
             }
             let left = column![
-                text(&file.name).size(13).color(colors.foreground),
-                text(sub).size(11).color(colors.foreground_muted),
+                text(&file.name).size(14).color(colors.foreground),
+                text(sub).size(12).color(colors.foreground_muted),
             ]
             .spacing(2)
             .width(Length::Fill);

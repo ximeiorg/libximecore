@@ -44,7 +44,7 @@ fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
         let is_active = i == active;
         let label = *label;
         bar = bar.push(
-            button(text(label).size(13).color(if is_active {
+            button(text(label).size(14).color(if is_active {
                 colors.primary
             } else {
                 colors.foreground_muted
@@ -98,7 +98,7 @@ fn installed_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> El
     if schemas.is_empty() {
         return container(
             text("暂无已安装的方案")
-                .size(13)
+                .size(14)
                 .color(colors.foreground_muted),
         )
         .width(Length::Fill)
@@ -130,7 +130,7 @@ fn installed_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> El
                 Color::from_rgba(1.0, 1.0, 1.0, 0.2),
             ));
         }
-        left = left.push(text("设置").size(12).color(if is_current {
+        left = left.push(text("设置").size(13).color(if is_current {
             colors.primary
         } else {
             colors.foreground_muted
@@ -173,7 +173,7 @@ fn installed_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> El
     }
 
     if let Some(msg) = &settings.market_schema.install_message {
-        list = list.push(text(msg.clone()).size(12).color(colors.error));
+        list = list.push(text(msg.clone()).size(13).color(colors.error));
     }
 
     list.into()
@@ -189,7 +189,7 @@ fn downloads_tab<'a>(installed_ids: &[String], colors: &'a ThemeColors) -> Eleme
                 .size(14)
                 .color(colors.foreground_muted),
             text("请前往「扩展商店」下载")
-                .size(13)
+                .size(14)
                 .color(colors.foreground_muted),
         ]
         .spacing(8)
@@ -229,7 +229,7 @@ fn package_card<'a>(
                 } else {
                     "已下载，未安装"
                 })
-                .size(12)
+                .size(13)
                 .color(colors.foreground_muted),
             ]
             .spacing(2)

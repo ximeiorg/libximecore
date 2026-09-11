@@ -70,7 +70,7 @@ fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
         let is_active = i == active;
         let label = *label;
         bar = bar.push(
-            button(text(label).size(13).color(if is_active {
+            button(text(label).size(14).color(if is_active {
                 colors.primary
             } else {
                 colors.foreground_muted
@@ -145,7 +145,7 @@ fn chip<'a>(tag: String, active: bool, colors: &'a ThemeColors) -> Element<'a, M
     } else {
         tag.clone()
     };
-    button(text(label).size(12).color(if active {
+    button(text(label).size(13).color(if active {
         colors.on_primary
     } else {
         colors.foreground_muted
@@ -223,7 +223,7 @@ fn schemes_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
     let mut column = column![content].spacing(10).width(Length::Fill);
 
     if let Some(msg) = &store.install_message {
-        column = column.push(text(msg.clone()).size(12).color(colors.error));
+        column = column.push(text(msg.clone()).size(13).color(colors.error));
     }
     if store.loaded {
         column = column.push(footer(
@@ -336,9 +336,9 @@ fn schema_card<'a>(
                 },
                 container(text("")).width(Length::Fill),
                 if size_label.is_empty() {
-                    text("").size(12)
+                    text("").size(13)
                 } else {
-                    text(size_label).size(12).color(colors.foreground_muted)
+                    text(size_label).size(13).color(colors.foreground_muted)
                 },
             ]
             .spacing(6)
@@ -349,7 +349,7 @@ fn schema_card<'a>(
                 author_tags_row(&schema.author, &schema.tags, colors)
             },
             text(truncate(&schema.description, DESC_MAX_CHARS))
-                .size(12)
+                .size(13)
                 .color(colors.foreground_muted),
         ]
         .spacing(2)
@@ -419,12 +419,12 @@ fn schema_action<'a>(
         disabled_button(label, colors)
     } else if installed {
         text("已安装")
-            .size(12)
+            .size(13)
             .color(colors.foreground_muted)
             .into()
     } else if downloaded {
         text("已下载")
-            .size(12)
+            .size(13)
             .color(colors.foreground_muted)
             .into()
     } else {
@@ -450,7 +450,7 @@ fn models_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Eleme
     let mut column = column![content].spacing(10).width(Length::Fill);
 
     if let Some(msg) = &store.install_message {
-        column = column.push(text(msg.clone()).size(12).color(colors.error));
+        column = column.push(text(msg.clone()).size(13).color(colors.error));
     }
     if store.loaded {
         column = column.push(footer(
@@ -566,9 +566,9 @@ fn model_card<'a>(
                 .color(colors.foreground),
                 container(text("")).width(Length::Fill),
                 if size_label.is_empty() {
-                    text("").size(12)
+                    text("").size(13)
                 } else {
-                    text(size_label).size(12).color(colors.foreground_muted)
+                    text(size_label).size(13).color(colors.foreground_muted)
                 },
             ]
             .spacing(6)
@@ -579,10 +579,10 @@ fn model_card<'a>(
                 author_tags_row(&model.author, &tags, colors)
             },
             if model.description.is_empty() {
-                text("").size(12)
+                text("").size(13)
             } else {
                 text(truncate(&model.description, DESC_MAX_CHARS))
-                    .size(12)
+                    .size(13)
                     .color(colors.foreground_muted)
             },
         ]
@@ -635,7 +635,7 @@ fn model_action<'a>(
         disabled_button(label, colors)
     } else if downloaded {
         row![
-            text("已安装").size(12).color(colors.foreground_muted),
+            text("已安装").size(13).color(colors.foreground_muted),
             button_danger("删除", &colors, Message::DeleteModel(model_id)),
         ]
         .spacing(8)
@@ -672,7 +672,7 @@ fn plugins_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
     let mut column = column![content].spacing(10).width(Length::Fill);
 
     if let Some(msg) = &store.install_message {
-        column = column.push(text(msg.clone()).size(12).color(colors.error));
+        column = column.push(text(msg.clone()).size(13).color(colors.error));
     }
     if store.loaded {
         column = column.push(footer(
@@ -805,10 +805,10 @@ fn plugin_card<'a>(
                 author_tags_row(&plugin.author, &tags, colors)
             },
             if plugin.description.is_empty() {
-                text("").size(12)
+                text("").size(13)
             } else {
                 text(truncate(&plugin.description, DESC_MAX_CHARS))
-                    .size(12)
+                    .size(13)
                     .color(colors.foreground_muted)
             },
         ]
@@ -823,20 +823,20 @@ fn plugin_card<'a>(
 
     let mut footer = row![
         if version.is_empty() {
-            text("").size(12)
+            text("").size(13)
         } else {
-            text(format!("v{version}")).size(12).color(colors.primary)
+            text(format!("v{version}")).size(13).color(colors.primary)
         },
         if is_installed {
             text(if enabled { "已启用" } else { "已禁用" })
-                .size(12)
+                .size(13)
                 .color(colors.foreground_muted)
         } else if !installed_version.is_empty() {
             text(format!("已安装 v{installed_version}"))
-                .size(12)
+                .size(13)
                 .color(colors.foreground_muted)
         } else {
-            text("").size(12)
+            text("").size(13)
         },
         container(text("")).width(Length::Fill),
     ]
@@ -907,7 +907,7 @@ fn author_tags_row<'a>(
     if !author.is_empty() {
         row = row.push(
             text(author.to_string())
-                .size(12)
+                .size(13)
                 .color(colors.foreground_muted),
         );
     }
@@ -949,7 +949,7 @@ fn footer<'a>(
     if !updated_at.is_empty() {
         text_ = format!("{} · 更新于 {}", text_, updated_at);
     }
-    text(text_).size(11).color(colors.foreground_faint).into()
+    text(text_).size(12).color(colors.foreground_faint).into()
 }
 
 /// 彩色方块：分类字 + 分类色浅底（商店卡片图标位，参考 Xime 48dp 圆角 12dp）。
@@ -957,7 +957,7 @@ fn glyph_box<'a>(glyph: char, icon: (Color, Color)) -> Element<'a, Message> {
     let (container_bg, content_color) = icon;
     container(
         text(glyph.to_string())
-            .size(13)
+            .size(14)
             .font(semibold())
             .color(content_color),
     )
@@ -1025,10 +1025,10 @@ fn version_selector<'a>(
     on_select: fn(String, String) -> Message,
 ) -> Element<'a, Message> {
     if versions.is_empty() {
-        return text("").size(12).into();
+        return text("").size(13).into();
     }
     if versions.len() <= 1 {
-        return text(selected).size(12).color(colors.primary).into();
+        return text(selected).size(13).color(colors.primary).into();
     }
     let colors = *colors;
     pick_list(versions, Some(selected), move |v| on_select(id.clone(), v))
@@ -1051,7 +1051,7 @@ fn version_selector<'a>(
 }
 
 fn disabled_button<'a>(label: impl Into<String>, colors: ThemeColors) -> Element<'a, Message> {
-    button(text(label.into()).size(13).color(colors.foreground_muted))
+    button(text(label.into()).size(14).color(colors.foreground_muted))
         .padding([6, 14])
         .style(move |_theme, _status| {
             crate::components::widgets::secondary_button_style(&colors, button::Status::Disabled)
@@ -1063,7 +1063,7 @@ fn pill<'a>(label: &str, colors: &'a ThemeColors) -> Element<'a, Message> {
     let colors = *colors;
     container(
         text(label.to_string())
-            .size(11)
+            .size(12)
             .color(colors.foreground_muted),
     )
     .padding([2, 8])
@@ -1081,7 +1081,7 @@ fn pill<'a>(label: &str, colors: &'a ThemeColors) -> Element<'a, Message> {
 
 fn warning_box<'a>(warning: &str, colors: &'a ThemeColors) -> Element<'a, Message> {
     let colors = *colors;
-    container(text(warning.to_string()).size(12).color(colors.foreground))
+    container(text(warning.to_string()).size(13).color(colors.foreground))
         .width(Length::Fill)
         .padding(10)
         .style(move |_| container::Style {

@@ -44,7 +44,7 @@ fn empty_state<'a>(colors: &'a ThemeColors) -> Element<'a, Message> {
                 .size(14)
                 .color(colors.foreground_muted),
             text("从扩展商店下载插件后会显示在这里")
-                .size(12)
+                .size(13)
                 .color(colors.foreground_faint),
         ]
         .spacing(8)
@@ -110,7 +110,7 @@ fn plugin_row<'a>(
             } else {
                 format!("{} · v{}", type_label, plugin.version)
             })
-            .size(12)
+            .size(13)
             .color(colors.foreground_muted),
         ]
         .spacing(2)
@@ -153,7 +153,7 @@ fn glyph_box<'a>(glyph: char, icon: (Color, Color)) -> Element<'a, Message> {
     let (container_bg, content_color) = icon;
     container(
         text(glyph.to_string())
-            .size(13)
+            .size(14)
             .font(semibold())
             .color(content_color),
     )
