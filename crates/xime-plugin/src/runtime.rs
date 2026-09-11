@@ -273,6 +273,35 @@ impl PluginRuntime {
             .filter(|s| !s.is_empty())
     }
 
+    // ---- backup 契约（同 Android LuaBackupPluginAdapter）----
+    // 备份包生成/恢复由宿主完成，插件只做远端传输（PUT/GET/PROPFIND/DELETE）。
+
+    /// 推送备份包（二进制）；返回插件结果 JSON（{ok, id?, message?}）。
+    pub fn backup_push(&self, name: &str, archive: &[u8]) -> Option<serde_json::Value> {
+        let args = self.lua.create_table().ok()?;
+        args.set("name", name).ok()?;
+        args.set("archive", self.lua.create_string(archive).ok()?).ok()?;
+        let table: Table = self.call_fn("pushBackup", args)?;
+        self.lua.from_value(Value::Table(table)).ok()
+    }
+
+    /// 拉取备份包内容（二进制）；远端不存在/失败返回 None。
+    pub fn backup_pull(&self, id: &str) -> Option<Vec<u8>> {
+        let data: LuaString = self.call_fn("pullBackup", id)?;
+        Some(data.as_bytes().to_vec())
+    }
+
+    /// 列出远端备份条目（[{id, name, createdAt, size}]）。
+    pub fn backup_list(&self) -> Option<serde_json::Value> {
+        let table: Table = self.call_fn("listBackups", ())?;
+        self.lua.from_value(Value::Table(table)).ok()
+    }
+
+    /// 删除远端备份条目；函数缺失/失败返回 None。
+    pub fn backup_delete(&self, id: &str) -> Option<bool> {
+        self.call_fn("deleteBackup", id)
+    }
+
     // ---- tool 契约（同 Android LuaToolPluginAdapter）----
 
     /// 获取工具面板状态（同步调用，200ms 超时由宿主控制）。
@@ -1163,6 +1192,81 @@ return plugin
         assert_eq!(pulled["source"], "dev-a");
         // testConnection 返回 nil → None（成功）
         assert!(runtime.test_connection().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn extract_backup_plugin(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xime_plugin_backup_{}_{}",
+            std::process::id(),
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.backup\n\
+             name: Test Backup\n\
+             version: 1.0.0\n\
+             type: backup\n\
+             activation: single\n",
+        )
+        .unwrap();
+        // 用 host.config 充当远端存储，验证 pushBackup/pullBackup/listBackups 契约桥接
+        // （二进制备份包以 Lua string 往返）
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"
+local plugin = {}
+local store = {}
+function plugin.pushBackup(args)
+    local id = "remote/" .. args.name
+    store[id] = args.archive
+    return { ok = true, id = id }
+end
+function plugin.pullBackup(id)
+    return store[id]
+end
+function plugin.listBackups()
+    local items = {}
+    for id, data in pairs(store) do
+        items[#items + 1] = { id = id, name = id, createdAt = 0, size = #data }
+    end
+    return items
+end
+function plugin.deleteBackup(id)
+    store[id] = nil
+    return true
+end
+return plugin
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn backup_contract_binary_roundtrip() {
+        let dir = extract_backup_plugin("roundtrip");
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+
+        // 含 0 字节与多字节 UTF-8 的二进制备份包
+        let archive: Vec<u8> = vec![0, 1, 2, 0xFF, 0xE4, 0xBD, 0xA0, 0x00, 0x7F];
+        let result = runtime
+            .backup_push("Xime配置-test.zip", &archive)
+            .expect("pushBackup must return result table");
+        assert_eq!(result["ok"], serde_json::json!(true));
+        let id = result["id"].as_str().expect("id must be string");
+
+        let pulled = runtime.backup_pull(id).expect("pull must return bytes");
+        assert_eq!(pulled, archive);
+
+        let list = runtime.backup_list().expect("listBackups must return list");
+        assert_eq!(list.as_array().map(|a| a.len()), Some(1));
+        assert_eq!(list[0]["size"], serde_json::json!(archive.len()));
+
+        assert_eq!(runtime.backup_delete(id), Some(true));
+        assert!(runtime.backup_pull(id).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -35,27 +35,44 @@ pub fn get_data_dirs() -> (PathBuf, PathBuf) {
     }
 }
 
-/// 解析默认 Rime 数据目录（双目录模型）：
-/// - shared：只读的 rime-wubi 默认目录。dev 安装优先 `~/.local/share/<name>/rime-data`，
-///   系统安装回退 `/usr/share/<name>/rime-data`（取首个存在 default.yaml 的目录）。
-/// - user：用户数据目录 `~/.config/<name>/rime`（默认文件不落用户目录，用户同名文件优先）。
+/// 解析默认 Rime 数据目录。
+///
+/// - Windows：单目录模型（对齐 Xime）——shared 与 user 都指向 `%APPDATA%/<name>/rime`，
+///   安装目录自带的方案文件由宿主在启动时部署进去（首装全量、升级只强更非 custom 文件）。
+/// - Unix（双目录模型）：shared 取首个存在 default.yaml 的候选目录
+///   （`~/.local/share/<name>/rime-data` 或 `/usr/share/<name>/rime-data`），
+///   user 为 `~/.config/<name>/rime`。
 ///
 /// 宿主应用在启动时可直接调用 [`set_rime_paths`] 注入，或省略调用走本默认值。
 pub fn default_rime_paths() -> RimePaths {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let config_dir = app_metadata().config_dir_name;
-    let shared_candidates = [
-        PathBuf::from(&home).join(format!(".local/share/{config_dir}/rime-data")),
-        PathBuf::from(format!("/usr/share/{config_dir}/rime-data")),
-    ];
-    let shared_data_dir = shared_candidates
-        .iter()
-        .find(|d| d.join("default.yaml").exists())
-        .cloned()
-        .unwrap_or_else(|| shared_candidates[0].clone());
-    RimePaths {
-        shared_data_dir,
-        user_data_dir: PathBuf::from(&home).join(format!(".config/{config_dir}/rime")),
+
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        let rime_dir = PathBuf::from(base).join(config_dir).join("rime");
+        RimePaths {
+            shared_data_dir: rime_dir.clone(),
+            user_data_dir: rime_dir,
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let shared_candidates = [
+            PathBuf::from(&home).join(format!(".local/share/{config_dir}/rime-data")),
+            PathBuf::from(format!("/usr/share/{config_dir}/rime-data")),
+        ];
+        let shared_data_dir = shared_candidates
+            .iter()
+            .find(|d| d.join("default.yaml").exists())
+            .cloned()
+            .unwrap_or_else(|| shared_candidates[0].clone());
+        RimePaths {
+            shared_data_dir,
+            user_data_dir: PathBuf::from(&home).join(format!(".config/{config_dir}/rime")),
+        }
     }
 }
 
@@ -131,24 +148,39 @@ mod tests {
         let config_dir = app_metadata().config_dir_name;
         let paths = default_rime_paths();
         let (shared, user) = (paths.shared_data_dir, paths.user_data_dir);
-        assert!(
-            !shared.starts_with("/usr/share/rime-data"),
-            "default shared dir must not use system librime-data: {}",
-            shared.display()
-        );
-        assert!(
-            shared.ends_with(format!(".local/share/{config_dir}/rime-data").as_str()),
-            "shared dir must be read-only rime-wubi install dir: {}",
-            shared.display()
-        );
-        assert!(
-            user.ends_with(format!(".config/{config_dir}/rime").as_str()),
-            "user dir: {}",
-            user.display()
-        );
-        assert_ne!(
-            shared, user,
-            "shared/user 必须分离，默认文件不得落入用户目录"
-        );
+
+        #[cfg(windows)]
+        {
+            // Windows 单目录模型：shared == user == %APPDATA%/<config_dir>/rime
+            assert_eq!(shared, user, "Windows 必须使用单目录模型");
+            assert!(
+                user.ends_with(PathBuf::from(format!("{config_dir}/rime"))),
+                "user dir: {}",
+                user.display()
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            assert!(
+                !shared.starts_with("/usr/share/rime-data"),
+                "default shared dir must not use system librime-data: {}",
+                shared.display()
+            );
+            assert!(
+                shared.ends_with(format!(".local/share/{config_dir}/rime-data").as_str()),
+                "shared dir must be read-only rime-wubi install dir: {}",
+                shared.display()
+            );
+            assert!(
+                user.ends_with(format!(".config/{config_dir}/rime").as_str()),
+                "user dir: {}",
+                user.display()
+            );
+            assert_ne!(
+                shared, user,
+                "shared/user 必须分离，默认文件不得落入用户目录"
+            );
+        }
     }
 }
