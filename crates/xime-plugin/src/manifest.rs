@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::path::Path;
 use thiserror::Error;
 
+use crate::capabilities::PluginCapabilities;
+
 /// manifest.yaml 解析错误。
 #[derive(Debug, Error)]
 pub enum ManifestError {
@@ -26,6 +28,8 @@ pub enum PluginType {
     Prediction,
     /// 剪贴板同步（单选激活，契约同 Android `clipboard_sync`：push/pull/testConnection）。
     ClipboardSync,
+    /// 工具面板（单选/多选，面板交互）。
+    Tool,
     /// 其他 / 未知。
     Other,
 }
@@ -43,7 +47,7 @@ pub struct PluginManifest {
     pub icon: String,
     #[serde(default)]
     pub version: String,
-    /// emoji / speech / prediction ...
+    /// emoji / speech / prediction / tool / clipboard_sync
     #[serde(rename = "type", default)]
     pub plugin_type: String,
     /// single / multi / none
@@ -54,17 +58,22 @@ pub struct PluginManifest {
     pub entry: String,
     #[serde(rename = "minHostVersion", default)]
     pub min_host_version: String,
+    #[serde(rename = "maxHostVersion", default)]
+    pub max_host_version: String,
     #[serde(rename = "sdkVersion", default)]
     pub sdk_version: String,
-    /// 能力声明（宿主据此决定如何消费，宽松解析）。
+    /// 能力声明（结构化解析，宿主据此决定如何消费）。
     #[serde(default)]
-    pub capabilities: serde_yaml::Value,
+    pub capabilities: PluginCapabilities,
     /// 配置字段声明（宿主渲染表单，宽松解析）。
     #[serde(rename = "configSchema", alias = "config_schema", default)]
     pub config_schema: serde_yaml::Value,
     /// 网络访问声明。
     #[serde(default)]
     pub network: NetworkDecl,
+    /// 工具栏按钮声明。
+    #[serde(rename = "toolbarButtons", default)]
+    pub toolbar_buttons: Vec<ToolbarButton>,
 }
 
 fn default_entry() -> String {
@@ -78,6 +87,25 @@ pub struct NetworkDecl {
     pub hosts: Vec<String>,
     #[serde(rename = "allowCustomHosts", default)]
     pub allow_custom_hosts: bool,
+}
+
+/// 工具栏按钮声明。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ToolbarButton {
+    /// 全局唯一 ID（不含逗号）。
+    pub id: String,
+    /// 按钮文字。
+    pub label: String,
+    /// 图标（资源文件名）。
+    #[serde(default)]
+    pub icon: String,
+    /// 点击动作（默认 "open_panel"）。
+    #[serde(default = "default_action")]
+    pub action: String,
+}
+
+fn default_action() -> String {
+    "open_panel".to_string()
 }
 
 impl PluginManifest {
@@ -105,6 +133,7 @@ impl PluginManifest {
             "speech" => PluginType::Speech,
             "prediction" => PluginType::Prediction,
             "clipboard_sync" => PluginType::ClipboardSync,
+            "tool" => PluginType::Tool,
             _ => PluginType::Other,
         }
     }
@@ -135,7 +164,10 @@ capabilities:
     supportsSearch: true
     categories:
       - 颜文字
-configSchema: []
+configSchema:
+  - key: apikey
+    label: API Key
+    type: password
 network:
   hosts:
     - dashscope.aliyuncs.com
@@ -150,10 +182,8 @@ network:
         assert_eq!(m.entry, "main.lua");
         assert_eq!(m.min_host_version, "2.6.0");
         assert_eq!(m.network.hosts, vec!["dashscope.aliyuncs.com"]);
-        assert_eq!(
-            m.capabilities["emoji"]["supportsSearch"],
-            serde_yaml::Value::Bool(true)
-        );
+        let cap = &m.capabilities;
+        assert!(cap.emoji.as_ref().unwrap().supports_search);
         // configSchema 为 camelCase 键，必须解析进 config_schema（宽松 Value）
         assert!(m.config_schema.is_sequence());
     }
@@ -178,6 +208,46 @@ network:
         )
         .unwrap();
         assert_eq!(m.plugin_type(), PluginType::ClipboardSync);
+    }
+
+    #[test]
+    fn parse_tool_type() {
+        let yaml = r#"id: com.example.tool
+name: My Tool
+version: 1.0.0
+type: tool
+activation: single
+capabilities:
+  tool:
+    display: direct
+  candidate_transform: true
+  events:
+    - input_changed
+"#;
+        let m = PluginManifest::parse(yaml).unwrap();
+        assert_eq!(m.plugin_type(), PluginType::Tool);
+        assert!(m.capabilities.candidate_transform);
+        let tool = m.capabilities.tool.unwrap();
+        assert_eq!(tool.display, "direct");
+        assert_eq!(m.capabilities.events, vec!["input_changed"]);
+    }
+
+    #[test]
+    fn parse_toolbar_buttons() {
+        let yaml = r#"id: com.example.toolbar
+name: Toolbar
+version: 1.0.0
+type: tool
+toolbarButtons:
+  - id: btn1
+    label: Button 1
+    icon: icon.png
+    action: open_panel
+"#;
+        let m = PluginManifest::parse(yaml).unwrap();
+        assert_eq!(m.toolbar_buttons.len(), 1);
+        assert_eq!(m.toolbar_buttons[0].id, "btn1");
+        assert_eq!(m.toolbar_buttons[0].label, "Button 1");
     }
 
     #[test]

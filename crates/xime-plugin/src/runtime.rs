@@ -42,6 +42,66 @@ pub struct EmojiItem {
     pub category: String,
 }
 
+/// 候选词转换单项（candidate transform 热路径）。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CandidateTransformItem {
+    pub id: Option<String>,
+    pub text: String,
+    #[serde(rename = "insertText")]
+    pub insert_text: Option<String>,
+    #[serde(rename = "imageUrl")]
+    pub image_url: Option<String>,
+}
+
+/// 候选词转换结果。
+#[derive(Debug, Clone)]
+pub enum CandidateTransformOutcome {
+    /// 转换成功，返回新列表。
+    Success(Vec<CandidateTransformItem>),
+    /// 插件无响应（超时或函数缺失）。
+    NoResponse,
+    /// 转换失败（错误或 panic）。
+    Failed(String),
+}
+
+/// 候选词转换熔断器。
+pub struct CandidateTransformCircuitBreaker {
+    failures: u32,
+    threshold: u32,
+    tripped: bool,
+}
+
+impl CandidateTransformCircuitBreaker {
+    pub fn new(threshold: u32) -> Self {
+        Self {
+            failures: 0,
+            threshold,
+            tripped: false,
+        }
+    }
+
+    pub fn is_tripped(&self) -> bool {
+        self.tripped
+    }
+
+    pub fn record_success(&mut self) {
+        self.failures = 0;
+        self.tripped = false;
+    }
+
+    pub fn record_failure(&mut self) {
+        self.failures += 1;
+        if self.failures >= self.threshold {
+            self.tripped = true;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.failures = 0;
+        self.tripped = false;
+    }
+}
+
 /// emoji 插件分类布局配置。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmojiLayout {
@@ -96,36 +156,7 @@ fn normalize_host(raw: &str) -> String {
     h.to_ascii_lowercase()
 }
 
-/// manifest capabilities 的强类型解析（宿主据此门禁注入 host API / 事件）。
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RuntimeCaps {
-    pub clipboard_read: bool,
-    pub quick_send_read: bool,
-    /// 订阅的下行事件（如 `text_committed`）。
-    pub events: Vec<String>,
-}
-
-impl RuntimeCaps {
-    pub fn from_manifest(caps: &serde_yaml::Value) -> Self {
-        let get_bool = |key: &str| {
-            caps.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
-        };
-        let events = caps
-            .get("events")
-            .and_then(|x| x.as_sequence())
-            .map(|seq| {
-                seq.iter()
-                    .filter_map(|i| i.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Self {
-            clipboard_read: get_bool("clipboard_read"),
-            quick_send_read: get_bool("quick_send_read"),
-            events,
-        }
-    }
-}
+use crate::capabilities::PluginCapabilities;
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -150,8 +181,8 @@ pub struct PluginRuntime {
     lua: Lua,
     plugin: Table,
     plugin_id: String,
-    /// manifest capabilities 的强类型快照（事件订阅门禁等）。
-    caps: RuntimeCaps,
+    /// manifest capabilities 的强类型快照（host API 注入 / 事件订阅门禁）。
+    caps: PluginCapabilities,
 }
 
 impl PluginRuntime {
@@ -160,7 +191,11 @@ impl PluginRuntime {
     /// - `plugin_dir`: 已解压的插件目录
     /// - `manifest`: 已解析的 manifest（entry / 网络声明等）
     /// - `config_file`: host.config 的持久化文件路径
-    pub fn load(plugin_dir: &Path, manifest: &PluginManifest, config_file: &Path) -> RuntimeResult<Self> {
+    pub fn load(
+        plugin_dir: &Path,
+        manifest: &PluginManifest,
+        config_file: &Path,
+    ) -> RuntimeResult<Self> {
         Self::load_with_apis(
             plugin_dir,
             manifest,
@@ -208,7 +243,7 @@ impl PluginRuntime {
 
         setup_require(&lua, &plugin_dir.join("libs"))?;
 
-        let caps = RuntimeCaps::from_manifest(&manifest.capabilities);
+        let caps = manifest.capabilities.clone();
         let host = build_host_table(&lua, plugin_dir, config_file, net, &apis, &caps)?;
         globals.set("host", host)?;
 
@@ -219,7 +254,7 @@ impl PluginRuntime {
         let chunk = lua.load(entry_path);
         let plugin = chunk.eval::<Table>()?;
 
-        let caps = RuntimeCaps::from_manifest(&manifest.capabilities);
+        let caps = manifest.capabilities.clone();
 
         Ok(Self {
             lua,
@@ -355,6 +390,115 @@ impl PluginRuntime {
         self.call_fn::<bool>("onPluginEvent", (event_type, value))
             .unwrap_or(false)
     }
+
+    // ---- backup 契约（同 Android LuaBackupPluginAdapter）----
+    // 备份包生成/恢复由宿主完成，插件只做远端传输（PUT/GET/PROPFIND/DELETE）。
+
+    /// 推送备份包（二进制）；返回插件结果 JSON（{ok, id?, message?}）。
+    pub fn backup_push(&self, name: &str, archive: &[u8]) -> Option<serde_json::Value> {
+        let args = self.lua.create_table().ok()?;
+        args.set("name", name).ok()?;
+        args.set("archive", self.lua.create_string(archive).ok()?)
+            .ok()?;
+        let table: Table = self.call_fn("pushBackup", args)?;
+        self.lua.from_value(Value::Table(table)).ok()
+    }
+
+    /// 拉取备份包内容（二进制）；远端不存在/失败返回 None。
+    pub fn backup_pull(&self, id: &str) -> Option<Vec<u8>> {
+        let data: LuaString = self.call_fn("pullBackup", id)?;
+        Some(data.as_bytes().to_vec())
+    }
+
+    /// 列出远端备份条目（[{id, name, createdAt, size}]）。
+    pub fn backup_list(&self) -> Option<serde_json::Value> {
+        let table: Table = self.call_fn("listBackups", ())?;
+        self.lua.from_value(Value::Table(table)).ok()
+    }
+
+    /// 删除远端备份条目；函数缺失/失败返回 None。
+    pub fn backup_delete(&self, id: &str) -> Option<bool> {
+        self.call_fn("deleteBackup", id)
+    }
+
+    // ---- tool 契约（同 Android LuaToolPluginAdapter）----
+
+    /// 获取工具面板状态（同步调用，200ms 超时由宿主控制）。
+    /// 返回 JSON 对象描述面板 UI；插件返回 nil 表示无面板。
+    pub fn get_panel_state(&self, input_text: &str) -> Option<serde_json::Value> {
+        let table: Table = self.call_fn("getPanelState", (input_text,))?;
+        self.lua
+            .from_value::<serde_json::Value>(Value::Table(table))
+            .ok()
+    }
+
+    /// 面板输入事件（异步，fire-and-forget）。
+    pub fn on_panel_input(&self, input_text: &str) {
+        let _ = self.call_fn::<()>("onPanelInput", (input_text,));
+    }
+
+    /// 面板动作事件（异步，fire-and-forget）。
+    pub fn on_panel_action(&self, action: &str) {
+        let _ = self.call_fn::<()>("onPanelAction", (action,));
+    }
+
+    /// 面板列表项点击事件（异步，fire-and-forget）。
+    pub fn on_panel_item_click(&self, item_id: &str) {
+        let _ = self.call_fn::<()>("onPanelItemClick", (item_id,));
+    }
+
+    // ---- speech/ASR 契约（同 Android LuaAsrPluginAdapter）----
+
+    /// 创建 ASR 后端；插件返回 true 表示就绪，false / nil 表示失败。
+    pub fn create_asr_backend(&self) -> bool {
+        self.call_fn::<bool>("createBackend", ()).unwrap_or(false)
+    }
+
+    /// 发送音频数据块（PCM 16bit mono）到 ASR 插件。
+    pub fn feed_audio_data(&self, data: &[u8]) {
+        let _ = self.lua.to_value(data).map(|value| {
+            self.call_fn::<()>("feedAudioData", value);
+        });
+    }
+
+    /// 停止 ASR 识别。
+    pub fn stop_asr(&self) {
+        let _ = self.call_fn::<()>("stopRecognition", ());
+    }
+
+    // ---- candidate transform 契约（热路径，15ms 硬超时）----
+
+    /// 候选词转换（热路径）：宿主传入候选词列表，插件返回转换后的列表。
+    /// 超时 15ms，连续 3 次失败后熔断（不再调用）。
+    pub fn transform_candidates(
+        &self,
+        candidates: &[CandidateTransformItem],
+    ) -> Vec<CandidateTransformItem> {
+        let Ok(input_table) = self.lua.to_value(candidates) else {
+            return candidates.to_vec();
+        };
+        match self.call_fn::<Vec<Table>>("transformCandidates", input_table) {
+            Some(raw) => raw
+                .into_iter()
+                .filter_map(|t| {
+                    let text: String = t.get("text").unwrap_or_default();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    let id: Option<String> = t.get("id").ok().flatten();
+                    let insert_text: Option<String> = t.get("insertText").ok().flatten();
+                    let image_url: Option<String> = t.get("imageUrl").ok().flatten();
+                    Some(CandidateTransformItem {
+                        id,
+                        text,
+                        insert_text,
+                        image_url,
+                    })
+                })
+                .collect(),
+            None => candidates.to_vec(),
+        }
+    }
 }
 
 /// 受限 require：只能加载 `libs/<name>.lua`，禁止路径穿越。
@@ -396,7 +540,7 @@ fn build_host_table(
     config_file: &Path,
     net: NetworkPolicy,
     apis: &HostApis,
-    caps: &RuntimeCaps,
+    caps: &PluginCapabilities,
 ) -> mlua::Result<Table> {
     let host = lua.create_table()?;
     host.set("sdkVersion", SDK_VERSION)?;
@@ -632,7 +776,10 @@ fn build_host_table(
             let url = arg_string(1).unwrap_or_default();
 
             // 网络白名单（fail-closed）：host 不在声明内直接拒绝
-            let uri_host = url.parse::<ureq::http::Uri>().ok().and_then(|u| u.host().map(str::to_owned));
+            let uri_host = url
+                .parse::<ureq::http::Uri>()
+                .ok()
+                .and_then(|u| u.host().map(str::to_owned));
             if !net.allows(uri_host.as_deref()) {
                 tracing::warn!(
                     "[plugin http] 拒绝未授权请求: host={:?}（manifest network.hosts 未声明）",
@@ -855,7 +1002,10 @@ mod tests {
 
     #[test]
     fn test_normalize_host() {
-        assert_eq!(normalize_host("https://dav.example.com/path"), "dav.example.com");
+        assert_eq!(
+            normalize_host("https://dav.example.com/path"),
+            "dav.example.com"
+        );
         assert_eq!(normalize_host("HTTP://Example.COM:8080"), "example.com");
         assert_eq!(normalize_host("example.com"), "example.com");
         assert_eq!(normalize_host(" example.com "), "example.com");
@@ -884,10 +1034,7 @@ mod tests {
             hosts: vec![],
             allow_custom_hosts: true,
         };
-        assert_eq!(
-            NetworkPolicy::from_manifest(&decl),
-            NetworkPolicy::AllowAll
-        );
+        assert_eq!(NetworkPolicy::from_manifest(&decl), NetworkPolicy::AllowAll);
     }
 
     /// Lua 层：未声明网络的插件调用 host.http.request 应被拒绝（返回 nil，不发请求）。
@@ -898,7 +1045,10 @@ mod tests {
         std::fs::write(dir.join("main.lua"), "return { run = function() return host.http.request('GET', 'http://example.com/') end }").unwrap();
         let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let result: Option<mlua::Value> = runtime.call_fn("run", ());
-        assert!(result.is_none() || matches!(result, Some(mlua::Value::Nil)), "deny 应返回 nil");
+        assert!(
+            result.is_none() || matches!(result, Some(mlua::Value::Nil)),
+            "deny 应返回 nil"
+        );
     }
 
     /// Lua 层：声明 clipboard_read/quick_send_read 且宿主提供 API → 注入 host 表。
@@ -974,8 +1124,7 @@ mod tests {
             "return { run = function() return host.clipboard == nil and host.quickSend == nil end }",
         )
         .unwrap();
-        let runtime =
-            PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let hidden: bool = runtime.call_fn("run", ()).unwrap();
         assert!(hidden);
     }
@@ -995,17 +1144,14 @@ mod tests {
             "id: com.test\nentry: main.lua\ncapabilities:\n  events:\n    - text_committed\n",
         )
         .unwrap();
-        let runtime =
-            PluginRuntime::load(dir, &manifest, &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(dir, &manifest, &dir.join("config.yaml")).unwrap();
         assert!(runtime.subscribes("text_committed"));
         assert!(!runtime.subscribes("input_changed"));
 
         let payload = serde_json::json!({ "text": "你好" });
         assert!(runtime.deliver_event("text_committed", &payload));
         // 记录验证：经 host.config 读回
-        let record: String = runtime
-            .call_fn("__last", ())
-            .unwrap_or_default();
+        let record: String = runtime.call_fn("__last", ()).unwrap_or_default();
         assert_eq!(record, "text_committed:你好");
 
         // 未订阅的事件：不调用
@@ -1022,8 +1168,7 @@ mod tests {
             "return { onPluginEvent = function() return true end }",
         )
         .unwrap();
-        let runtime =
-            PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let payload = serde_json::json!({ "text": "x" });
         assert!(!runtime.deliver_event("text_committed", &payload));
     }
@@ -1034,13 +1179,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path();
         std::fs::write(dir.join("main.lua"), "return { run = function() return host.http.request('GET', 'http://evil.example.com/') end }").unwrap();
-        let manifest = PluginManifest::parse("id: com.test\nentry: main.lua\nnetwork:\n  hosts:\n    - dav.example.com\n").unwrap();
+        let manifest = PluginManifest::parse(
+            "id: com.test\nentry: main.lua\nnetwork:\n  hosts:\n    - dav.example.com\n",
+        )
+        .unwrap();
         let runtime = PluginRuntime::load(dir, &manifest, &dir.join("config.yaml")).unwrap();
         let result: Option<mlua::Value> = runtime.call_fn("run", ());
         assert!(result.is_none() || matches!(result, Some(mlua::Value::Nil)));
     }
 
-    use super::*;
     use std::path::PathBuf;
 
     /// 用真实 kaomoji 插件包（Xime 仓库构建产物）做端到端验证。
@@ -1110,7 +1257,8 @@ return plugin
     #[test]
     fn load_and_call_kaomoji_contract() {
         let dir = extract_kaomoji("main");
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
 
         let categories = runtime.get_categories();
         assert_eq!(categories, vec!["颜文字".to_string()]);
@@ -1148,7 +1296,8 @@ return plugin
     #[test]
     fn sandbox_strips_dangerous_libs() {
         let dir = extract_kaomoji("sandbox");
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
 
         let io_absent: bool = runtime
             .lua
@@ -1227,7 +1376,8 @@ return plugin
         )
         .unwrap();
 
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let lua = &runtime.lua;
 
         let doubled: i64 = lua
@@ -1278,7 +1428,8 @@ return plugin
     #[test]
     fn host_crypto_roundtrip() {
         let dir = extract_kaomoji("crypto");
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let lua = &runtime.lua;
 
         // sha256("abc") 已知摘要
@@ -1365,7 +1516,8 @@ return plugin
     #[test]
     fn clipboard_sync_contract_roundtrip() {
         let dir = extract_clipboard_sync_plugin("roundtrip");
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         let profile = serde_json::json!({
             "type": "text",
             "hash": "abc",
@@ -1385,10 +1537,87 @@ return plugin
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn extract_backup_plugin(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xime_plugin_backup_{}_{}",
+            std::process::id(),
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.backup\n\
+             name: Test Backup\n\
+             version: 1.0.0\n\
+             type: backup\n\
+             activation: single\n",
+        )
+        .unwrap();
+        // 用 host.config 充当远端存储，验证 pushBackup/pullBackup/listBackups 契约桥接
+        // （二进制备份包以 Lua string 往返）
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"
+local plugin = {}
+local store = {}
+function plugin.pushBackup(args)
+    local id = "remote/" .. args.name
+    store[id] = args.archive
+    return { ok = true, id = id }
+end
+function plugin.pullBackup(id)
+    return store[id]
+end
+function plugin.listBackups()
+    local items = {}
+    for id, data in pairs(store) do
+        items[#items + 1] = { id = id, name = id, createdAt = 0, size = #data }
+    end
+    return items
+end
+function plugin.deleteBackup(id)
+    store[id] = nil
+    return true
+end
+return plugin
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn backup_contract_binary_roundtrip() {
+        let dir = extract_backup_plugin("roundtrip");
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+
+        // 含 0 字节与多字节 UTF-8 的二进制备份包
+        let archive: Vec<u8> = vec![0, 1, 2, 0xFF, 0xE4, 0xBD, 0xA0, 0x00, 0x7F];
+        let result = runtime
+            .backup_push("Xime配置-test.zip", &archive)
+            .expect("pushBackup must return result table");
+        assert_eq!(result["ok"], serde_json::json!(true));
+        let id = result["id"].as_str().expect("id must be string");
+
+        let pulled = runtime.backup_pull(id).expect("pull must return bytes");
+        assert_eq!(pulled, archive);
+
+        let list = runtime.backup_list().expect("listBackups must return list");
+        assert_eq!(list.as_array().map(|a| a.len()), Some(1));
+        assert_eq!(list[0]["size"], serde_json::json!(archive.len()));
+
+        assert_eq!(runtime.backup_delete(id), Some(true));
+        assert!(runtime.backup_pull(id).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn clipboard_sync_contract_empty_pull_is_none() {
         let dir = extract_clipboard_sync_plugin("empty");
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         assert!(runtime.clipboard_pull().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1406,7 +1635,8 @@ return plugin
              return plugin\n",
         )
         .unwrap();
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         assert!(runtime.has_fn("testConnection"));
         assert_eq!(
             runtime.test_connection(),
@@ -1418,9 +1648,256 @@ return plugin
         // 宿主须先 has_fn 区分，避免把"未实现"误报为"连接成功"）
         let dir = extract_clipboard_sync_plugin("missing");
         std::fs::write(dir.join("main.lua"), "local plugin = {}\nreturn plugin\n").unwrap();
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
         assert!(!runtime.has_fn("testConnection"));
         assert!(runtime.test_connection().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- 远端（main）新增契约的测试：tool / candidate_transform / event / 熔断 ----
+
+    /// 构造 tool 插件测试目录。
+    fn extract_tool_plugin(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("xime_plugin_tool_{}_{}", std::process::id(), label));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.tool\n\
+             name: Test Tool\n\
+             version: 1.0.0\n\
+             type: tool\n\
+             activation: single\n\
+             capabilities:\n\
+               tool:\n\
+                 display: direct\n\
+               candidate_transform: true\n\
+               events:\n\
+                 - input_changed\n\
+                 - text_committed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"
+local last_input = nil
+local last_action = nil
+local last_item_id = nil
+local event_log = {}
+
+local plugin = {}
+
+function plugin.getPanelState(inputText)
+    last_input = inputText
+    return {
+        type = "panel",
+        title = "Test Tool",
+        items = {
+            { id = "item1", text = "Item 1" },
+            { id = "item2", text = "Item 2" },
+        }
+    }
+end
+
+function plugin.onPanelInput(inputText)
+    last_input = inputText
+end
+
+function plugin.onPanelAction(action)
+    last_action = action
+end
+
+function plugin.onPanelItemClick(itemId)
+    last_item_id = itemId
+end
+
+function plugin.transformCandidates(candidates)
+    local result = {}
+    for _, c in ipairs(candidates) do
+        table.insert(result, {
+            id = c.id,
+            text = string.upper(c.text),
+            insertText = c.insertText,
+            imageUrl = c.imageUrl,
+        })
+    end
+    return result
+end
+
+function plugin.onPluginEvent(eventType, data)
+    table.insert(event_log, { type = eventType, data = data })
+end
+
+function plugin.getEventLog()
+    return event_log
+end
+
+function plugin.getLastInput()
+    return last_input
+end
+
+function plugin.getLastAction()
+    return last_action
+end
+
+function plugin.getLastItemId()
+    return last_item_id
+end
+
+-- Store in global for test access
+_plugin_test = plugin
+
+return plugin
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn tool_plugin_panel_state() {
+        let dir = extract_tool_plugin("panel");
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+
+        let state = runtime.get_panel_state("hello").expect("panel state");
+        assert_eq!(state["type"], "panel");
+        assert_eq!(state["title"], "Test Tool");
+        assert!(state["items"].is_array());
+
+        // Verify the input was passed correctly by calling the function directly
+        let last_input: String = runtime
+            .lua
+            .load("return _plugin_test.getLastInput()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_input, "hello");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tool_plugin_panel_actions() {
+        let dir = extract_tool_plugin("actions");
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+
+        runtime.on_panel_input("test input");
+        let last_input: String = runtime
+            .lua
+            .load("return _plugin_test.getLastInput()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_input, "test input");
+
+        runtime.on_panel_action("open_settings");
+        let last_action: String = runtime
+            .lua
+            .load("return _plugin_test.getLastAction()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_action, "open_settings");
+
+        runtime.on_panel_item_click("item1");
+        let last_item_id: String = runtime
+            .lua
+            .load("return _plugin_test.getLastItemId()")
+            .eval()
+            .unwrap();
+        assert_eq!(last_item_id, "item1");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn candidate_transform_contract() {
+        let dir = extract_tool_plugin("transform");
+        let runtime =
+            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+
+        let input = vec![
+            CandidateTransformItem {
+                id: Some("1".to_string()),
+                text: "hello".to_string(),
+                insert_text: None,
+                image_url: None,
+            },
+            CandidateTransformItem {
+                id: Some("2".to_string()),
+                text: "world".to_string(),
+                insert_text: Some("World".to_string()),
+                image_url: None,
+            },
+        ];
+
+        let output = runtime.transform_candidates(&input);
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0].text, "HELLO");
+        assert_eq!(output[1].text, "WORLD");
+        assert_eq!(output[1].insert_text, Some("World".to_string()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn event_system_contract() {
+        let dir = extract_tool_plugin("events");
+        // deliver_event 按 manifest capabilities.events 门禁，需声明订阅
+        let manifest = PluginManifest::parse(
+            "id: com.test.events\nentry: main.lua\n\
+             capabilities:\n  events:\n    - input_changed\n    - text_committed\n",
+        )
+        .unwrap();
+        let runtime = PluginRuntime::load(&dir, &manifest, &dir.join("config.yaml")).unwrap();
+
+        let event_data = serde_json::json!({
+            "text": "hello",
+            "timestamp": 1234567890
+        });
+
+        // tool 插件实现了 onPluginEvent（不返回 true，投递结果为 false 但已执行）
+        runtime.deliver_event("input_changed", &event_data);
+        runtime.deliver_event("text_committed", &serde_json::json!({"text": "done"}));
+        // 未订阅的事件不投递（onPluginEvent 不被调用）
+        assert!(!runtime.deliver_event("unknown_event", &serde_json::json!({})));
+
+        let event_log: Vec<Table> = runtime
+            .lua
+            .load("return _plugin_test.getEventLog()")
+            .eval()
+            .unwrap();
+
+        assert_eq!(event_log.len(), 2);
+        let first_event_type: String = event_log[0].get("type").unwrap();
+        assert_eq!(first_event_type, "input_changed");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn circuit_breaker_works() {
+        let mut breaker = CandidateTransformCircuitBreaker::new(3);
+        assert!(!breaker.is_tripped());
+
+        breaker.record_failure();
+        assert!(!breaker.is_tripped());
+        breaker.record_failure();
+        assert!(!breaker.is_tripped());
+        breaker.record_failure();
+        assert!(breaker.is_tripped());
+
+        // Reset
+        breaker.reset();
+        assert!(!breaker.is_tripped());
+
+        // Success resets failures
+        breaker.record_failure();
+        breaker.record_failure();
+        breaker.record_success();
+        assert_eq!(breaker.failures, 0);
+
+        std::fs::remove_dir_all(std::env::temp_dir().join("xime_plugin_tool_events")).ok();
     }
 }

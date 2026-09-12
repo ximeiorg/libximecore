@@ -61,31 +61,57 @@ style:
   candidate_count: 5
   horizontal: true
   corner_radius: 8.0
-  color_scheme: lavender_purple
+  color_scheme:
+    light: lavender_purple
+    dark: slate_gray
+  dark_mode: 2
 
 color_schemes:
   lavender_purple:
     name: "薰衣草紫"
     primary_color: 0x8F73E2
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x1E1838
+  
   ocean_blue:
     name: "海洋蔚蓝"
     primary_color: 0x1A73E8
-  forest_green:
-    name: "森林翠绿"
-    primary_color: 0x2E7D32
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x0D1B33
+  
   sunset_orange:
-    name: "落日橙黄"
+    name: "落日橙光"
     primary_color: 0xE65100
-  coral_red:
-    name: "珊瑚红"
-    primary_color: 0xC62828
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x1A0D00
+  
   slate_gray:
-    name: "石板灰"
+    name: "沉稳石墨"
     primary_color: 0x424242
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x1A1A1A
+  
   rose_pink:
-    name: "玫瑰粉"
+    name: "浪漫玫瑰"
     primary_color: 0xAD1457
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x2D1020
+  
   teal_cyan:
-    name: "青蓝"
+    name: "青碧如水"
     primary_color: 0x00796B
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x002622
 

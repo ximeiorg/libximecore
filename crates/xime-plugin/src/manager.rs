@@ -164,6 +164,48 @@ impl PluginManager {
         Ok(record)
     }
 
+    /// 从已解压的插件目录安装（用于随宿主分发的内置插件，等价 install_from_zip）。
+    pub fn install_from_dir(
+        &self,
+        source: &Path,
+        force: bool,
+    ) -> Result<PluginRecord, ManagerError> {
+        let manifest = PluginManifest::from_dir(source)?;
+        let id = manifest.id.clone();
+
+        if !source.join(&manifest.entry).exists() {
+            return Err(ManagerError::MissingEntry(manifest.entry.clone()));
+        }
+        let existing = self.get(&id);
+        if existing.is_some() && !force {
+            return Err(ManagerError::AlreadyInstalled(id));
+        }
+
+        let target = self.plugin_dir(&id);
+        if target.exists() {
+            std::fs::remove_dir_all(&target)?;
+        }
+        std::fs::create_dir_all(&target)?;
+        copy_dir_recursive(source, &target)?;
+
+        let record = PluginRecord {
+            id: id.clone(),
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            plugin_type: manifest.plugin_type.clone(),
+            enabled: existing.map(|p| p.enabled).unwrap_or(true),
+            installed_at: now_string(),
+            state: PluginRecordState::Ready,
+        };
+
+        let mut registry = self.read_registry();
+        registry.retain(|p| p.id != id);
+        registry.push(record.clone());
+        self.write_registry(&registry)?;
+
+        Ok(record)
+    }
+
     /// 卸载插件（删除目录与配置，更新 registry）。
     pub fn uninstall(&self, id: &str) -> Result<(), ManagerError> {
         let dir = self.plugin_dir(id);
@@ -229,6 +271,20 @@ fn now_string() -> String {
         (days % 365) / 28 + 1,
         days % 28 + 1
     )
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&dest)?;
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 fn read_zip_entry<R: Read + std::io::Seek>(

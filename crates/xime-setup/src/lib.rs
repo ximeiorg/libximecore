@@ -1,8 +1,10 @@
 pub mod app;
+pub mod backup;
 pub mod components;
 pub mod pages;
 pub mod state;
 pub mod theme;
+pub mod webdav;
 
 pub use app::{run, SettingsApp};
 pub use state::SettingsState;

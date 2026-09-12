@@ -176,14 +176,49 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::CornerRadiusChanged(v) => {
             state.settings.appearance.corner_radius = v;
         }
-        Message::SaveAppearance => match state.settings.save_appearance() {
-            Ok(_) => {
-                state
-                    .settings
-                    .show_message("外观设置已保存并重载".to_string());
-            }
+        Message::ColorSchemeLightChanged(scheme) => {
+            use xime_config::ColorSchemeConfig;
+            state.settings.appearance.color_scheme = match &state.settings.appearance.color_scheme {
+                ColorSchemeConfig::Simple(_) => ColorSchemeConfig::Named {
+                    light: scheme,
+                    dark: "slate_gray".to_string(),
+                },
+                ColorSchemeConfig::Named { dark, .. } => ColorSchemeConfig::Named {
+                    light: scheme,
+                    dark: dark.clone(),
+                },
+            };
+        }
+        Message::ColorSchemeDarkChanged(scheme) => {
+            use xime_config::ColorSchemeConfig;
+            state.settings.appearance.color_scheme = match &state.settings.appearance.color_scheme {
+                ColorSchemeConfig::Simple(_) => ColorSchemeConfig::Named {
+                    light: "lavender_purple".to_string(),
+                    dark: scheme,
+                },
+                ColorSchemeConfig::Named { light, .. } => ColorSchemeConfig::Named {
+                    light: light.clone(),
+                    dark: scheme,
+                },
+            };
+        }
+        Message::DarkModeChanged(mode) => {
+            state.settings.appearance.dark_mode = xime_config::DarkMode::Simple(mode);
+        }
+        Message::SaveAppearance => match state.settings.save_color_scheme() {
+            Ok(()) => match state.settings.save_appearance() {
+                Ok(_) => {
+                    state.colors = state.settings.colors();
+                    state
+                        .settings
+                        .show_message("外观设置已保存并重载".to_string());
+                }
+                Err(e) => {
+                    state.settings.show_message(format!("保存失败: {}", e));
+                }
+            },
             Err(e) => {
-                state.settings.show_message(format!("保存失败: {}", e));
+                state.settings.show_message(format!("保存配色失败: {}", e));
             }
         },
         #[cfg(feature = "smart-suggestion-page")]
@@ -228,6 +263,46 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             let dir = std::path::PathBuf::from(&state.settings.clipboard.data_dir);
             std::fs::create_dir_all(&dir).ok();
             open_directory(&dir);
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupUrlChanged(v) => {
+            state.settings.backup.url = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupUsernameChanged(v) => {
+            state.settings.backup.username = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupPasswordChanged(v) => {
+            state.settings.backup.password = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupDirChanged(v) => {
+            state.settings.backup.remote_dir = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupModeChanged(v) => {
+            state.settings.backup.mode = v;
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupTest => {
+            state.settings.backup.start_test();
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupNow => {
+            state.settings.backup.start_backup();
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupList => {
+            state.settings.backup.start_list();
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupRestore(path) => {
+            state.settings.backup.start_restore(path);
+        }
+        #[cfg(feature = "backup-page")]
+        Message::BackupDelete(path) => {
+            state.settings.backup.start_delete(path);
         }
         #[cfg(feature = "pair-page")]
         Message::StartPairing => {

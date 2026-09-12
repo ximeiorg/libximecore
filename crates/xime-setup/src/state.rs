@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Mutex, OnceLock};
 use xime_config::{
-    deploy_all, get_data_dirs, SchemaConfig, SchemaConfigManager, SchemaInfo, SchemaManager,
-    XimeConfig,
+    deploy_all, get_data_dirs, ColorSchemeConfig, DarkMode, SchemaConfig, SchemaConfigManager,
+    SchemaInfo, SchemaManager, XimeConfig,
 };
 
 static MARKET_TASK_RESULT: OnceLock<Mutex<Option<MarketTaskResult>>> = OnceLock::new();
@@ -202,6 +202,12 @@ pub enum Message {
     CandidateCountChanged(i32),
     /// 外观：圆角大小变更。
     CornerRadiusChanged(f64),
+    /// 外观：浅色模式配色方案变更。
+    ColorSchemeLightChanged(String),
+    /// 外观：深色模式配色方案变更。
+    ColorSchemeDarkChanged(String),
+    /// 外观：深色模式变更（0=浅色, 1=深色, 2=跟随系统）。
+    DarkModeChanged(u8),
     /// 外观：保存。
     SaveAppearance,
     #[cfg(feature = "smart-suggestion-page")]
@@ -222,6 +228,32 @@ pub enum Message {
     ServerPasswordChanged(String),
     #[cfg(feature = "clipboard-page")]
     OpenSyncDataDir,
+    #[cfg(feature = "backup-page")]
+    BackupUrlChanged(String),
+    #[cfg(feature = "backup-page")]
+    BackupUsernameChanged(String),
+    #[cfg(feature = "backup-page")]
+    BackupPasswordChanged(String),
+    #[cfg(feature = "backup-page")]
+    BackupDirChanged(String),
+    /// 云备份：切换备份模式（0=仅配置, 1=全量）。
+    #[cfg(feature = "backup-page")]
+    BackupModeChanged(u8),
+    /// 云备份：测试 WebDAV 连接。
+    #[cfg(feature = "backup-page")]
+    BackupTest,
+    /// 云备份：立即备份。
+    #[cfg(feature = "backup-page")]
+    BackupNow,
+    /// 云备份：查看远端备份列表。
+    #[cfg(feature = "backup-page")]
+    BackupList,
+    /// 云备份：恢复指定备份（远端路径）。
+    #[cfg(feature = "backup-page")]
+    BackupRestore(String),
+    /// 云备份：删除指定备份（远端路径）。
+    #[cfg(feature = "backup-page")]
+    BackupDelete(String),
     #[cfg(feature = "pair-page")]
     StartPairing,
     /// 订阅轮询：后台任务结果。
@@ -245,6 +277,8 @@ pub struct SettingsState {
     pub pair: PairState,
     #[cfg(feature = "clipboard-page")]
     pub clipboard: ClipboardState,
+    #[cfg(feature = "backup-page")]
+    pub backup: BackupState,
     #[cfg(target_os = "linux")]
     pub sync: SyncState,
 }
@@ -273,6 +307,8 @@ impl SettingsState {
             pair: PairState::default(),
             #[cfg(feature = "clipboard-page")]
             clipboard: ClipboardState::default(),
+            #[cfg(feature = "backup-page")]
+            backup: BackupState::default(),
             #[cfg(target_os = "linux")]
             sync: SyncState::default(),
         };
@@ -292,10 +328,15 @@ impl SettingsState {
     }
 
     fn get_primary_color(&self) -> u32 {
+        let is_dark = self
+            .appearance
+            .dark_mode
+            .is_dark(self.system_theme.is_dark());
+        let scheme_name = self.appearance.color_scheme.scheme_name(is_dark);
         self.appearance
             .available_color_schemes
             .iter()
-            .find(|(id, _, _)| id == &self.appearance.color_scheme)
+            .find(|(id, _, _)| *id == scheme_name)
             .map(|(_, _, color)| *color)
             .unwrap_or(0x8F73E2)
     }
@@ -332,6 +373,7 @@ impl SettingsState {
         }
         let config = XimeConfig::load();
         self.appearance.color_scheme = config.style.color_scheme.clone();
+        self.appearance.dark_mode = config.style.dark_mode;
         self.appearance.available_color_schemes = config
             .color_schemes
             .iter()
@@ -346,6 +388,7 @@ impl SettingsState {
     pub fn save_color_scheme(&self) -> Result<(), String> {
         let mut config = XimeConfig::load();
         config.style.color_scheme = self.appearance.color_scheme.clone();
+        config.style.dark_mode = self.appearance.dark_mode;
         config.save()?;
         notify_daemon_reload_style();
         Ok(())
@@ -688,6 +731,8 @@ impl SettingsState {
         self.expire_install_messages();
         #[cfg(feature = "clipboard-page")]
         self.clipboard.poll();
+        #[cfg(feature = "backup-page")]
+        self.backup.poll();
     }
 
     /// 扩展商店安装/卸载消息 4 秒后自动消失。
@@ -1266,13 +1311,25 @@ impl ClipboardState {
         }
         self.write_config()?;
         let bin = std::env::var("XIME_SYNC_SERVER_BIN").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let candidate = std::path::PathBuf::from(&home).join(".local/bin/xime-sync-server");
-            if candidate.exists() {
-                candidate.to_string_lossy().into_owned()
-            } else {
-                "xime-sync-server".to_string()
+            // 优先级：环境变量 > 设置程序同级目录（打包进 bundle）> ~/.local/bin > PATH
+            let mut sibling = None;
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    let candidate = dir.join("xime-sync-server");
+                    if candidate.exists() {
+                        sibling = Some(candidate.to_string_lossy().into_owned());
+                    }
+                }
             }
+            sibling.unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let candidate = std::path::PathBuf::from(&home).join(".local/bin/xime-sync-server");
+                if candidate.exists() {
+                    candidate.to_string_lossy().into_owned()
+                } else {
+                    "xime-sync-server".to_string()
+                }
+            })
         });
         let child = std::process::Command::new(&bin)
             .arg("--config")
@@ -1311,7 +1368,7 @@ impl ClipboardState {
     }
 }
 
-#[cfg(feature = "clipboard-page")]
+#[cfg(any(feature = "clipboard-page", feature = "backup-page"))]
 fn config_base_dir() -> std::path::PathBuf {
     let (_, user_data_dir) = get_data_dirs();
     user_data_dir
@@ -1339,6 +1396,244 @@ fn random_password() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
+// ---- 云备份（backup-page） --------------------------------------------------
+
+/// 云备份页状态：WebDAV 连接配置 + 备份模式 + 后台操作进度。
+#[cfg(feature = "backup-page")]
+#[derive(Clone)]
+pub struct BackupState {
+    /// WebDAV 服务器地址（含路径前缀，如 https://dav.example.com/dav/xime）。
+    pub url: String,
+    pub username: String,
+    /// WebDAV 密码（写入本地配置文件，权限 0600）。
+    pub password: String,
+    /// 远端备份目录（相对 WebDAV 根路径）。
+    pub remote_dir: String,
+    /// 备份模式（0=仅配置, 1=全量）。
+    pub mode: u8,
+    /// 进行中的操作标识（test/backup/list/restore/delete），驱动按钮禁用与提示。
+    pub busy: Option<&'static str>,
+    /// 最近一次操作的状态消息。
+    pub message: Option<String>,
+    /// 远端备份列表（"查看远端备份"后填充）。
+    pub remote: Vec<crate::webdav::RemoteFile>,
+    /// 配置文件路径（backup.toml）。
+    config_path: std::path::PathBuf,
+}
+
+/// 云备份后台操作的完成结果（线程 → 轮询回 UI）。
+#[cfg(feature = "backup-page")]
+enum BackupOutcome {
+    Tested,
+    BackedUp(String),
+    Listed(Vec<crate::webdav::RemoteFile>),
+    Restored(usize),
+    Deleted,
+}
+
+#[cfg(feature = "backup-page")]
+static BACKUP_OUTCOME: std::sync::Mutex<Option<Result<BackupOutcome, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(feature = "backup-page")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct BackupConfigFile {
+    webdav: BackupWebDavSection,
+}
+
+#[cfg(feature = "backup-page")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct BackupWebDavSection {
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    remote_dir: Option<String>,
+}
+
+#[cfg(feature = "backup-page")]
+impl Default for BackupState {
+    fn default() -> Self {
+        let mut st = Self {
+            url: String::new(),
+            username: String::new(),
+            password: String::new(),
+            remote_dir: "xime-backup".to_string(),
+            mode: 0,
+            busy: None,
+            message: None,
+            remote: Vec::new(),
+            config_path: config_base_dir().join("backup.toml"),
+        };
+        st.read_config();
+        st
+    }
+}
+
+#[cfg(feature = "backup-page")]
+impl BackupState {
+    fn read_config(&mut self) {
+        let Ok(content) = std::fs::read_to_string(&self.config_path) else {
+            return;
+        };
+        let Ok(cfg) = toml::from_str::<BackupConfigFile>(&content) else {
+            return;
+        };
+        if let Some(v) = cfg.webdav.url {
+            self.url = v;
+        }
+        if let Some(v) = cfg.webdav.username {
+            self.username = v;
+        }
+        if let Some(v) = cfg.webdav.password {
+            self.password = v;
+        }
+        if let Some(v) = cfg.webdav.remote_dir {
+            self.remote_dir = v;
+        }
+    }
+
+    /// 保存配置（0600，密码仅本地可读）。
+    fn write_config(&self) -> Result<(), String> {
+        let cfg = BackupConfigFile {
+            webdav: BackupWebDavSection {
+                url: Some(self.url.clone()),
+                username: Some(self.username.clone()),
+                password: Some(self.password.clone()),
+                remote_dir: Some(self.remote_dir.clone()),
+            },
+        };
+        let content = toml::to_string(&cfg).map_err(|e| e.to_string())?;
+        let parent = self.config_path.parent().ok_or("配置目录无效")?;
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::write(&self.config_path, content).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(&self.config_path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    fn client(&self) -> Result<crate::webdav::WebDavClient, String> {
+        if self.url.trim().is_empty() {
+            return Err("请先填写 WebDAV 服务器地址".to_string());
+        }
+        Ok(crate::webdav::WebDavClient::new(
+            self.url.trim().to_string(),
+            (!self.username.is_empty()).then_some(self.username.clone()),
+            (!self.password.is_empty()).then_some(self.password.clone()),
+        ))
+    }
+
+    /// 通用后台任务启动：守卫 busy → 落盘配置 → 开线程执行 → 结果进轮询槽。
+    fn start_op(
+        &mut self,
+        tag: &'static str,
+        op: impl FnOnce(&BackupState) -> Result<BackupOutcome, String> + Send + 'static,
+    ) {
+        if self.busy.is_some() {
+            return;
+        }
+        if let Err(e) = self.write_config() {
+            self.message = Some(format!("保存配置失败: {e}"));
+            return;
+        }
+        self.busy = Some(tag);
+        self.message = None;
+        let snapshot = self.clone();
+        std::thread::spawn(move || {
+            let result = op(&snapshot);
+            *BACKUP_OUTCOME.lock().unwrap() = Some(result);
+        });
+    }
+
+    pub fn start_test(&mut self) {
+        self.start_op("test", |state| {
+            state.client()?.test()?;
+            Ok(BackupOutcome::Tested)
+        });
+    }
+
+    pub fn start_backup(&mut self) {
+        self.start_op("backup", |state| {
+            let mode = crate::backup::BackupMode::from_index(state.mode).ok_or("备份模式无效")?;
+            let (_, user_dir) = get_data_dirs();
+            let archive = crate::backup::pack_rime(&user_dir, mode)?;
+            let name = crate::backup::archive_name(
+                mode,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_secs(),
+            );
+            let key = format!("{}/{}", state.remote_dir.trim_matches('/'), name);
+            state.client()?.put(&key, &archive)?;
+            Ok(BackupOutcome::BackedUp(name))
+        });
+    }
+
+    pub fn start_list(&mut self) {
+        self.start_op("list", |state| {
+            let dir = state.remote_dir.trim_matches('/').to_string();
+            Ok(BackupOutcome::Listed(state.client()?.list(&dir)?))
+        });
+    }
+
+    pub fn start_restore(&mut self, path: String) {
+        self.start_op("restore", move |state| {
+            let data = state
+                .client()?
+                .get(&path)?
+                .ok_or_else(|| "远端备份不存在".to_string())?;
+            let (_, user_dir) = get_data_dirs();
+            let n = crate::backup::unpack_rime(&data, &user_dir)?;
+            Ok(BackupOutcome::Restored(n))
+        });
+    }
+
+    pub fn start_delete(&mut self, path: String) {
+        self.start_op("delete", move |state| {
+            state.client()?.delete(&path)?;
+            Ok(BackupOutcome::Deleted)
+        });
+    }
+
+    /// 轮询后台结果（由 poll_background 调用）。
+    pub fn poll(&mut self) {
+        let outcome = BACKUP_OUTCOME.lock().unwrap().take();
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.busy = None;
+        match outcome {
+            Ok(BackupOutcome::Tested) => {
+                self.message = Some("连接成功".to_string());
+            }
+            Ok(BackupOutcome::BackedUp(name)) => {
+                self.message = Some(format!("备份完成：{name}"));
+            }
+            Ok(BackupOutcome::Listed(files)) => {
+                self.message = Some(format!("共 {} 个远端备份", files.len()));
+                self.remote = files;
+            }
+            Ok(BackupOutcome::Restored(n)) => {
+                self.message = Some(format!("恢复完成（{n} 个文件），重启输入法后生效"));
+            }
+            Ok(BackupOutcome::Deleted) => {
+                self.message = Some("已删除".to_string());
+                // 删除后自动刷新列表。
+                self.start_list();
+            }
+            Err(e) => {
+                self.message = Some(e);
+            }
+        }
+    }
+}
+
+// ---- 云备份（backup-page）结束 ----------------------------------------------
+
 #[cfg(target_os = "linux")]
 #[derive(Clone, Default)]
 pub struct SyncState {
@@ -1359,14 +1654,29 @@ pub enum SyncStatus {
     Error,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AppearanceState {
     pub font_size: f64,
     pub candidate_count: i32,
     pub corner_radius: f64,
-    pub color_scheme: String,
+    pub color_scheme: ColorSchemeConfig,
+    pub dark_mode: DarkMode,
     pub available_color_schemes: Vec<(String, String, u32)>,
     pub color_schemes_loaded: bool,
+}
+
+impl Default for AppearanceState {
+    fn default() -> Self {
+        Self {
+            font_size: 14.0,
+            candidate_count: 5,
+            corner_radius: 8.0,
+            color_scheme: ColorSchemeConfig::default(),
+            dark_mode: DarkMode::default(),
+            available_color_schemes: Vec::new(),
+            color_schemes_loaded: false,
+        }
+    }
 }
 
 #[derive(Clone, Default)]

@@ -221,10 +221,22 @@ mod tests {
 
     #[test]
     fn test_schema_list_uses_rime_wubi_not_system() {
-        // 注入双目录（shared=只读 rime-wubi，user=用户目录），验证 get_schema_list 从 shared 列出方案
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        let shared = std::path::PathBuf::from(&home).join(".local/share/xime/rime-data");
-        let user = std::path::PathBuf::from(&home).join(".config/xime/rime");
+        // 注入双目录（shared=带 fixture 方案的临时目录，user=空临时目录），
+        // 验证：1) set_rime_paths/get_data_dirs roundtrip；2) get_schema_list 从注入目录枚举；
+        // 3) 未写入的方案（如系统内置 stroke）不出现。fixture 保证测试不依赖机器状态。
+        let base =
+            std::env::temp_dir().join(format!("xime_config_schema_test_{}", std::process::id()));
+        let shared = base.join("rime-data");
+        let user = base.join("rime-user");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(
+            shared.join("wubi86_pinyin.schema.yaml"),
+            "schema:\n  schema_id: wubi86_pinyin\n  name: 五笔拼音\n  version: \"0.1\"\n",
+        )
+        .unwrap();
+
         let _ = crate::set_rime_paths(crate::RimePaths {
             shared_data_dir: shared.clone(),
             user_data_dir: user.clone(),
@@ -236,23 +248,21 @@ mod tests {
 
         let manager = SchemaManager::new().unwrap();
         let schemas = manager.get_schema_list();
-        println!(
-            "schema list: {:?}",
-            schemas.iter().map(|s| &s.schema_id).collect::<Vec<_>>()
-        );
-        // rime-wubi 方案应存在
         let ids: Vec<_> = schemas.iter().map(|s| s.schema_id.as_str()).collect();
+        // fixture 方案应存在
         assert!(
             ids.contains(&"wubi86_pinyin"),
             "wubi86_pinyin should be in list: {:?}",
             ids
         );
-        // 系统内置方案不应出现
+        // 未写入的方案不应出现
         assert!(
             !ids.contains(&"stroke"),
             "system schema stroke must not appear: {:?}",
             ids
         );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

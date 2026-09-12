@@ -240,6 +240,7 @@ mod tests {
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >;
 
+    #[allow(clippy::result_large_err)] // tungstenite::Error 体积大，重连为低频路径
     async fn connect(
         url: &str,
         auth: &str,

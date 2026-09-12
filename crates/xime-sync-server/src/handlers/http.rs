@@ -10,6 +10,7 @@ use crate::auth::check_basic_auth;
 use crate::state::SharedState;
 
 /// 认证中间件式检查：失败返回 401 响应。
+#[allow(clippy::result_large_err)] // Response 体积大但此处为低频路径
 pub async fn require_auth(headers: &HeaderMap, state: &SharedState) -> Result<(), Response> {
     if check_basic_auth(headers, &state.auth) {
         Ok(())
