@@ -6,9 +6,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
-use crate::host_api::HostApis;
-use crate::manifest::PluginManifest;
-
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -109,55 +106,6 @@ pub struct EmojiLayout {
     pub item_height: Option<i64>,
 }
 
-/// 插件网络访问策略（fail-closed：无声明 = 禁止联网）。
-///
-/// 对齐 Android 版三重门的宿主侧语义：
-/// - `allowCustomHosts: true` → 用户已显式授权任意域名（AllowAll）；
-/// - `hosts` 非空且未授权自定义 → 仅白名单域名；
-/// - 两者皆无 → 禁止所有请求。
-#[derive(Debug, Clone, PartialEq)]
-pub enum NetworkPolicy {
-    /// 仅允许白名单域名（不含 scheme，忽略大小写）。
-    Restrict(Vec<String>),
-    /// manifest 显式声明 allowCustomHosts: true。
-    AllowAll,
-}
-
-impl NetworkPolicy {
-    pub fn from_manifest(network: &crate::manifest::NetworkDecl) -> Self {
-        if network.allow_custom_hosts {
-            Self::AllowAll
-        } else if network.hosts.is_empty() {
-            // fail-closed：未声明任何网络能力 = 禁止
-            Self::Restrict(Vec::new())
-        } else {
-            Self::Restrict(network.hosts.iter().map(|h| normalize_host(h)).collect())
-        }
-    }
-
-    /// 请求 URL 的 host 是否允许访问。
-    pub fn allows(&self, host: Option<&str>) -> bool {
-        let Some(host) = host else {
-            return false;
-        };
-        match self {
-            Self::AllowAll => true,
-            Self::Restrict(list) => list.iter().any(|h| h == &normalize_host(host)),
-        }
-    }
-}
-
-/// 归一化域名：去 scheme、去路径、去端口后缀、小写。
-fn normalize_host(raw: &str) -> String {
-    let h = raw.trim();
-    let h = h.rsplit("://").next().unwrap_or(h);
-    let h = h.split('/').next().unwrap_or(h);
-    let h = h.split(':').next().unwrap_or(h);
-    h.to_ascii_lowercase()
-}
-
-use crate::capabilities::PluginCapabilities;
-
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn uuid_string() -> String {
@@ -181,42 +129,15 @@ pub struct PluginRuntime {
     lua: Lua,
     plugin: Table,
     plugin_id: String,
-    /// manifest capabilities 的强类型快照（host API 注入 / 事件订阅门禁）。
-    caps: PluginCapabilities,
 }
 
 impl PluginRuntime {
     /// 加载入口脚本并取得导出表。
     ///
     /// - `plugin_dir`: 已解压的插件目录
-    /// - `manifest`: 已解析的 manifest（entry / 网络声明等）
+    /// - `entry`: manifest 的 entry 字段（相对 plugin_dir）
     /// - `config_file`: host.config 的持久化文件路径
-    pub fn load(
-        plugin_dir: &Path,
-        manifest: &PluginManifest,
-        config_file: &Path,
-    ) -> RuntimeResult<Self> {
-        Self::load_with_apis(
-            plugin_dir,
-            manifest,
-            config_file,
-            NetworkPolicy::from_manifest(&manifest.network),
-            HostApis::default(),
-        )
-    }
-
-    /// 以显式网络策略与宿主 API 加载。
-    ///
-    /// host API 按 manifest capabilities 门禁注入：未声明能力或宿主未提供
-    /// 实现时，对应 `host.*` 表不注入（Lua 侧不可见）。
-    pub fn load_with_apis(
-        plugin_dir: &Path,
-        manifest: &PluginManifest,
-        config_file: &Path,
-        net: NetworkPolicy,
-        apis: HostApis,
-    ) -> RuntimeResult<Self> {
-        let entry = &manifest.entry;
+    pub fn load(plugin_dir: &Path, entry: &str, config_file: &Path) -> RuntimeResult<Self> {
         let lua = Lua::new_with(
             StdLib::COROUTINE | StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH,
             LuaOptions::default(),
@@ -243,8 +164,7 @@ impl PluginRuntime {
 
         setup_require(&lua, &plugin_dir.join("libs"))?;
 
-        let caps = manifest.capabilities.clone();
-        let host = build_host_table(&lua, plugin_dir, config_file, net, &apis, &caps)?;
+        let host = build_host_table(&lua, plugin_dir, config_file)?;
         globals.set("host", host)?;
 
         let entry_path = plugin_dir.join(entry);
@@ -254,13 +174,10 @@ impl PluginRuntime {
         let chunk = lua.load(entry_path);
         let plugin = chunk.eval::<Table>()?;
 
-        let caps = manifest.capabilities.clone();
-
         Ok(Self {
             lua,
             plugin,
             plugin_id: plugin_id.clone(),
-            caps,
         })
     }
 
@@ -291,11 +208,6 @@ impl PluginRuntime {
                 None
             }
         }
-    }
-
-    /// 插件导出表是否实现了指定函数。
-    pub fn has_fn(&self, name: &str) -> bool {
-        matches!(self.plugin.get(name), Ok(Value::Function(_)))
     }
 
     // ---- emoji 契约 ----
@@ -356,39 +268,9 @@ impl PluginRuntime {
     }
 
     /// 测试连接；返回 `None` 表示成功，`Some(消息)` 表示失败原因。
-    /// 插件按契约返回 nil（成功）或错误消息字符串；未实现时亦返回 `None`
-    /// （宿主可用 [`PluginRuntime::has_fn`] 先行区分）。
     pub fn test_connection(&self) -> Option<String> {
-        // nil（成功）→ Option<String> 转换为 None，避免误走类型错误路径
-        self.call_fn::<Option<String>>("testConnection", ())
-            .and_then(|opt| opt)
+        self.call_fn::<String>("testConnection", ())
             .filter(|s| !s.is_empty())
-    }
-
-    // ---- 下行事件（capabilities.events 门禁，同 Android PluginEventDispatcher）----
-
-    /// 插件是否订阅了指定事件。
-    pub fn subscribes(&self, event_type: &str) -> bool {
-        self.caps.events.iter().any(|e| e == event_type)
-    }
-
-    /// 投递下行事件：同步调用插件的 `onPluginEvent(eventType, payload)`。
-    ///
-    /// 仅当插件在 manifest `capabilities.events` 中声明了该事件且实现了
-    /// `onPluginEvent` 时才调用；返回 true 表示插件已处理。
-    /// payload 为 JSON 对象（如 `{"text": "..."}`）。
-    pub fn deliver_event(&self, event_type: &str, payload: &serde_json::Value) -> bool {
-        if !self.subscribes(event_type) {
-            return false;
-        }
-        if !self.has_fn("onPluginEvent") {
-            return false;
-        }
-        let Ok(value) = self.lua.to_value(payload) else {
-            return false;
-        };
-        self.call_fn::<bool>("onPluginEvent", (event_type, value))
-            .unwrap_or(false)
     }
 
     // ---- backup 契约（同 Android LuaBackupPluginAdapter）----
@@ -499,6 +381,17 @@ impl PluginRuntime {
             None => candidates.to_vec(),
         }
     }
+
+    // ---- event 契约（事件分发）----
+
+    /// 向插件发送事件（异步，fire-and-forget）。
+    /// 事件类型需在 manifest.capabilities.events 中声明。
+    pub fn send_event(&self, event_type: &str, data: &serde_json::Value) {
+        let Ok(data_value) = self.lua.to_value(data) else {
+            return;
+        };
+        let _ = self.call_fn::<()>("onPluginEvent", (event_type, data_value));
+    }
 }
 
 /// 受限 require：只能加载 `libs/<name>.lua`，禁止路径穿越。
@@ -534,14 +427,7 @@ fn setup_require(lua: &Lua, libs_dir: &Path) -> mlua::Result<()> {
 }
 
 /// 构造注入的 host 白名单 API 表。
-fn build_host_table(
-    lua: &Lua,
-    plugin_dir: &Path,
-    config_file: &Path,
-    net: NetworkPolicy,
-    apis: &HostApis,
-    caps: &PluginCapabilities,
-) -> mlua::Result<Table> {
+fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::Result<Table> {
     let host = lua.create_table()?;
     host.set("sdkVersion", SDK_VERSION)?;
 
@@ -761,11 +647,42 @@ fn build_host_table(
     )?;
     host.set("crypto", crypto)?;
 
+    // ---- quickSend（只读 API，需 capabilities.quick_send_read = true）----
+    // 注：实际注入由宿主根据 capabilities 决定，这里提供占位
+    let quick_send = lua.create_table()?;
+    quick_send.set(
+        "send",
+        lua.create_function(|_, _text: String| -> LuaResult<bool> {
+            // 占位：宿主实际实现时替换
+            Ok(false)
+        })?,
+    )?;
+    host.set("quickSend", quick_send)?;
+
+    // ---- clipboard（只读 API，需 capabilities.clipboard_read = true）----
+    // 注：实际注入由宿主根据 capabilities 决定，这里提供占位
+    let clipboard = lua.create_table()?;
+    clipboard.set(
+        "getText",
+        lua.create_function(|_lua, ()| -> LuaResult<Value> {
+            // 占位：宿主实际实现时替换
+            Ok(Value::Nil)
+        })?,
+    )?;
+    clipboard.set(
+        "setText",
+        lua.create_function(|_, _text: String| -> LuaResult<()> {
+            // 占位：宿主实际实现时替换
+            Ok(())
+        })?,
+    )?;
+    host.set("clipboard", clipboard)?;
+
     // ---- http（同步白名单请求，20s 超时）----
     let http = lua.create_table()?;
     http.set(
         "request",
-        lua.create_function(move |lua, args: MultiValue| -> LuaResult<Value> {
+        lua.create_function(|lua, args: MultiValue| -> LuaResult<Value> {
             let arg_string = |i: usize| -> Option<String> {
                 args.get(i)
                     .filter(|v| !v.is_nil())
@@ -774,19 +691,6 @@ fn build_host_table(
 
             let method = arg_string(0).unwrap_or_else(|| "GET".to_string());
             let url = arg_string(1).unwrap_or_default();
-
-            // 网络白名单（fail-closed）：host 不在声明内直接拒绝
-            let uri_host = url
-                .parse::<ureq::http::Uri>()
-                .ok()
-                .and_then(|u| u.host().map(str::to_owned));
-            if !net.allows(uri_host.as_deref()) {
-                tracing::warn!(
-                    "[plugin http] 拒绝未授权请求: host={:?}（manifest network.hosts 未声明）",
-                    uri_host
-                );
-                return Ok(Value::Nil);
-            }
 
             let body: Vec<u8> = match args.get(3) {
                 Some(Value::String(s)) => s.as_bytes().to_vec(),
@@ -861,51 +765,6 @@ fn build_host_table(
     )?;
     http.set("lastError", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
     host.set("http", http)?;
-
-    // ---- clipboard（只读；capability: clipboard_read 且宿主提供实现）----
-    if caps.clipboard_read {
-        if let Some(api) = apis.clipboard.clone() {
-            let clipboard = lua.create_table()?;
-            clipboard.set(
-                "recent",
-                lua.create_function(move |lua, limit: usize| -> LuaResult<Value> {
-                    let entries = api.recent(limit);
-                    let out = lua.create_table()?;
-                    for (i, e) in entries.iter().enumerate() {
-                        let item = lua.create_table()?;
-                        item.set("text", e.text.clone())?;
-                        item.set("timestamp", e.timestamp)?;
-                        item.set("isPinned", e.is_pinned)?;
-                        out.set(i + 1, item)?;
-                    }
-                    Ok(Value::Table(out))
-                })?,
-            )?;
-            host.set("clipboard", clipboard)?;
-        }
-    }
-
-    // ---- quickSend（只读；capability: quick_send_read 且宿主提供实现）----
-    if caps.quick_send_read {
-        if let Some(api) = apis.quick_send.clone() {
-            let quick_send = lua.create_table()?;
-            quick_send.set(
-                "list",
-                lua.create_function(move |lua, ()| -> LuaResult<Value> {
-                    let items = api.list();
-                    let out = lua.create_table()?;
-                    for (i, e) in items.iter().enumerate() {
-                        let item = lua.create_table()?;
-                        item.set("text", e.text.clone())?;
-                        item.set("code", e.code.clone())?;
-                        out.set(i + 1, item)?;
-                    }
-                    Ok(Value::Table(out))
-                })?,
-            )?;
-            host.set("quickSend", quick_send)?;
-        }
-    }
 
     Ok(host)
 }
@@ -993,201 +852,6 @@ fn lua_err(e: RuntimeError) -> mlua::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{NetworkDecl, PluginManifest};
-
-    /// 测试用最小 manifest（无网络声明 → fail-closed 禁网）。
-    fn test_manifest() -> PluginManifest {
-        PluginManifest::parse("id: com.test\nentry: main.lua\n").unwrap()
-    }
-
-    #[test]
-    fn test_normalize_host() {
-        assert_eq!(
-            normalize_host("https://dav.example.com/path"),
-            "dav.example.com"
-        );
-        assert_eq!(normalize_host("HTTP://Example.COM:8080"), "example.com");
-        assert_eq!(normalize_host("example.com"), "example.com");
-        assert_eq!(normalize_host(" example.com "), "example.com");
-    }
-
-    #[test]
-    fn test_network_policy_allows() {
-        // 未声明 → fail-closed 全禁
-        let deny = NetworkPolicy::from_manifest(&NetworkDecl::default());
-        assert_eq!(deny, NetworkPolicy::Restrict(vec![]));
-        assert!(!deny.allows(Some("example.com")));
-        assert!(!deny.allows(None));
-
-        // 白名单：host 匹配（忽略大小写/端口/scheme）
-        let decl = NetworkDecl {
-            hosts: vec!["https://dav.example.com/".into()],
-            allow_custom_hosts: false,
-        };
-        let policy = NetworkPolicy::from_manifest(&decl);
-        assert!(policy.allows(Some("dav.example.com")));
-        assert!(policy.allows(Some("DAV.EXAMPLE.COM")));
-        assert!(!policy.allows(Some("evil.example.com")));
-
-        // allowCustomHosts → 全放行
-        let decl = NetworkDecl {
-            hosts: vec![],
-            allow_custom_hosts: true,
-        };
-        assert_eq!(NetworkPolicy::from_manifest(&decl), NetworkPolicy::AllowAll);
-    }
-
-    /// Lua 层：未声明网络的插件调用 host.http.request 应被拒绝（返回 nil，不发请求）。
-    #[test]
-    fn test_http_denied_without_declaration() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path();
-        std::fs::write(dir.join("main.lua"), "return { run = function() return host.http.request('GET', 'http://example.com/') end }").unwrap();
-        let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
-        let result: Option<mlua::Value> = runtime.call_fn("run", ());
-        assert!(
-            result.is_none() || matches!(result, Some(mlua::Value::Nil)),
-            "deny 应返回 nil"
-        );
-    }
-
-    /// Lua 层：声明 clipboard_read/quick_send_read 且宿主提供 API → 注入 host 表。
-    #[test]
-    fn test_host_apis_injected_with_capability() {
-        use crate::host_api::{
-            ClipboardEntryInfo, ClipboardReadApi, HostApis, QuickSendItemInfo, QuickSendReadApi,
-        };
-        use std::sync::Arc;
-
-        struct FakeClipboard;
-        impl ClipboardReadApi for FakeClipboard {
-            fn recent(&self, limit: usize) -> Vec<ClipboardEntryInfo> {
-                (0..limit)
-                    .map(|i| ClipboardEntryInfo {
-                        text: format!("t{i}"),
-                        timestamp: 100 + i as i64,
-                        is_pinned: false,
-                    })
-                    .collect()
-            }
-        }
-        struct FakeQuickSend;
-        impl QuickSendReadApi for FakeQuickSend {
-            fn list(&self) -> Vec<QuickSendItemInfo> {
-                vec![QuickSendItemInfo {
-                    text: "地址".into(),
-                    code: "dz".into(),
-                }]
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path();
-        std::fs::write(
-            dir.join("main.lua"),
-            "return { run = function()\n  local clip = host.clipboard and host.clipboard.recent(2) or nil\n  local qs = host.quickSend and host.quickSend.list() or nil\n  return clip, qs\nend }",
-        )
-        .unwrap();
-        let manifest = PluginManifest::parse(
-            "id: com.test\nentry: main.lua\ncapabilities:\n  clipboard_read: true\n  quick_send_read: true\n",
-        )
-        .unwrap();
-        let apis = HostApis {
-            clipboard: Some(Arc::new(FakeClipboard)),
-            quick_send: Some(Arc::new(FakeQuickSend)),
-        };
-        let runtime = PluginRuntime::load_with_apis(
-            dir,
-            &manifest,
-            &dir.join("config.yaml"),
-            NetworkPolicy::from_manifest(&manifest.network),
-            apis,
-        )
-        .unwrap();
-        let (clip, qs): (Option<Vec<mlua::Table>>, Option<Vec<mlua::Table>>) =
-            runtime.call_fn("run", ()).unwrap();
-        let clip = clip.unwrap();
-        assert_eq!(clip.len(), 2);
-        assert_eq!(clip[0].get::<String>("text").unwrap(), "t0");
-        let qs = qs.unwrap();
-        assert_eq!(qs.len(), 1);
-        assert_eq!(qs[0].get::<String>("code").unwrap(), "dz");
-    }
-
-    /// Lua 层：未声明能力 → host.clipboard / host.quickSend 不可见。
-    #[test]
-    fn test_host_apis_hidden_without_capability() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path();
-        std::fs::write(
-            dir.join("main.lua"),
-            "return { run = function() return host.clipboard == nil and host.quickSend == nil end }",
-        )
-        .unwrap();
-        let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
-        let hidden: bool = runtime.call_fn("run", ()).unwrap();
-        assert!(hidden);
-    }
-
-    /// 事件投递：订阅 + 实现 onPluginEvent 才会被调用。
-    #[test]
-    fn test_deliver_event_capability_gated() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path();
-        // onPluginEvent 把事件记进 host.config（返回 true 表示已处理）
-        std::fs::write(
-            dir.join("main.lua"),
-            "return { onPluginEvent = function(eventType, payload)\n  host.config.set('last', eventType .. ':' .. payload.text)\n  return true\nend, __last = function() return host.config.get('last') or '' end }",
-        )
-        .unwrap();
-        let manifest = PluginManifest::parse(
-            "id: com.test\nentry: main.lua\ncapabilities:\n  events:\n    - text_committed\n",
-        )
-        .unwrap();
-        let runtime = PluginRuntime::load(dir, &manifest, &dir.join("config.yaml")).unwrap();
-        assert!(runtime.subscribes("text_committed"));
-        assert!(!runtime.subscribes("input_changed"));
-
-        let payload = serde_json::json!({ "text": "你好" });
-        assert!(runtime.deliver_event("text_committed", &payload));
-        // 记录验证：经 host.config 读回
-        let record: String = runtime.call_fn("__last", ()).unwrap_or_default();
-        assert_eq!(record, "text_committed:你好");
-
-        // 未订阅的事件：不调用
-        assert!(!runtime.deliver_event("input_changed", &payload));
-    }
-
-    /// 未声明 events 能力 → deliver_event 恒 false。
-    #[test]
-    fn test_deliver_event_without_capability() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path();
-        std::fs::write(
-            dir.join("main.lua"),
-            "return { onPluginEvent = function() return true end }",
-        )
-        .unwrap();
-        let runtime = PluginRuntime::load(dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
-        let payload = serde_json::json!({ "text": "x" });
-        assert!(!runtime.deliver_event("text_committed", &payload));
-    }
-
-    /// Lua 层：白名单外的 host 同样被拒绝。
-    #[test]
-    fn test_http_denied_host_not_in_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path();
-        std::fs::write(dir.join("main.lua"), "return { run = function() return host.http.request('GET', 'http://evil.example.com/') end }").unwrap();
-        let manifest = PluginManifest::parse(
-            "id: com.test\nentry: main.lua\nnetwork:\n  hosts:\n    - dav.example.com\n",
-        )
-        .unwrap();
-        let runtime = PluginRuntime::load(dir, &manifest, &dir.join("config.yaml")).unwrap();
-        let result: Option<mlua::Value> = runtime.call_fn("run", ());
-        assert!(result.is_none() || matches!(result, Some(mlua::Value::Nil)));
-    }
-
     use std::path::PathBuf;
 
     /// 用真实 kaomoji 插件包（Xime 仓库构建产物）做端到端验证。
@@ -1257,8 +921,7 @@ return plugin
     #[test]
     fn load_and_call_kaomoji_contract() {
         let dir = extract_kaomoji("main");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         let categories = runtime.get_categories();
         assert_eq!(categories, vec!["颜文字".to_string()]);
@@ -1296,8 +959,7 @@ return plugin
     #[test]
     fn sandbox_strips_dangerous_libs() {
         let dir = extract_kaomoji("sandbox");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         let io_absent: bool = runtime
             .lua
@@ -1328,7 +990,7 @@ return plugin
     fn host_config_and_json_roundtrip() {
         let dir = extract_kaomoji("config");
         let config_file = dir.join("config.yaml");
-        let runtime = PluginRuntime::load(&dir, &test_manifest(), &config_file).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &config_file).unwrap();
         let lua = &runtime.lua;
 
         lua.load(
@@ -1376,8 +1038,7 @@ return plugin
         )
         .unwrap();
 
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
         let lua = &runtime.lua;
 
         let doubled: i64 = lua
@@ -1428,8 +1089,7 @@ return plugin
     #[test]
     fn host_crypto_roundtrip() {
         let dir = extract_kaomoji("crypto");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
         let lua = &runtime.lua;
 
         // sha256("abc") 已知摘要
@@ -1516,8 +1176,7 @@ return plugin
     #[test]
     fn clipboard_sync_contract_roundtrip() {
         let dir = extract_clipboard_sync_plugin("roundtrip");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
         let profile = serde_json::json!({
             "type": "text",
             "hash": "abc",
@@ -1590,8 +1249,7 @@ return plugin
     #[test]
     fn backup_contract_binary_roundtrip() {
         let dir = extract_backup_plugin("roundtrip");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         // 含 0 字节与多字节 UTF-8 的二进制备份包
         let archive: Vec<u8> = vec![0, 1, 2, 0xFF, 0xE4, 0xBD, 0xA0, 0x00, 0x7F];
@@ -1616,48 +1274,11 @@ return plugin
     #[test]
     fn clipboard_sync_contract_empty_pull_is_none() {
         let dir = extract_clipboard_sync_plugin("empty");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
         assert!(runtime.clipboard_pull().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn test_connection_distinguishes_nil_and_message_and_missing() {
-        // 返回错误消息字符串 → Some(消息)
-        let dir = extract_clipboard_sync_plugin("msg");
-        std::fs::write(
-            dir.join("main.lua"),
-            "local plugin = {}\n\
-             function plugin.testConnection()\n\
-             \x20 return '未配置服务器地址'\n\
-             end\n\
-             return plugin\n",
-        )
-        .unwrap();
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
-        assert!(runtime.has_fn("testConnection"));
-        assert_eq!(
-            runtime.test_connection(),
-            Some("未配置服务器地址".to_string())
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-
-        // 未实现 testConnection → has_fn false（test_connection 语义上也是 None 成功，
-        // 宿主须先 has_fn 区分，避免把"未实现"误报为"连接成功"）
-        let dir = extract_clipboard_sync_plugin("missing");
-        std::fs::write(dir.join("main.lua"), "local plugin = {}\nreturn plugin\n").unwrap();
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
-        assert!(!runtime.has_fn("testConnection"));
-        assert!(runtime.test_connection().is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    // ---- 远端（main）新增契约的测试：tool / candidate_transform / event / 熔断 ----
-
-    /// 构造 tool 插件测试目录。
     fn extract_tool_plugin(label: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("xime_plugin_tool_{}_{}", std::process::id(), label));
@@ -1759,8 +1380,7 @@ return plugin
     #[test]
     fn tool_plugin_panel_state() {
         let dir = extract_tool_plugin("panel");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         let state = runtime.get_panel_state("hello").expect("panel state");
         assert_eq!(state["type"], "panel");
@@ -1781,8 +1401,7 @@ return plugin
     #[test]
     fn tool_plugin_panel_actions() {
         let dir = extract_tool_plugin("actions");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         runtime.on_panel_input("test input");
         let last_input: String = runtime
@@ -1814,8 +1433,7 @@ return plugin
     #[test]
     fn candidate_transform_contract() {
         let dir = extract_tool_plugin("transform");
-        let runtime =
-            PluginRuntime::load(&dir, &test_manifest(), &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         let input = vec![
             CandidateTransformItem {
@@ -1844,24 +1462,15 @@ return plugin
     #[test]
     fn event_system_contract() {
         let dir = extract_tool_plugin("events");
-        // deliver_event 按 manifest capabilities.events 门禁，需声明订阅
-        let manifest = PluginManifest::parse(
-            "id: com.test.events\nentry: main.lua\n\
-             capabilities:\n  events:\n    - input_changed\n    - text_committed\n",
-        )
-        .unwrap();
-        let runtime = PluginRuntime::load(&dir, &manifest, &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
 
         let event_data = serde_json::json!({
             "text": "hello",
             "timestamp": 1234567890
         });
 
-        // tool 插件实现了 onPluginEvent（不返回 true，投递结果为 false 但已执行）
-        runtime.deliver_event("input_changed", &event_data);
-        runtime.deliver_event("text_committed", &serde_json::json!({"text": "done"}));
-        // 未订阅的事件不投递（onPluginEvent 不被调用）
-        assert!(!runtime.deliver_event("unknown_event", &serde_json::json!({})));
+        runtime.send_event("input_changed", &event_data);
+        runtime.send_event("text_committed", &serde_json::json!({"text": "done"}));
 
         let event_log: Vec<Table> = runtime
             .lua

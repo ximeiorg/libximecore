@@ -7,8 +7,7 @@
 //! 沙箱剥离 io/os/loadfile/dofile，插件只能访问注入的 `host` 白名单 API。
 
 pub mod capabilities;
-pub mod host_api;
-pub mod manifest;
+mod manifest;
 mod runtime;
 
 pub mod manager;
@@ -17,13 +16,10 @@ pub use capabilities::{
     ClipboardSyncCapabilities, EmojiCapabilities, PluginCapabilities, SpeechCapabilities,
     ToolCapabilities,
 };
-pub use host_api::{
-    ClipboardEntryInfo, ClipboardReadApi, HostApis, QuickSendItemInfo, QuickSendReadApi,
-};
 pub use manifest::{NetworkDecl, PluginManifest, PluginType, ToolbarButton};
 pub use runtime::{
     CandidateTransformCircuitBreaker, CandidateTransformItem, CandidateTransformOutcome, EmojiItem,
-    EmojiLayout, NetworkPolicy, PluginRuntime, RuntimeError, RuntimeResult,
+    EmojiLayout, PluginRuntime, RuntimeError, RuntimeResult,
 };
 
 pub use manager::{PluginManager, PluginRecord, PluginRecordState};

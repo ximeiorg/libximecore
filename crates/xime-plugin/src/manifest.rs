@@ -65,9 +65,6 @@ pub struct PluginManifest {
     /// 能力声明（结构化解析，宿主据此决定如何消费）。
     #[serde(default)]
     pub capabilities: PluginCapabilities,
-    /// 配置字段声明（宿主渲染表单，宽松解析）。
-    #[serde(rename = "configSchema", alias = "config_schema", default)]
-    pub config_schema: serde_yaml::Value,
     /// 网络访问声明。
     #[serde(default)]
     pub network: NetworkDecl,
@@ -164,10 +161,6 @@ capabilities:
     supportsSearch: true
     categories:
       - 颜文字
-configSchema:
-  - key: apikey
-    label: API Key
-    type: password
 network:
   hosts:
     - dashscope.aliyuncs.com
@@ -184,17 +177,6 @@ network:
         assert_eq!(m.network.hosts, vec!["dashscope.aliyuncs.com"]);
         let cap = &m.capabilities;
         assert!(cap.emoji.as_ref().unwrap().supports_search);
-        // configSchema 为 camelCase 键，必须解析进 config_schema（宽松 Value）
-        assert!(m.config_schema.is_sequence());
-    }
-
-    #[test]
-    fn parse_config_schema_snake_case_alias() {
-        let m = PluginManifest::parse(
-            "id: a\nversion: 1\ntype: clipboard_sync\nconfig_schema:\n  - key: k\n",
-        )
-        .unwrap();
-        assert!(m.config_schema.is_sequence());
     }
 
     #[test]
