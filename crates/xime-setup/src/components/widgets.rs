@@ -16,6 +16,15 @@ pub fn semibold() -> iced::font::Font {
     }
 }
 
+/// 中等字重：小字号正文在 1x 显示器上补偿缺失的笔画加粗（CoreText
+/// stem darkening），避免发虚。
+pub fn medium() -> iced::font::Font {
+    iced::font::Font {
+        weight: iced::font::Weight::Medium,
+        ..iced::font::Font::DEFAULT
+    }
+}
+
 // ---- container styles ----
 
 /// 卡片容器样式：圆角 + 边框 + 柔和底色。
@@ -226,10 +235,15 @@ pub fn button_primary<'a, Message: Clone>(
     on_press: Message,
 ) -> Button<'a, Message> {
     let colors = *colors;
-    button(text(label.into()).size(14).color(colors.on_primary))
-        .padding([8, 18])
-        .style(move |_theme, status| primary_button_style(&colors, status))
-        .on_press(on_press)
+    button(
+        text(label.into())
+            .size(14)
+            .font(medium())
+            .color(colors.on_primary),
+    )
+    .padding([8, 18])
+    .style(move |_theme, status| primary_button_style(&colors, status))
+    .on_press(on_press)
 }
 
 /// 次要按钮：透明底 + 边框。
@@ -239,10 +253,15 @@ pub fn button_secondary<'a, Message: Clone>(
     on_press: Message,
 ) -> Button<'a, Message> {
     let colors = *colors;
-    button(text(label.into()).size(14).color(colors.foreground))
-        .padding([7, 14])
-        .style(move |_theme, status| secondary_button_style(&colors, status))
-        .on_press(on_press)
+    button(
+        text(label.into())
+            .size(14)
+            .font(medium())
+            .color(colors.foreground),
+    )
+    .padding([7, 14])
+    .style(move |_theme, status| secondary_button_style(&colors, status))
+    .on_press(on_press)
 }
 
 /// 危险按钮：错误色填充（卸载等破坏性操作）。
@@ -252,10 +271,15 @@ pub fn button_danger<'a, Message: Clone>(
     on_press: Message,
 ) -> Button<'a, Message> {
     let colors = *colors;
-    button(text(label.into()).size(13).color(colors.on_error))
-        .padding([6, 14])
-        .style(move |_theme, status| danger_button_style(&colors, status))
-        .on_press(on_press)
+    button(
+        text(label.into())
+            .size(14)
+            .font(medium())
+            .color(colors.on_error),
+    )
+    .padding([6, 14])
+    .style(move |_theme, status| danger_button_style(&colors, status))
+    .on_press(on_press)
 }
 
 /// 纯文字按钮：主色文字 + 悬停浅底（用于「重试」等）。
@@ -265,26 +289,31 @@ pub fn text_button<'a, Message: Clone>(
     on_press: Message,
 ) -> Button<'a, Message> {
     let colors = *colors;
-    button(text(label.into()).size(14).color(colors.primary))
-        .padding([8, 16])
-        .style(move |_theme, status| {
-            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: if hovered {
-                    Some(Background::Color(colors.primary_dim))
-                } else {
-                    None
-                },
-                text_color: colors.primary,
-                border: Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: border::radius(RADIUS_MD),
-                },
-                ..button::Style::default()
-            }
-        })
-        .on_press(on_press)
+    button(
+        text(label.into())
+            .size(14)
+            .font(medium())
+            .color(colors.primary),
+    )
+    .padding([8, 16])
+    .style(move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: if hovered {
+                Some(Background::Color(colors.primary_dim))
+            } else {
+                None
+            },
+            text_color: colors.primary,
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: border::radius(RADIUS_MD),
+            },
+            ..button::Style::default()
+        }
+    })
+    .on_press(on_press)
 }
 
 // ---- labels / kbd ----
@@ -293,6 +322,7 @@ pub fn text_button<'a, Message: Clone>(
 pub fn label<'a, Message: 'a>(text_: &'a str, colors: &ThemeColors) -> Element<'a, Message> {
     text(text_.to_string())
         .size(14)
+        .font(medium())
         .color(colors.foreground)
         .into()
 }
@@ -302,7 +332,7 @@ pub fn kbd<'a, Message: 'a>(key: &'a str, colors: &ThemeColors) -> Element<'a, M
     let colors = *colors;
     container(
         text(key.to_string())
-            .size(12)
+            .size(13)
             .color(colors.foreground_muted),
     )
     .padding([3, 8])
@@ -320,7 +350,7 @@ pub fn kbd<'a, Message: 'a>(key: &'a str, colors: &ThemeColors) -> Element<'a, M
 
 /// 状态胶囊：圆角标签。
 pub fn badge<'a, Message: 'a>(label: &'a str, fg: Color, bg: Color) -> Element<'a, Message> {
-    container(text(label.to_string()).size(11).color(fg))
+    container(text(label.to_string()).size(12).color(fg))
         .padding([3, 10])
         .style(move |_| container::Style {
             background: Some(Background::Color(bg)),

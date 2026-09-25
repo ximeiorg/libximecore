@@ -17,7 +17,7 @@ pub mod smart_suggestion;
 #[cfg(target_os = "linux")]
 pub mod sync;
 
-use crate::components::widgets::{nav_button_style, scroll_style, semibold, sidebar_style};
+use crate::components::widgets::{medium, nav_button_style, scroll_style, semibold, sidebar_style};
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, row, scrollable, svg, text, Space};
@@ -98,9 +98,14 @@ pub fn sidebar(current: usize, colors: &ThemeColors) -> Element<'static, Message
     let mut flat = 0usize;
     for (title, items) in &groups {
         nav = nav.push(
-            container(text(*title).size(11).color(colors.foreground_faint))
-                .width(Length::Fill)
-                .padding([0, 10]),
+            container(
+                text(*title)
+                    .size(12)
+                    .font(semibold())
+                    .color(colors.foreground_faint),
+            )
+            .width(Length::Fill)
+            .padding([0, 10]),
         );
         nav = nav.push(Space::new().height(4));
         for (icon_path, name) in items {
@@ -140,7 +145,10 @@ fn brand(colors: &ThemeColors) -> Element<'static, Message> {
                 .size(15)
                 .font(semibold())
                 .color(colors.foreground),
-            text("输入法设置").size(11).color(colors.foreground_muted),
+            text("输入法设置")
+                .size(12)
+                .font(medium())
+                .color(colors.foreground_muted),
         ]
         .spacing(1),
     ]
@@ -168,7 +176,7 @@ fn nav_button(
     button(
         row![
             icon,
-            text(label).size(13).color(if active {
+            text(label).size(14).font(medium()).color(if active {
                 colors.primary
             } else {
                 colors.foreground_muted

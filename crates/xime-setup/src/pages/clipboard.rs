@@ -1,11 +1,12 @@
 #![cfg(feature = "clipboard-page")]
 use crate::components::settings::{settings_group, settings_item, settings_page};
+use crate::components::widgets::switch;
 use crate::components::widgets::{
     badge, button_primary, button_secondary, label, text_button, text_input_style,
 };
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
-use iced::widget::{row, text, text_input};
+use iced::widget::{container, pick_list, row, text, text_input};
 use iced::{Color, Element, Length};
 
 /// 剪贴板同步配置：本地同步服务器（xime-sync-server）启停 + 认证。
@@ -46,7 +47,104 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
         .style(move |_t, s| text_input_style(colors, s))
         .width(Length::FillPortion(2));
 
+    let sp = &settings.sync_plugin;
+    let mut sync_items: Vec<Element<'a, Message>> = Vec::new();
+
+    // 启用开关。
+    sync_items.push(settings_item(
+        "启用剪贴板同步",
+        Some("通过同步插件与远端设备双向同步（与 Android 插件通用）"),
+        colors,
+        switch(sp.enabled, colors, Message::SyncPluginEnabled),
+    ));
+
+    // 插件选择。
+    if sp.plugins.is_empty() {
+        sync_items.push(settings_item(
+            "同步插件",
+            Some("未安装 clipboard_sync 插件；请将插件目录放入 plugins/ 后重启设置程序"),
+            colors,
+            label("", colors),
+        ));
+    } else {
+        let names: Vec<&str> = sp.plugins.iter().map(|p| p.name.as_str()).collect();
+        let current = names.get(sp.plugin_index).copied().unwrap_or("");
+        sync_items.push(settings_item(
+            "同步插件",
+            None::<String>,
+            colors,
+            pick_list(names, Some(current), |chosen| {
+                Message::SyncPluginSelected(
+                    sp.plugins
+                        .iter()
+                        .position(|p| p.name == chosen)
+                        .unwrap_or(0),
+                )
+            })
+            .into(),
+        ));
+    }
+
+    if sp.busy == Some("schema") {
+        sync_items.push(settings_item(
+            "插件配置",
+            None::<String>,
+            colors,
+            container(
+                text("正在加载插件配置…")
+                    .size(13)
+                    .color(colors.foreground_muted),
+            )
+            .width(Length::Fill)
+            .into(),
+        ));
+    } else {
+        for (field, value) in &sp.fields {
+            if field.ftype == "button" {
+                sync_items.push(settings_item(
+                    field.label.clone(),
+                    field.help_text.clone(),
+                    colors,
+                    text_button(field.label.clone(), colors, Message::SyncPluginTest).into(),
+                ));
+                continue;
+            }
+            let key = field.key.clone();
+            let on_input = (!sp.busy.is_some()).then(|| {
+                let key = key.clone();
+                move |v: String| Message::SyncPluginFieldChanged(key.clone(), v)
+            });
+            let input = text_input(field.placeholder.as_deref().unwrap_or(""), value)
+                .on_input_maybe(on_input)
+                .secure(field.ftype == "secret")
+                .style(move |_t, s| text_input_style(colors, s))
+                .width(Length::FillPortion(2));
+            sync_items.push(settings_item(
+                field.label.clone(),
+                field.help_text.clone(),
+                colors,
+                input.into(),
+            ));
+        }
+    }
+    if let Some(msg) = &sp.message {
+        sync_items.push(settings_item(
+            "状态",
+            None::<String>,
+            colors,
+            text(msg).size(13).color(colors.foreground_muted).into(),
+        ));
+    }
+
+    let plugin_group = settings_group(
+        "剪贴板同步（插件）",
+        Some("启用后输入法在后台自动推送/拉取；协议由插件承载，多端使用同一插件即可互通"),
+        colors,
+        sync_items,
+    );
+
     let mut groups = vec![
+        plugin_group,
         settings_group(
             "同步服务器",
             Some("本机剪切板同步服务（xime-sync-server），供其他设备同步剪切板内容"),
@@ -70,7 +168,7 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                     Some("服务器存储目录（历史记录等）"),
                     colors,
                     row![
-                        text(&c.data_dir).size(13).color(colors.foreground_muted),
+                        text(&c.data_dir).size(14).color(colors.foreground_muted),
                         text_button("打开", colors, Message::OpenSyncDataDir),
                     ]
                     .spacing(8)

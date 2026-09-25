@@ -15,6 +15,7 @@ pub mod tls;
 use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
+use xime_sync_domain::storage::Storage;
 
 use config::Settings;
 
@@ -60,15 +61,9 @@ pub async fn run_managed(
     // 数据目录
     std::fs::create_dir_all(&settings.server().data_dir)?;
 
-    let storage = xime_sync_store::build_storage(
-        xime_sync_store::BackendKind::from_name(&settings.storage().backend),
-        &xime_sync_store::StorageOptions {
-            data_dir: settings.server().data_dir.clone(),
-            webdav_url: settings.storage().url.clone(),
-            webdav_username: settings.storage().username.clone(),
-            webdav_password: settings.storage().webdav_password(),
-        },
-    );
+    let storage: Arc<dyn Storage> = Arc::new(xime_sync_store::local::LocalStorage::new(
+        &settings.server().data_dir,
+    ));
 
     // SQLite 历史记录（history.db 与数据目录同根，按配置保留上限修剪）
     let history_repo = match xime_sync_store::HistoryRepo::open_with_limit(
@@ -217,18 +212,6 @@ mod tests {
             http: config::HttpConfig::default(),
             ws: config::WsConfig::default(),
             sse: config::SseConfig::default(),
-            storage: config::StorageConfig {
-                backend: "local".to_string(),
-                url: None,
-                username: None,
-                password_env: None,
-                endpoint: None,
-                bucket: None,
-                region: None,
-                access_key_env: None,
-                secret_key_env: None,
-                auth_token_env: None,
-            },
             tls: config::TlsConfig::default(),
             history: config::HistoryConfig::default(),
         };

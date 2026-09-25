@@ -228,6 +228,18 @@ pub enum Message {
     ServerPasswordChanged(String),
     #[cfg(feature = "clipboard-page")]
     OpenSyncDataDir,
+    /// 剪贴板同步插件：启用开关。
+    #[cfg(feature = "clipboard-page")]
+    SyncPluginEnabled(bool),
+    /// 剪贴板同步插件：选择插件。
+    #[cfg(feature = "clipboard-page")]
+    SyncPluginSelected(usize),
+    /// 剪贴板同步插件：编辑配置字段。
+    #[cfg(feature = "clipboard-page")]
+    SyncPluginFieldChanged(String, String),
+    /// 剪贴板同步插件：测试连接。
+    #[cfg(feature = "clipboard-page")]
+    SyncPluginTest,
     #[cfg(feature = "backup-page")]
     BackupUrlChanged(String),
     #[cfg(feature = "backup-page")]
@@ -236,6 +248,12 @@ pub enum Message {
     BackupPasswordChanged(String),
     #[cfg(feature = "backup-page")]
     BackupDirChanged(String),
+    /// 云备份：切换提供者（内置 WebDAV / backup 插件）。
+    #[cfg(feature = "backup-page")]
+    BackupProviderChanged(usize),
+    /// 云备份：编辑插件配置字段（key, value）。
+    #[cfg(feature = "backup-page")]
+    BackupFieldChanged(String, String),
     /// 云备份：切换备份模式（0=仅配置, 1=全量）。
     #[cfg(feature = "backup-page")]
     BackupModeChanged(u8),
@@ -277,6 +295,8 @@ pub struct SettingsState {
     pub pair: PairState,
     #[cfg(feature = "clipboard-page")]
     pub clipboard: ClipboardState,
+    #[cfg(feature = "clipboard-page")]
+    pub sync_plugin: SyncPluginUiState,
     #[cfg(feature = "backup-page")]
     pub backup: BackupState,
     #[cfg(target_os = "linux")]
@@ -307,6 +327,8 @@ impl SettingsState {
             pair: PairState::default(),
             #[cfg(feature = "clipboard-page")]
             clipboard: ClipboardState::default(),
+            #[cfg(feature = "clipboard-page")]
+            sync_plugin: SyncPluginUiState::default(),
             #[cfg(feature = "backup-page")]
             backup: BackupState::default(),
             #[cfg(target_os = "linux")]
@@ -731,6 +753,8 @@ impl SettingsState {
         self.expire_install_messages();
         #[cfg(feature = "clipboard-page")]
         self.clipboard.poll();
+        #[cfg(feature = "clipboard-page")]
+        self.sync_plugin.poll();
         #[cfg(feature = "backup-page")]
         self.backup.poll();
     }
@@ -1387,6 +1411,268 @@ fn sync_data_dir() -> std::path::PathBuf {
     config_base_dir().join("sync-data")
 }
 
+// ---- 剪贴板同步插件（clipboard-page + 与 IME 共享配置） ----------------------
+
+/// 剪贴板同步插件发现结果。
+#[cfg(feature = "clipboard-page")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipboardSyncPluginInfo {
+    pub id: String,
+    pub name: String,
+    pub dir: std::path::PathBuf,
+}
+
+/// 插件同步配置（clipboard_sync.toml，与 IME 共享）。
+#[cfg(feature = "clipboard-page")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+pub struct ClipboardSyncConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub plugin_id: String,
+}
+
+#[cfg(feature = "clipboard-page")]
+pub fn clipboard_sync_config_path() -> std::path::PathBuf {
+    config_base_dir().join("clipboard_sync.toml")
+}
+
+#[cfg(feature = "clipboard-page")]
+pub fn read_clipboard_sync_config() -> ClipboardSyncConfig {
+    let Ok(content) = std::fs::read_to_string(clipboard_sync_config_path()) else {
+        return Default::default();
+    };
+    toml::from_str(&content).unwrap_or_default()
+}
+
+#[cfg(feature = "clipboard-page")]
+pub fn write_clipboard_sync_config(cfg: &ClipboardSyncConfig) {
+    let path = clipboard_sync_config_path();
+    if let Ok(content) = toml::to_string(cfg) {
+        let _ = std::fs::write(path, content);
+    }
+}
+
+/// 扫描 clipboard_sync 类型且启用的插件。
+#[cfg(feature = "clipboard-page")]
+pub fn scan_clipboard_sync_plugins() -> Vec<ClipboardSyncPluginInfo> {
+    let root = config_base_dir().join("plugins");
+    let manager = xime_plugin::PluginManager::new(&root);
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    dirs.sort();
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(manifest) = xime_plugin::PluginManifest::from_dir(&dir) else {
+            continue;
+        };
+        if manifest.plugin_type() != xime_plugin::PluginType::ClipboardSync {
+            continue;
+        }
+        let enabled = manager.get(&manifest.id).map(|r| r.enabled).unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        out.push(ClipboardSyncPluginInfo {
+            id: manifest.id,
+            name: manifest.name,
+            dir,
+        });
+    }
+    out
+}
+
+/// 剪贴板同步插件的页面状态（开关 + 选择 + 配置表单）。
+#[cfg(feature = "clipboard-page")]
+#[derive(Clone)]
+pub struct SyncPluginUiState {
+    /// 是否启用插件同步（写入 clipboard_sync.toml，IME 常驻循环热加载）。
+    pub enabled: bool,
+    /// 已安装的 clipboard_sync 插件。
+    pub plugins: Vec<ClipboardSyncPluginInfo>,
+    /// 当前选中的插件下标。
+    pub plugin_index: usize,
+    /// 插件配置表单（schema + 当前值）。
+    pub fields: Vec<(xime_plugin::SettingField, String)>,
+    pub message: Option<String>,
+    pub busy: Option<&'static str>,
+}
+
+#[cfg(feature = "clipboard-page")]
+static SYNC_PLUGIN_OUTCOME: std::sync::Mutex<Option<Result<SyncPluginOutcome, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(feature = "clipboard-page")]
+enum SyncPluginOutcome {
+    SchemaLoaded(Vec<xime_plugin::SettingField>, Vec<(String, String)>),
+    Tested,
+}
+
+#[cfg(feature = "clipboard-page")]
+impl Default for SyncPluginUiState {
+    fn default() -> Self {
+        let plugins = scan_clipboard_sync_plugins();
+        let cfg = read_clipboard_sync_config();
+        let plugin_index = plugins
+            .iter()
+            .position(|p| p.id == cfg.plugin_id)
+            .unwrap_or(0);
+        let mut st = Self {
+            enabled: cfg.enabled,
+            plugins,
+            plugin_index,
+            fields: Vec::new(),
+            message: None,
+            busy: None,
+        };
+        st.start_schema_load();
+        st
+    }
+}
+
+#[cfg(feature = "clipboard-page")]
+impl SyncPluginUiState {
+    fn selected(&self) -> Option<&ClipboardSyncPluginInfo> {
+        self.plugins.get(self.plugin_index)
+    }
+
+    /// 后台加载当前插件的 schema 与配置值。
+    fn start_schema_load(&mut self) {
+        let Some((id, dir)) = self.selected().map(|i| (i.id.clone(), i.dir.clone())) else {
+            return;
+        };
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("schema");
+        self.fields.clear();
+        std::thread::spawn(move || {
+            let result = load_plugin_runtime(&dir, &id).map(|rt| {
+                let fields = rt.get_settings_schema();
+                let content = std::fs::read_to_string(
+                    config_base_dir()
+                        .join("plugins/config")
+                        .join(format!("{id}.yaml")),
+                )
+                .unwrap_or_default();
+                let config: std::collections::BTreeMap<String, String> =
+                    serde_yaml::from_str(&content).unwrap_or_default();
+                let values = fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.key.clone(),
+                            config.get(&f.key).cloned().unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                SyncPluginOutcome::SchemaLoaded(fields, values)
+            });
+            *SYNC_PLUGIN_OUTCOME.lock().unwrap() = Some(result);
+        });
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        let mut cfg = read_clipboard_sync_config();
+        cfg.enabled = enabled;
+        write_clipboard_sync_config(&cfg);
+        self.message = Some(if enabled {
+            "插件同步已启用，输入法将在数秒内开始同步".to_string()
+        } else {
+            "插件同步已停用".to_string()
+        });
+    }
+
+    pub fn select(&mut self, index: usize) {
+        if index >= self.plugins.len() || index == self.plugin_index {
+            return;
+        }
+        self.plugin_index = index;
+        self.message = None;
+        let mut cfg = read_clipboard_sync_config();
+        cfg.plugin_id = self.plugins[index].id.clone();
+        write_clipboard_sync_config(&cfg);
+        self.start_schema_load();
+    }
+
+    pub fn set_field(&mut self, key: String, value: String) {
+        let Some(id) = self.selected().map(|i| i.id.clone()) else {
+            return;
+        };
+        for (field, current) in self.fields.iter_mut() {
+            if field.key == key {
+                *current = value.clone();
+            }
+        }
+        let path = config_base_dir()
+            .join("plugins/config")
+            .join(format!("{id}.yaml"));
+        let existing: std::collections::BTreeMap<String, String> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_yaml::from_str(&c).ok())
+            .unwrap_or_default();
+        let mut config = existing;
+        config.insert(key, value);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(yaml) = serde_yaml::to_string(&config) {
+            let _ = std::fs::write(path, yaml);
+        }
+    }
+
+    pub fn start_test(&mut self) {
+        let Some((id, dir)) = self.selected().map(|i| (i.id.clone(), i.dir.clone())) else {
+            return;
+        };
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("test");
+        self.message = None;
+        std::thread::spawn(move || {
+            let result = load_plugin_runtime(&dir, &id).and_then(|rt| match rt.test_connection() {
+                Some(msg) => Err(msg),
+                None => Ok(SyncPluginOutcome::Tested),
+            });
+            *SYNC_PLUGIN_OUTCOME.lock().unwrap() = Some(result);
+        });
+    }
+
+    /// 轮询后台结果。
+    pub fn poll(&mut self) {
+        let outcome = SYNC_PLUGIN_OUTCOME.lock().unwrap().take();
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.busy = None;
+        match outcome {
+            Ok(SyncPluginOutcome::SchemaLoaded(fields, values)) => {
+                let map: std::collections::HashMap<String, String> = values.into_iter().collect();
+                self.fields = fields
+                    .into_iter()
+                    .map(|f| {
+                        let v = map.get(&f.key).cloned().unwrap_or_default();
+                        (f, v)
+                    })
+                    .collect();
+            }
+            Ok(SyncPluginOutcome::Tested) => {
+                self.message = Some("连接成功".to_string());
+            }
+            Err(e) => {
+                self.message = Some(e);
+            }
+        }
+    }
+}
+
 /// 生成随机认证密码（16 字节随机 → URL 安全 base64）。
 #[cfg(feature = "clipboard-page")]
 fn random_password() -> String {
@@ -1398,11 +1684,49 @@ fn random_password() -> String {
 
 // ---- 云备份（backup-page） --------------------------------------------------
 
-/// 云备份页状态：WebDAV 连接配置 + 备份模式 + 后台操作进度。
+/// 备份提供者：内置 WebDAV 或 backup 类型插件（与 Android 同契约）。
+#[cfg(feature = "backup-page")]
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackupProvider {
+    Builtin,
+    Plugin {
+        id: String,
+        name: String,
+        dir: std::path::PathBuf,
+    },
+}
+
+#[cfg(feature = "backup-page")]
+impl BackupProvider {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Builtin => "内置 WebDAV",
+            Self::Plugin { name, .. } => name,
+        }
+    }
+}
+
+/// 远端备份列表条目（内置/插件统一展示模型）。
+#[cfg(feature = "backup-page")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackupEntry {
+    /// 操作 id：内置 = 服务器路径；插件 = 插件定义的 id。
+    pub id: String,
+    pub name: String,
+    pub size: Option<i64>,
+}
+
+/// 云备份页状态：提供者选择 + WebDAV（内置）配置 + 备份模式 + 后台操作进度。
 #[cfg(feature = "backup-page")]
 #[derive(Clone)]
 pub struct BackupState {
-    /// WebDAV 服务器地址（含路径前缀，如 https://dav.example.com/dav/xime）。
+    /// 可用提供者（内置 WebDAV 恒在，后接 backup 插件）。
+    pub providers: Vec<BackupProvider>,
+    /// 当前选中的提供者下标。
+    pub provider: usize,
+    /// 插件配置表单字段（schema + 当前值），选中插件提供者后由后台线程填充。
+    pub plugin_fields: Vec<(xime_plugin::SettingField, String)>,
+    /// WebDAV 服务器地址（仅内置提供者使用）。
     pub url: String,
     pub username: String,
     /// WebDAV 密码（写入本地配置文件，权限 0600）。
@@ -1411,13 +1735,13 @@ pub struct BackupState {
     pub remote_dir: String,
     /// 备份模式（0=仅配置, 1=全量）。
     pub mode: u8,
-    /// 进行中的操作标识（test/backup/list/restore/delete），驱动按钮禁用与提示。
+    /// 进行中的操作标识（test/schema/backup/list/restore/delete）。
     pub busy: Option<&'static str>,
     /// 最近一次操作的状态消息。
     pub message: Option<String>,
-    /// 远端备份列表（"查看远端备份"后填充）。
-    pub remote: Vec<crate::webdav::RemoteFile>,
-    /// 配置文件路径（backup.toml）。
+    /// 远端备份列表（"查看远端备份"后填充，切换提供者时清空）。
+    pub remote: Vec<BackupEntry>,
+    /// 配置文件路径（backup.toml，仅内置提供者的连接信息）。
     config_path: std::path::PathBuf,
 }
 
@@ -1425,8 +1749,9 @@ pub struct BackupState {
 #[cfg(feature = "backup-page")]
 enum BackupOutcome {
     Tested,
+    SchemaLoaded(Vec<xime_plugin::SettingField>, Vec<(String, String)>),
     BackedUp(String),
-    Listed(Vec<crate::webdav::RemoteFile>),
+    Listed(Vec<BackupEntry>),
     Restored(usize),
     Deleted,
 }
@@ -1451,9 +1776,93 @@ struct BackupWebDavSection {
 }
 
 #[cfg(feature = "backup-page")]
+fn backup_plugins_root() -> std::path::PathBuf {
+    config_base_dir().join("plugins")
+}
+
+/// 扫描 backup 类型且启用的插件（顺序按目录名，稳定）。
+#[cfg(feature = "backup-page")]
+fn scan_backup_plugins() -> Vec<BackupProvider> {
+    let root = backup_plugins_root();
+    let manager = xime_plugin::PluginManager::new(&root);
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return out;
+    };
+    let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    dirs.sort();
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(manifest) = xime_plugin::PluginManifest::from_dir(&dir) else {
+            continue;
+        };
+        if manifest.plugin_type() != xime_plugin::PluginType::Backup {
+            continue;
+        }
+        let enabled = manager.get(&manifest.id).map(|r| r.enabled).unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        out.push(BackupProvider::Plugin {
+            id: manifest.id,
+            name: manifest.name,
+            dir,
+        });
+    }
+    out
+}
+
+/// 插件配置文件（host.config 同一文件：plugins/config/<id>.yaml）。
+#[cfg(feature = "backup-page")]
+fn plugin_config_path(id: &str) -> std::path::PathBuf {
+    backup_plugins_root()
+        .join("config")
+        .join(format!("{id}.yaml"))
+}
+
+#[cfg(feature = "backup-page")]
+fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(plugin_config_path(id)) else {
+        return Default::default();
+    };
+    serde_yaml::from_str(&content).unwrap_or_default()
+}
+
+#[cfg(feature = "backup-page")]
+fn write_plugin_config(id: &str, map: &std::collections::BTreeMap<String, String>) {
+    let path = plugin_config_path(id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(yaml) = serde_yaml::to_string(map) {
+        let _ = std::fs::write(path, yaml);
+    }
+}
+
+/// 按需加载插件运行时（一操作一实例，onLoad 幂等）。
+#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
+fn load_plugin_runtime(
+    dir: &std::path::Path,
+    id: &str,
+) -> Result<xime_plugin::PluginRuntime, String> {
+    let manifest = xime_plugin::PluginManifest::from_dir(dir)
+        .map_err(|e| format!("读取 manifest 失败: {e}"))?;
+    let runtime = xime_plugin::PluginRuntime::load(dir, &manifest.entry, &plugin_config_path(id))
+        .map_err(|e| format!("加载插件失败: {e}"))?;
+    runtime.call_on_load();
+    Ok(runtime)
+}
+
+#[cfg(feature = "backup-page")]
 impl Default for BackupState {
     fn default() -> Self {
+        let providers = scan_backup_plugins();
         let mut st = Self {
+            providers,
+            provider: 0,
+            plugin_fields: Vec::new(),
             url: String::new(),
             username: String::new(),
             password: String::new(),
@@ -1492,7 +1901,7 @@ impl BackupState {
         }
     }
 
-    /// 保存配置（0600，密码仅本地可读）。
+    /// 保存内置 WebDAV 配置（0600，密码仅本地可读）。
     fn write_config(&self) -> Result<(), String> {
         let cfg = BackupConfigFile {
             webdav: BackupWebDavSection {
@@ -1526,6 +1935,67 @@ impl BackupState {
         ))
     }
 
+    /// 当前提供者是否为插件。
+    pub fn is_plugin_selected(&self) -> bool {
+        matches!(
+            self.providers.get(self.provider),
+            Some(BackupProvider::Plugin { .. })
+        )
+    }
+
+    /// 切换提供者：清空列表；插件提供者则后台加载 schema + 配置值。
+    pub fn select_provider(&mut self, index: usize) {
+        if index >= self.providers.len() || index == self.provider {
+            return;
+        }
+        self.provider = index;
+        self.remote.clear();
+        self.plugin_fields.clear();
+        self.message = None;
+        let Some(BackupProvider::Plugin { id, dir, .. }) = self.providers.get(index) else {
+            return;
+        };
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("schema");
+        let id = id.clone();
+        let dir = dir.clone();
+        std::thread::spawn(move || {
+            let result = load_plugin_runtime(&dir, &id).map(|rt| {
+                let fields = rt.get_settings_schema();
+                let config = read_plugin_config(&id);
+                let values = fields
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.key.clone(),
+                            config.get(&f.key).cloned().unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                BackupOutcome::SchemaLoaded(fields, values)
+            });
+            *BACKUP_OUTCOME.lock().unwrap() = Some(result);
+        });
+    }
+
+    /// 更新插件配置字段（写 host.config 同一文件，插件立即可见）。
+    pub fn set_plugin_field(&mut self, key: String, value: String) {
+        let Some(BackupProvider::Plugin { id, .. }) = self.providers.get(self.provider) else {
+            return;
+        };
+        let id = id.clone();
+        for (field, current) in self.plugin_fields.iter_mut() {
+            if field.key == key {
+                *current = value.clone();
+            }
+        }
+        let mut config = read_plugin_config(&id);
+        config.insert(key, value);
+        write_plugin_config(&id, &config);
+    }
+
     /// 通用后台任务启动：守卫 busy → 落盘配置 → 开线程执行 → 结果进轮询槽。
     fn start_op(
         &mut self,
@@ -1549,9 +2019,18 @@ impl BackupState {
     }
 
     pub fn start_test(&mut self) {
-        self.start_op("test", |state| {
-            state.client()?.test()?;
-            Ok(BackupOutcome::Tested)
+        self.start_op("test", |state| match state.providers.get(state.provider) {
+            Some(BackupProvider::Plugin { id, dir, .. }) => {
+                let runtime = load_plugin_runtime(dir, id)?;
+                if let Some(msg) = runtime.test_connection() {
+                    return Err(msg);
+                }
+                Ok(BackupOutcome::Tested)
+            }
+            _ => {
+                state.client()?.test()?;
+                Ok(BackupOutcome::Tested)
+            }
         });
     }
 
@@ -1567,34 +2046,89 @@ impl BackupState {
                     .map_err(|e| e.to_string())?
                     .as_secs(),
             );
-            let key = format!("{}/{}", state.remote_dir.trim_matches('/'), name);
-            state.client()?.put(&key, &archive)?;
+            match state.providers.get(state.provider) {
+                Some(BackupProvider::Plugin { id, dir, .. }) => {
+                    let runtime = load_plugin_runtime(dir, id)?;
+                    let result = runtime.push_backup(&name, &archive);
+                    if !result.ok {
+                        return Err(result.message.unwrap_or_else(|| "上传失败".to_string()));
+                    }
+                }
+                _ => {
+                    let key = format!("{}/{}", state.remote_dir.trim_matches('/'), name);
+                    state.client()?.put(&key, &archive)?;
+                }
+            }
             Ok(BackupOutcome::BackedUp(name))
         });
     }
 
     pub fn start_list(&mut self) {
-        self.start_op("list", |state| {
-            let dir = state.remote_dir.trim_matches('/').to_string();
-            Ok(BackupOutcome::Listed(state.client()?.list(&dir)?))
+        self.start_op("list", |state| match state.providers.get(state.provider) {
+            Some(BackupProvider::Plugin { id, dir, .. }) => {
+                let runtime = load_plugin_runtime(dir, id)?;
+                let list = runtime.list_backups().ok_or("获取备份列表失败")?;
+                Ok(BackupOutcome::Listed(
+                    list.into_iter()
+                        .map(|e| BackupEntry {
+                            id: e.id,
+                            name: e.name,
+                            size: Some(e.size),
+                        })
+                        .collect(),
+                ))
+            }
+            _ => {
+                let dir = state.remote_dir.trim_matches('/').to_string();
+                Ok(BackupOutcome::Listed(
+                    state
+                        .client()?
+                        .list(&dir)?
+                        .into_iter()
+                        .map(|f| BackupEntry {
+                            id: f.path,
+                            name: f.name,
+                            size: f.size.map(|s| s as i64),
+                        })
+                        .collect(),
+                ))
+            }
         });
     }
 
-    pub fn start_restore(&mut self, path: String) {
+    pub fn start_restore(&mut self, id: String) {
         self.start_op("restore", move |state| {
-            let data = state
-                .client()?
-                .get(&path)?
-                .ok_or_else(|| "远端备份不存在".to_string())?;
+            let data = match state.providers.get(state.provider) {
+                Some(BackupProvider::Plugin { id: pid, dir, .. }) => {
+                    let runtime = load_plugin_runtime(dir, pid)?;
+                    runtime
+                        .pull_backup(&id)
+                        .ok_or_else(|| "下载备份包失败".to_string())?
+                }
+                _ => state
+                    .client()?
+                    .get(&id)?
+                    .ok_or_else(|| "远端备份不存在".to_string())?,
+            };
             let (_, user_dir) = get_data_dirs();
             let n = crate::backup::unpack_rime(&data, &user_dir)?;
             Ok(BackupOutcome::Restored(n))
         });
     }
 
-    pub fn start_delete(&mut self, path: String) {
+    pub fn start_delete(&mut self, id: String) {
         self.start_op("delete", move |state| {
-            state.client()?.delete(&path)?;
+            match state.providers.get(state.provider) {
+                Some(BackupProvider::Plugin { id: pid, dir, .. }) => {
+                    let runtime = load_plugin_runtime(dir, pid)?;
+                    if !runtime.delete_backup(&id) {
+                        return Err("删除失败".to_string());
+                    }
+                }
+                _ => {
+                    state.client()?.delete(&id)?;
+                }
+            }
             Ok(BackupOutcome::Deleted)
         });
     }
@@ -1609,6 +2143,16 @@ impl BackupState {
         match outcome {
             Ok(BackupOutcome::Tested) => {
                 self.message = Some("连接成功".to_string());
+            }
+            Ok(BackupOutcome::SchemaLoaded(fields, values)) => {
+                let map: std::collections::HashMap<String, String> = values.into_iter().collect();
+                self.plugin_fields = fields
+                    .into_iter()
+                    .map(|f| {
+                        let v = map.get(&f.key).cloned().unwrap_or_default();
+                        (f, v)
+                    })
+                    .collect();
             }
             Ok(BackupOutcome::BackedUp(name)) => {
                 self.message = Some(format!("备份完成：{name}"));

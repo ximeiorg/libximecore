@@ -36,13 +36,13 @@ fn about_content(colors: &ThemeColors) -> Element<'static, Message> {
             .font(semibold())
             .color(colors.foreground),
         text(format!("版本 {}", meta.version))
-            .size(12)
+            .size(13)
             .color(colors.foreground_muted),
         text("基于 Rime 引擎的五笔输入法")
-            .size(12)
+            .size(13)
             .color(colors.foreground_muted),
         text("使用 librime + Iced 构建")
-            .size(12)
+            .size(13)
             .color(colors.foreground_muted),
     ]
     .spacing(8)

@@ -165,11 +165,7 @@ impl PluginManager {
     }
 
     /// 从已解压的插件目录安装（用于随宿主分发的内置插件，等价 install_from_zip）。
-    pub fn install_from_dir(
-        &self,
-        source: &Path,
-        force: bool,
-    ) -> Result<PluginRecord, ManagerError> {
+    pub fn install_from_dir(&self, source: &Path, force: bool) -> Result<PluginRecord, ManagerError> {
         let manifest = PluginManifest::from_dir(source)?;
         let id = manifest.id.clone();
 

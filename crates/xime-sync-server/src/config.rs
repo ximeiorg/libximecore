@@ -59,7 +59,6 @@ pub struct Settings {
     pub ws: WsConfig,
     #[serde(default)]
     pub sse: SseConfig,
-    pub storage: StorageConfig,
     #[serde(default)]
     pub tls: TlsConfig,
     #[serde(default)]
@@ -114,9 +113,6 @@ impl Settings {
     }
     pub fn sse(&self) -> &SseConfig {
         &self.sse
-    }
-    pub fn storage(&self) -> &StorageConfig {
-        &self.storage
     }
     pub fn tls(&self) -> &TlsConfig {
         &self.tls
@@ -202,34 +198,6 @@ pub struct SseConfig {
     pub heartbeat_ms: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct StorageConfig {
-    #[serde(default = "default_backend")]
-    pub backend: String,
-    // webdav 后端（feature = webdav 时启用）
-    pub url: Option<String>,
-    pub username: Option<String>,
-    pub password_env: Option<String>,
-    // s3 后端（feature = s3 时启用）
-    pub endpoint: Option<String>,
-    pub bucket: Option<String>,
-    pub region: Option<String>,
-    pub access_key_env: Option<String>,
-    pub secret_key_env: Option<String>,
-    // turso 后端（feature = turso 时启用，P7）
-    pub auth_token_env: Option<String>,
-}
-
-impl StorageConfig {
-    /// WebDAV 密码从环境变量读取（敏感项不落盘明文）。
-    pub fn webdav_password(&self) -> Option<String> {
-        self.password_env
-            .as_ref()
-            .and_then(|var| std::env::var(var).ok())
-            .filter(|p| !p.is_empty())
-    }
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TlsConfig {
     #[serde(default)]
@@ -293,9 +261,6 @@ fn default_bind_timeout_ms() -> u64 {
 fn default_sse_heartbeat_ms() -> u64 {
     15_000
 }
-fn default_backend() -> String {
-    "local".to_string()
-}
 fn default_history_max_items() -> u64 {
     100
 }
@@ -326,7 +291,6 @@ mod tests {
         assert_eq!(s.clipboard().heartbeat_interval_secs, 30);
         assert!(s.http().enabled);
         assert_eq!(s.sse().heartbeat_ms, 15_000);
-        assert_eq!(s.storage().backend, "local");
         assert!(!s.tls().enabled);
         assert_eq!(s.history().max_items, 100);
     }
@@ -385,18 +349,15 @@ mod tests {
             std::env::set_var("XIMED__SERVER__ADDR", "0.0.0.0:9999");
             std::env::set_var("XIMED__CLIPBOARD__MAX_FRAME_SIZE", "2048");
             std::env::set_var("XIMED__HTTP__ENABLED", "false");
-            std::env::set_var("XIMED__STORAGE__BACKEND", "webdav");
         }
         let s = Settings::new().expect("parse with env override");
         assert_eq!(s.server().addr, "0.0.0.0:9999");
         assert_eq!(s.clipboard().max_frame_size, 2048);
         assert!(!s.http().enabled);
-        assert_eq!(s.storage().backend, "webdav");
         for var in [
             "XIMED__SERVER__ADDR",
             "XIMED__CLIPBOARD__MAX_FRAME_SIZE",
             "XIMED__HTTP__ENABLED",
-            "XIMED__STORAGE__BACKEND",
         ] {
             unsafe {
                 std::env::remove_var(var);

@@ -1,4 +1,4 @@
-use crate::components::widgets::{card_style, semibold};
+use crate::components::widgets::{card_style, medium, semibold};
 use crate::theme::ThemeColors;
 use iced::widget::{column, container, row, text};
 use iced::{Alignment, Element, Length};
@@ -46,7 +46,12 @@ pub fn settings_group<'a, Message: 'a>(
     .width(Length::Fill);
 
     if let Some(desc) = description {
-        body = body.push(text(desc.into()).size(12).color(colors.foreground_muted));
+        body = body.push(
+            text(desc.into())
+                .size(13)
+                .font(medium())
+                .color(colors.foreground_muted),
+        );
     }
 
     for item in items {
@@ -70,12 +75,17 @@ pub fn settings_item<'a, Message: 'a>(
     let colors = *colors;
     let label = label.into();
 
-    let mut left = column![text(label).size(14).color(colors.foreground),]
+    let mut left = column![text(label).size(14).font(medium()).color(colors.foreground),]
         .spacing(4)
         .width(Length::Fill);
 
     if let Some(desc) = description {
-        left = left.push(text(desc.into()).size(12).color(colors.foreground_muted));
+        left = left.push(
+            text(desc.into())
+                .size(13)
+                .font(medium())
+                .color(colors.foreground_muted),
+        );
     }
 
     row![left, control]

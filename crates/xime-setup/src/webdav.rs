@@ -1,6 +1,5 @@
 //! 极简同步 WebDAV 客户端（ureq，阻塞式，供云备份页使用）。
-//!
-//! 语义与 `xime-sync-store::webdav`（异步 reqwest 版）对齐：
+//! 语义对齐先前 `xime-sync-store::webdav` 后端（RFC 4918）：
 //! - `put`    → `PUT {base}/{key}`（自动 MKCOL 建父目录）
 //! - `get`    → `GET {base}/{key}`（404 → None）
 //! - `delete` → `DELETE {base}/{key}`（404 视为成功）
@@ -331,7 +330,7 @@ fn find_tag(block: &str, tag: &str) -> Option<String> {
     Some(block[content_start..close_start].to_string())
 }
 
-/// 简单 percent-decode（%XX），与 xime-sync-store 的实现一致。
+/// 简单 percent-decode（%XX），语义同先前 xime-sync-store 的实现。
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

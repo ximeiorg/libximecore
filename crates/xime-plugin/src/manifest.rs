@@ -28,6 +28,9 @@ pub enum PluginType {
     Prediction,
     /// 剪贴板同步（单选激活，契约同 Android `clipboard_sync`：push/pull/testConnection）。
     ClipboardSync,
+    /// 云备份（单选激活，契约同 Android `backup`：pushBackup/listBackups/
+    /// pullBackup/deleteBackup/testConnection；宿主打包，插件只传输）。
+    Backup,
     /// 工具面板（单选/多选，面板交互）。
     Tool,
     /// 其他 / 未知。
@@ -130,6 +133,7 @@ impl PluginManifest {
             "speech" => PluginType::Speech,
             "prediction" => PluginType::Prediction,
             "clipboard_sync" => PluginType::ClipboardSync,
+            "backup" => PluginType::Backup,
             "tool" => PluginType::Tool,
             _ => PluginType::Other,
         }
