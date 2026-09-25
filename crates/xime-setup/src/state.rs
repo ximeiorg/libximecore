@@ -1775,7 +1775,7 @@ struct BackupWebDavSection {
     remote_dir: Option<String>,
 }
 
-#[cfg(feature = "backup-page")]
+#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
 fn backup_plugins_root() -> std::path::PathBuf {
     config_base_dir().join("plugins")
 }
