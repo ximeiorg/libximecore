@@ -1815,14 +1815,14 @@ fn scan_backup_plugins() -> Vec<BackupProvider> {
 }
 
 /// 插件配置文件（host.config 同一文件：plugins/config/<id>.yaml）。
-#[cfg(feature = "backup-page")]
+#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
 fn plugin_config_path(id: &str) -> std::path::PathBuf {
     backup_plugins_root()
         .join("config")
         .join(format!("{id}.yaml"))
 }
 
-#[cfg(feature = "backup-page")]
+#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
 fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
     let Ok(content) = std::fs::read_to_string(plugin_config_path(id)) else {
         return Default::default();
@@ -1830,7 +1830,7 @@ fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
     serde_yaml::from_str(&content).unwrap_or_default()
 }
 
-#[cfg(feature = "backup-page")]
+#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
 fn write_plugin_config(id: &str, map: &std::collections::BTreeMap<String, String>) {
     let path = plugin_config_path(id);
     if let Some(parent) = path.parent() {
