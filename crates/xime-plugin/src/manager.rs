@@ -111,15 +111,19 @@ impl PluginManager {
 
     /// 安装 .xipk 压缩包到插件目录。
     ///
-    /// - 校验包内 manifest.yaml 与入口脚本存在
+    /// - 校验包内 manifest（manifest.json 优先，兼容 manifest.yaml）与入口脚本存在
     /// - 已安装同版本时报错；不同版本时覆盖（保持 enabled 状态）
     pub fn install_from_zip(&self, xipk: &Path, force: bool) -> Result<PluginRecord, ManagerError> {
         let file = std::fs::File::open(xipk)?;
         let mut archive = zip::ZipArchive::new(file)?;
 
-        let manifest_yaml =
-            read_zip_entry(&mut archive, "manifest.yaml").ok_or(ManagerError::MissingManifest)?;
-        let manifest = PluginManifest::parse(&manifest_yaml)?;
+        let manifest = if let Some(json) = read_zip_entry(&mut archive, "manifest.json") {
+            PluginManifest::parse_json(&json)?
+        } else {
+            let yaml = read_zip_entry(&mut archive, "manifest.yaml")
+                .ok_or(ManagerError::MissingManifest)?;
+            PluginManifest::parse(&yaml)?
+        };
         let id = manifest.id.clone();
 
         // 入口脚本必须在包内
@@ -165,7 +169,11 @@ impl PluginManager {
     }
 
     /// 从已解压的插件目录安装（用于随宿主分发的内置插件，等价 install_from_zip）。
-    pub fn install_from_dir(&self, source: &Path, force: bool) -> Result<PluginRecord, ManagerError> {
+    pub fn install_from_dir(
+        &self,
+        source: &Path,
+        force: bool,
+    ) -> Result<PluginRecord, ManagerError> {
         let manifest = PluginManifest::from_dir(source)?;
         let id = manifest.id.clone();
 
@@ -326,19 +334,22 @@ mod tests {
         let xipk = dir.join("test.xipk");
         let file = std::fs::File::create(&xipk).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        zip.start_file("manifest.yaml", zip::write::SimpleFileOptions::default())
+        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
             .unwrap();
         zip.write_all(
-            b"id: com.example.test\nname: Test\nversion: 1.0.0\ntype: emoji\nentry: main.lua\n",
+            br#"{"id":"com.example.test","name":"Test","version":"1.0.0","type":"emoji","entry":"main.js"}"#,
         )
         .unwrap();
-        zip.start_file("main.lua", zip::write::SimpleFileOptions::default())
+        zip.start_file("main.js", zip::write::SimpleFileOptions::default())
             .unwrap();
-        zip.write_all(b"return { getCategories = function() return { \"A\" } end }\n")
+        zip.write_all(
+            b"globalThis.plugin = { emoji: { listCategories: function () { return [\"A\"]; } } };\n",
+        )
+        .unwrap();
+        zip.start_file("libs/util.js", zip::write::SimpleFileOptions::default())
             .unwrap();
-        zip.start_file("libs/util.lua", zip::write::SimpleFileOptions::default())
+        zip.write_all(b"module.exports = { version: 1 };\n")
             .unwrap();
-        zip.write_all(b"return { version = 1 }\n").unwrap();
         zip.start_file(
             "resources/icon.txt",
             zip::write::SimpleFileOptions::default(),
@@ -364,11 +375,11 @@ mod tests {
         assert!(record.enabled);
         assert!(manager
             .plugin_dir("com.example.test")
-            .join("main.lua")
+            .join("main.js")
             .exists());
         assert!(manager
             .plugin_dir("com.example.test")
-            .join("libs/util.lua")
+            .join("libs/util.js")
             .exists());
 
         // 同版本重复安装报错
@@ -398,10 +409,10 @@ mod tests {
         let xipk = dir.join("bad.xipk");
         let file = std::fs::File::create(&xipk).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        zip.start_file("manifest.yaml", zip::write::SimpleFileOptions::default())
+        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
             .unwrap();
         zip.write_all(
-            b"id: com.example.bad\nname: Bad\nversion: 1\ntype: emoji\nentry: nope.lua\n",
+            br#"{"id":"com.example.bad","name":"Bad","version":"1","type":"emoji","entry":"nope.js"}"#,
         )
         .unwrap();
         zip.finish().unwrap();

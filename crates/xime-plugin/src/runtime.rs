@@ -1,34 +1,71 @@
-use mlua::prelude::*;
-use mlua::{Function, LuaOptions, MultiValue, StdLib, Table, Value};
+//! QuickJS 插件运行时（契约对齐 xime 3.0 Android `JsScriptRuntime`）。
+//!
+//! 入口脚本为一个 IIFE，把导出对象挂到 `globalThis.plugin`（分组命名空间：
+//! `emoji.listCategories`、`clipboardSync.push`、`backup.push`、`settings.schema`、
+//! `transform.candidates`、`panel.state`、`events.onTextCommitted`…）。
+//! 宿主注入 `host` 白名单 API（同步阻塞实现，JS `await` 普通值合法，Android
+//! 插件的 await 写法无需改动）；插件导出方法返回 Promise 时由 Rust 侧阻塞落定。
+
 use std::collections::HashMap;
+use std::ffi::{c_int, c_void};
 use std::io::Write;
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use thiserror::Error;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
+use libquickjs_ng_sys as q;
+use quickjs_rusty::serde::{from_js, to_js};
+use quickjs_rusty::{Arguments, Context, ContextError, ExecutionError, OwnedJsValue};
+use serde::de::DeserializeOwned;
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 /// 运行时错误。
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error("Lua 错误: {0}")]
-    Lua(#[from] mlua::Error),
+    #[error("JS 错误: {0}")]
+    Js(String),
     #[error("io 错误: {0}")]
     Io(#[from] std::io::Error),
     #[error("入口脚本不存在: {0}")]
     EntryMissing(String),
-    #[error("入口脚本未返回导出表")]
+    #[error("入口脚本未定义 plugin 导出对象")]
     NoPluginTable,
     #[error("插件配置读写失败: {0}")]
     Config(String),
 }
 
+impl From<ExecutionError> for RuntimeError {
+    fn from(e: ExecutionError) -> Self {
+        RuntimeError::Js(e.to_string())
+    }
+}
+
+impl From<ContextError> for RuntimeError {
+    fn from(e: ContextError) -> Self {
+        RuntimeError::Js(e.to_string())
+    }
+}
+
 pub type RuntimeResult<T> = Result<T, RuntimeError>;
 
-/// SDK 版本（注入 host.sdkVersion）。
-pub const SDK_VERSION: &str = "0.1.0";
+/// SDK 版本（注入 host.sdkVersion，对齐 Android `JsPluginContract`）。
+pub const SDK_VERSION: &str = "3.0.0";
+
+/// 契约调用超时（对齐 Android `JsScriptRuntime` 常量）。
+const TIMEOUT_TRANSFORM: Duration = Duration::from_millis(15);
+const TIMEOUT_CALLBACK: Duration = Duration::from_secs(5);
+const TIMEOUT_BUSINESS: Duration = Duration::from_secs(180);
+
+/// 每插件 QuickJS 堆上限。
+const MEMORY_LIMIT: usize = 64 * 1024 * 1024;
+/// require 模块单文件上限（同 Android）。
+const MODULE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// Promise 落定轮询上限（防插件返回永不落定的 Promise 时忙等）。
+const MAX_SETTLE_SPINS: u32 = 1_000_000;
 
 /// emoji 插件返回的单项。
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -70,12 +107,13 @@ pub struct RemoteBackupEntry {
     pub size: i64,
 }
 
-/// 插件配置表单字段（`getSettingsSchema` 的 text/secret/button 子集）。
+/// 插件配置表单字段（`settings.schema` 返回的 XimeUiNode 中
+/// text/secret/button 子集的最佳努力映射；select/switch 等节点暂被跳过）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SettingField {
     pub key: String,
     pub label: String,
-    /// "text" | "secret" | "button"（其余类型按 text 处理）。
+    /// "text" | "secret" | "button"（其余类型按 text 处理，未知类型跳过）。
     pub ftype: String,
     pub placeholder: Option<String>,
     pub help_text: Option<String>,
@@ -144,6 +182,9 @@ impl CandidateTransformCircuitBreaker {
 }
 
 /// emoji 插件分类布局配置。
+///
+/// Android 3.0 契约中布局来自 manifest `capabilities.emoji`（columns/itemHeightDp），
+/// 不再提供运行时查询；此结构仅为兼容保留。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EmojiLayout {
     pub columns: Option<i64>,
@@ -161,220 +202,556 @@ fn uuid_string() -> String {
     format!("{nanos:016x}{counter:016x}{:08x}", std::process::id())
 }
 
-/// Lua 插件运行时：一个插件一个独立 Lua state（沙箱）。
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// 中断处理器：超过 deadline（epoch 毫秒，0 = 无限制）时中断 JS 执行。
+unsafe extern "C" fn interrupt_handler(_rt: *mut q::JSRuntime, opaque: *mut c_void) -> c_int {
+    let deadline = unsafe { &*(opaque as *const AtomicI64) };
+    let d = deadline.load(Ordering::Relaxed);
+    if d != 0 && now_millis() >= d {
+        1
+    } else {
+        0
+    }
+}
+
+/// 沙箱引导脚本：装配 host 命名空间、polyfill 与契约调用机制，最后屏蔽动态求值。
+/// 前置条件：Rust 侧已注册全部 `__ximeNative_*` 回调。
+const BOOTSTRAP_JS: &str = r#"
+var __ximeOriginalFunction = Function;
+
+function __ximeToBytes(v) {
+  if (v == null) return null;
+  if (v instanceof Uint8Array || Array.isArray(v)) return Array.from(v);
+  if (typeof v === 'string') return Array.from(new TextEncoder().encode(v));
+  return null;
+}
+
+// TextEncoder/TextDecoder polyfill（quickjs 不内置）
+globalThis.TextEncoder = function () {
+  this.encoding = 'utf-8';
+  this.encode = function (s) { return Uint8Array.from(__ximeNative_utf8Encode(String(s))); };
+};
+globalThis.TextDecoder = function () {
+  this.encoding = 'utf-8';
+  this.decode = function (a) {
+    var bytes = (a instanceof Uint8Array || Array.isArray(a)) ? Array.from(a) : [];
+    return __ximeNative_utf8Decode(bytes) || '';
+  };
+};
+
+globalThis.atob = function (s) {
+  var bytes = __ximeNative_base64Decode(String(s));
+  if (bytes == null) throw new Error('atob: 非法 base64');
+  var out = '';
+  for (var i = 0; i < bytes.length; i += 4096) {
+    out += String.fromCharCode.apply(null, bytes.slice(i, i + 4096));
+  }
+  return out;
+};
+globalThis.btoa = function (s) { return __ximeNative_base64Encode(String(s)); };
+
+globalThis.XimeError = function (code, message) {
+  this.code = code;
+  this.message = message;
+  this.name = 'XimeError';
+};
+globalThis.XimeError.prototype = Object.create(Error.prototype);
+globalThis.XimeError.prototype.constructor = globalThis.XimeError;
+globalThis.definePlugin = function (plugin) { return plugin; };
+
+var host = {
+  sdkVersion: __ximeNative_sdkVersion(),
+  log: function () { __ximeNative_log.apply(null, arguments); },
+  logError: function () { __ximeNative_logError.apply(null, arguments); },
+  uuid: __ximeNative_uuid,
+  config: {
+    get: __ximeNative_configGet,
+    set: __ximeNative_configSet,
+    remove: __ximeNative_configRemove,
+    keys: __ximeNative_configKeys,
+    getJson: function (key) {
+      try {
+        var raw = __ximeNative_configGet(String(key));
+        return raw == null ? null : JSON.parse(raw);
+      } catch (e) { return null; }
+    },
+  },
+  resource: { path: __ximeNative_resourcePath, list: __ximeNative_resourceList },
+  bin: {
+    int32be: function (n) { return Uint8Array.from(__ximeNative_binInt32be(n | 0)); },
+    uint32be: function (n) { return Uint8Array.from(__ximeNative_binInt32be(n | 0)); },
+  },
+  zlib: {
+    gzip: function (data) {
+      var r = __ximeNative_zlibGzip(__ximeToBytes(data));
+      return r == null ? null : Uint8Array.from(r);
+    },
+    gunzip: function (data) {
+      var r = __ximeNative_zlibGunzip(__ximeToBytes(data));
+      return r == null ? null : Uint8Array.from(r);
+    },
+  },
+  crypto: {
+    sha256: function (data) { return Uint8Array.from(__ximeNative_cryptoSha256(__ximeToBytes(data))); },
+    hmacSha256: function (key, data) {
+      return Uint8Array.from(__ximeNative_cryptoHmacSha256(__ximeToBytes(key), __ximeToBytes(data)));
+    },
+    hmacSha1: function (key, data) {
+      return Uint8Array.from(__ximeNative_cryptoHmacSha1(__ximeToBytes(key), __ximeToBytes(data)));
+    },
+    hex: function (data) { return __ximeNative_cryptoHex(__ximeToBytes(data)); },
+    base64: function (data) { return __ximeNative_cryptoBase64(__ximeToBytes(data)); },
+    utcTime: function (format) { return __ximeNative_cryptoUtcTime(String(format)); },
+    epochSeconds: __ximeNative_cryptoEpochSeconds,
+  },
+  http: {
+    request: function (method, url, headers, body, timeoutMillis) {
+      if (body instanceof Uint8Array) body = Array.from(body);
+      var r = __ximeNative_httpRequest(method, url, headers, body, timeoutMillis);
+      if (r == null) throw new XimeError('E_NETWORK', method + ' ' + url + ' 请求失败');
+      if (r.body != null) r.body = Uint8Array.from(r.body);
+      return r;
+    },
+  },
+  quickSend: { list: function () { return []; } },
+  clipboard: { get: function () { return null; } },
+  capabilities: [],
+};
+host.has = function (name) { return name != null && host[name] !== undefined; };
+globalThis.host = host;
+
+// require：仅插件包内相对 .js 模块（解析/读取由宿主实现，带缓存）
+var __ximeModuleCache = {};
+globalThis.require = function (spec) {
+  var resolved = __ximeNative_resolveModule(String(spec));
+  if (resolved == null) throw new Error("Cannot find module '" + spec + "'");
+  if (__ximeModuleCache[resolved] !== undefined) return __ximeModuleCache[resolved].exports;
+  var source = __ximeNative_readModule(resolved);
+  if (source == null) throw new Error("Cannot read module '" + resolved + "'");
+  var module = { exports: {} };
+  __ximeModuleCache[resolved] = module;
+  var factory = __ximeOriginalFunction('exports', 'require', 'module', source);
+  factory(module.exports, globalThis.require, module);
+  return module.exports;
+};
+
+// console（转发宿主日志，同 Android bootstrap）
+globalThis.console = {
+  log: function () { __ximeNative_log.apply(null, arguments); },
+  info: function () { __ximeNative_log.apply(null, arguments); },
+  debug: function () { __ximeNative_log.apply(null, arguments); },
+  trace: function () { __ximeNative_log.apply(null, arguments); },
+  warn: function () { __ximeNative_log.apply(null, arguments); },
+  error: function () { __ximeNative_logError.apply(null, arguments); },
+};
+
+// 契约调用机制：Rust 设置 __ximePath/__ximeArgs 后调用 __ximeInvoke()；
+// 逐级判空 + typeof 检查实现"函数缺失 → undefined"降级，apply 保持 this 绑定。
+globalThis.__ximeInvoke = function () {
+  var p = globalThis.plugin;
+  if (p == null || typeof p !== 'object') return undefined;
+  var segs = String(globalThis.__ximePath || '').split('.');
+  var cur = p;
+  for (var i = 0; i < segs.length - 1; i++) {
+    if (cur == null || typeof cur !== 'object') return undefined;
+    cur = cur[segs[i]];
+  }
+  if (cur == null || typeof cur !== 'object') return undefined;
+  var fn = cur[segs[segs.length - 1]];
+  if (typeof fn !== 'function') return undefined;
+  return fn.apply(cur, globalThis.__ximeArgs || []);
+};
+
+// Promise 落定槽：Rust 侧驱动 pending job 并轮询状态（1=fulfilled 2=rejected）
+globalThis.__ximeSettle = function (value) {
+  globalThis.__ximeSettleState = 0;
+  globalThis.__ximeSettleValue = undefined;
+  Promise.resolve(value).then(
+    function (v) { globalThis.__ximeSettleState = 1; globalThis.__ximeSettleValue = v; },
+    function (e) {
+      globalThis.__ximeSettleState = 2;
+      globalThis.__ximeSettleValue = (e && e.message) ? e.message : String(e);
+    }
+  );
+};
+
+// 沙箱屏蔽动态求值（require 已捕获原始 Function）
+Object.defineProperty(globalThis, 'eval', { value: undefined, writable: false, configurable: false });
+Object.defineProperty(globalThis, 'Function', { value: undefined, writable: false, configurable: false });
+"#;
+
+/// JS 插件运行时：一个插件一个独立 QuickJS Context（沙箱）。
 ///
 /// 沙箱策略（与 Android 版一致）：
-/// - 只加载安全标准库（coroutine/table/string/utf8/math），不加载 io/os/package/debug
-/// - 不提供 loadfile/dofile；`require` 只能加载插件包 `libs/` 下的纯 Lua 模块
+/// - QuickJS 语言层无文件/进程 API；`eval`/`Function` 被屏蔽，`require` 只能
+///   加载插件包内相对 `.js` 模块（≤2MB，宿主解析路径，拒绝穿越）
 /// - 插件只能通过注入的 `host` 白名单 API 访问宿主能力
+/// - 契约调用带硬超时（中断处理器），超时后运行时熔断（后续调用全部降级）
+///
+/// `Context` 非 `Send`：运行时必须在创建线程内使用（daemon 侧 PluginHost 归
+/// wayland 事件循环线程、clipboard_sync 桥归专用线程，均满足）。
 pub struct PluginRuntime {
-    /// 测试直接访问 Lua state（沙箱断言）；库代码经插件契约 API 调用。
-    #[allow(dead_code)]
-    lua: Lua,
-    plugin: Table,
+    context: Context,
     plugin_id: String,
+    /// 中断处理器 deadline（epoch 毫秒；0 = 不限制）。Box 保证地址稳定。
+    deadline: Box<AtomicI64>,
+    /// 超时熔断标志：置位后所有契约调用直接降级。
+    poisoned: AtomicBool,
+}
+
+impl std::fmt::Debug for PluginRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRuntime")
+            .field("plugin_id", &self.plugin_id)
+            .field("poisoned", &self.poisoned.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
 }
 
 impl PluginRuntime {
-    /// 加载入口脚本并取得导出表。
+    /// 加载入口脚本并校验 `globalThis.plugin` 导出对象。
     ///
     /// - `plugin_dir`: 已解压的插件目录
-    /// - `entry`: manifest 的 entry 字段（相对 plugin_dir）
+    /// - `entry`: manifest 的 entry 字段（相对 plugin_dir，默认 main.js）
     /// - `config_file`: host.config 的持久化文件路径
     pub fn load(plugin_dir: &Path, entry: &str, config_file: &Path) -> RuntimeResult<Self> {
-        let lua = Lua::new_with(
-            StdLib::COROUTINE | StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH,
-            LuaOptions::default(),
-        )?;
-        let globals = lua.globals();
-
-        // 沙箱补充：Lua 基础库自带 loadfile/dofile（可读任意文件），显式剥离
-        globals.set("loadfile", Value::Nil)?;
-        globals.set("dofile", Value::Nil)?;
-
-        // print → host 日志（插件内 print 不丢）
         let plugin_id = plugin_dir
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "plugin".to_string());
-        let print_id = plugin_id.clone();
-        globals.set(
-            "print",
-            lua.create_function(move |_, message: String| {
-                tracing::debug!("[{}] {}", print_id, message);
-                Ok(())
-            })?,
-        )?;
 
-        setup_require(&lua, &plugin_dir.join("libs"))?;
+        let context = Context::builder().memory_limit(MEMORY_LIMIT).build()?;
 
-        let host = build_host_table(&lua, plugin_dir, config_file)?;
-        globals.set("host", host)?;
+        install_native_api(&context, plugin_dir, config_file)?;
+        context.update_stack_top();
+        context.eval(BOOTSTRAP_JS, false)?;
 
-        let entry_path = plugin_dir.join(entry);
-        if !entry_path.exists() {
+        if !entry_is_safe(entry) || !plugin_dir.join(entry).is_file() {
             return Err(RuntimeError::EntryMissing(entry.to_string()));
         }
-        let chunk = lua.load(entry_path);
-        let plugin = chunk.eval::<Table>()?;
+        let source = std::fs::read_to_string(plugin_dir.join(entry))?;
+        context.eval(&source, false)?;
 
-        Ok(Self {
-            lua,
-            plugin,
-            plugin_id: plugin_id.clone(),
-        })
+        let plugin_ok = context
+            .global()?
+            .property("plugin")?
+            .map(|v| v.is_object() && !v.is_undefined())
+            .unwrap_or(false);
+        if !plugin_ok {
+            return Err(RuntimeError::NoPluginTable);
+        }
+
+        let runtime = Self {
+            context,
+            plugin_id,
+            deadline: Box::new(AtomicI64::new(0)),
+            poisoned: AtomicBool::new(false),
+        };
+        // 字段声明顺序保证 context 先于 deadline 析构（handler 指向 deadline）。
+        runtime.context.set_interrupt_handler(
+            Some(interrupt_handler),
+            &*runtime.deadline as *const AtomicI64 as *mut c_void,
+        );
+        Ok(runtime)
     }
 
     pub fn plugin_id(&self) -> &str {
         &self.plugin_id
     }
 
-    // ---- 生命周期 ----
+    // ---- 契约调用机制 ----
 
-    pub fn call_on_load(&self) {
-        let _ = self.call_fn::<()>("onLoad", ());
+    fn set_deadline(&self, timeout: Duration) {
+        self.deadline
+            .store(now_millis() + timeout.as_millis() as i64, Ordering::Relaxed);
     }
 
-    pub fn call_on_unload(&self) {
-        let _ = self.call_fn::<()>("onUnload", ());
+    fn deadline_expired(&self) -> bool {
+        let d = self.deadline.load(Ordering::Relaxed);
+        d != 0 && now_millis() >= d
     }
 
-    /// 调用插件导出表中的函数；不存在或出错时返回 None（不崩溃）。
-    pub fn call_fn<T: FromLuaMulti>(&self, name: &str, args: impl IntoLuaMulti) -> Option<T> {
-        let f: Function = match self.plugin.get(name) {
-            Ok(Value::Function(f)) => f,
-            _ => return None,
-        };
-        match f.call(args) {
-            Ok(v) => Some(v),
+    /// 调用插件导出方法（`path` 为 `globalThis.plugin` 下的点路径），返回原始值。
+    /// 函数缺失/插件报错/超时一律返回 None 并记日志（不向上传播）。
+    fn call_slot_value(
+        &self,
+        timeout: Duration,
+        path: &str,
+        args: Vec<serde_json::Value>,
+        prep: Option<&str>,
+    ) -> Option<OwnedJsValue> {
+        if self.poisoned.load(Ordering::Relaxed) {
+            return None;
+        }
+        let ptr = unsafe { self.context.context_raw() };
+        self.set_deadline(timeout);
+        self.context.update_stack_top();
+        let result = (|| -> Result<Option<OwnedJsValue>, ExecutionError> {
+            self.context.set_global("__ximePath", path.to_string())?;
+            let args_value =
+                to_js(ptr, &args).map_err(|e| ExecutionError::Internal(e.to_string()))?;
+            self.context.set_global("__ximeArgs", args_value)?;
+            if let Some(prep_src) = prep {
+                self.context.eval(prep_src, false)?;
+            }
+            let value = self.context.eval("__ximeInvoke()", false)?;
+            self.settle(value)
+        })();
+        let expired = self.deadline_expired();
+        self.deadline.store(0, Ordering::Relaxed);
+        match result {
+            Ok(Some(v)) if !v.is_undefined() && !v.is_null() => Some(v),
+            Ok(_) => None,
             Err(e) => {
-                tracing::error!("[{}] 调用 {} 失败: {}", self.plugin_id, name, e);
+                if expired {
+                    self.poisoned.store(true, Ordering::Relaxed);
+                    tracing::error!("[{}] 调用 {path} 超时，运行时熔断", self.plugin_id);
+                } else {
+                    tracing::error!("[{}] 调用 {path} 失败: {e}", self.plugin_id);
+                }
                 None
             }
         }
     }
 
+    /// [`Self::call_slot_value`] 的类型化版本（serde 反序列化返回值）。
+    fn call_slot<T: DeserializeOwned>(
+        &self,
+        timeout: Duration,
+        path: &str,
+        args: Vec<serde_json::Value>,
+        prep: Option<&str>,
+    ) -> Option<T> {
+        let value = self.call_slot_value(timeout, path, args, prep)?;
+        match from_js(unsafe { self.context.context_raw() }, &value) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::error!("[{}] {path} 返回值解析失败: {e}", self.plugin_id);
+                None
+            }
+        }
+    }
+
+    /// 阻塞落定 Promise（对齐 Android callAsync 语义）：所有返回值统一走
+    /// `__ximeSettle` 槽（Promise.resolve 对普通值立即生效），Rust 侧驱动
+    /// pending job 并轮询状态（1=fulfilled 2=rejected）。
+    fn settle(&self, value: OwnedJsValue) -> Result<Option<OwnedJsValue>, ExecutionError> {
+        let global = self.context.global()?;
+        let setter = global
+            .property("__ximeSettle")?
+            .filter(|v| v.is_function())
+            .ok_or_else(|| ExecutionError::Internal("__ximeSettle 缺失".to_string()))?
+            .try_into_function()?;
+        setter.call(vec![value])?;
+        let mut spins = 0u32;
+        loop {
+            self.context.execute_pending_job()?;
+            let state = global
+                .property("__ximeSettleState")?
+                .filter(|v| !v.is_undefined());
+            let state = match state {
+                Some(v) => v.to_int().unwrap_or(0),
+                None => 0,
+            };
+            match state {
+                1 => return global.property("__ximeSettleValue"),
+                2 => {
+                    let msg = global
+                        .property("__ximeSettleValue")?
+                        .and_then(|v| v.js_to_string().ok())
+                        .unwrap_or_else(|| "promise rejected".to_string());
+                    return Err(ExecutionError::Internal(msg));
+                }
+                _ => {}
+            }
+            spins += 1;
+            if spins > MAX_SETTLE_SPINS {
+                return Err(ExecutionError::Internal(
+                    "promise 未在预算内落定".to_string(),
+                ));
+            }
+        }
+    }
+
+    /// 测试/调试辅助：按点路径调用插件导出方法，JSON 入参/出参。
+    pub fn call_plugin_fn(
+        &self,
+        path: &str,
+        args: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        self.call_slot(TIMEOUT_BUSINESS, path, args.to_vec(), None)
+    }
+
+    // ---- 生命周期 ----
+
+    pub fn call_on_load(&self) {
+        let _ = self.call_slot_value(TIMEOUT_BUSINESS, "onLoad", vec![], None);
+    }
+
+    pub fn call_on_unload(&self) {
+        let _ = self.call_slot_value(TIMEOUT_BUSINESS, "onUnload", vec![], None);
+    }
+
     // ---- emoji 契约 ----
 
     pub fn get_categories(&self) -> Vec<String> {
-        self.call_fn("getCategories", ())
-            .map(|v: Vec<LuaString>| v.into_iter().map(|s| s.to_string_lossy()).collect())
+        self.call_slot(TIMEOUT_BUSINESS, "emoji.listCategories", vec![], None)
             .unwrap_or_default()
     }
 
     pub fn get_emojis(&self, category: &str, search_text: &str, top_k: usize) -> Vec<EmojiItem> {
-        let raw = self.call_fn::<Vec<Table>>("getEmojis", (category, search_text, top_k as i64));
-        raw.unwrap_or_default()
+        let arg = serde_json::json!({
+            "category": category,
+            "keyword": search_text,
+            "topK": top_k,
+        });
+        let Some(value) = self.call_slot_value(TIMEOUT_BUSINESS, "emoji.query", vec![arg], None)
+        else {
+            return Vec::new();
+        };
+        let Ok(items) =
+            from_js::<Vec<serde_json::Value>>(unsafe { self.context.context_raw() }, &value)
+        else {
+            return Vec::new();
+        };
+        items
             .into_iter()
-            .filter_map(|t| {
-                let text: String = t.get("text").unwrap_or_default();
+            .filter_map(|item| {
+                let text = item.get("text").and_then(|t| t.as_str())?.to_string();
                 if text.is_empty() {
                     return None;
                 }
-                let id: String = t.get("id").unwrap_or_default();
-                let image_url: Option<String> = t.get("imageUrl").ok().flatten();
-                let cat: String = t.get("category").unwrap_or_default();
                 Some(EmojiItem {
-                    id,
+                    id: item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     text,
-                    image_url,
-                    category: cat,
+                    image_url: item
+                        .get("imageUrl")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    category: item
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(category)
+                        .to_string(),
                 })
             })
             .collect()
     }
 
-    pub fn get_category_layout(&self, category: &str) -> Option<EmojiLayout> {
-        let t: Table = self.call_fn("getCategoryLayoutConfig", (category,))?;
-        Some(EmojiLayout {
-            columns: t.get("columns").ok().flatten(),
-            item_height: t.get("itemHeightDp").ok().flatten(),
-        })
+    /// Android 3.0 契约中布局来自 manifest（capabilities.emoji），运行时不再查询；
+    /// 保留 API 兼容旧调用方，恒返回 None。
+    pub fn get_category_layout(&self, _category: &str) -> Option<EmojiLayout> {
+        None
     }
 
-    // ---- clipboard_sync 契约（同 Android LuaClipboardSyncPluginAdapter）----
+    // ---- clipboard_sync 契约（同 Android JsClipboardSyncPluginAdapter）----
 
-    /// 推送 profile（JSON 对象）到远端；插件返回 false / 函数缺失视为失败。
-    /// profile 字段为 snake_case，与 [`xime_sync_domain::profile::Profile`] JSON 一致。
+    /// 推送 profile（JSON 对象）到远端；插件返回 false / 函数缺失 / 报错视为失败。
     pub fn clipboard_push(&self, profile: &serde_json::Value) -> bool {
-        let Ok(value) = self.lua.to_value(profile) else {
-            return false;
-        };
-        self.call_fn::<bool>("push", value).unwrap_or(false)
+        self.call_slot::<serde_json::Value>(
+            TIMEOUT_BUSINESS,
+            "clipboardSync.push",
+            vec![profile.clone()],
+            None,
+        )
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
     }
 
-    /// 拉取远端 profile（JSON 对象）；插件返回 nil（无变更）时返回 None。
+    /// 拉取远端 profile；插件返回 null/undefined（无变更）时返回 None。
     pub fn clipboard_pull(&self) -> Option<serde_json::Value> {
-        let table: Table = self.call_fn("pull", ())?;
-        self.lua
-            .from_value::<serde_json::Value>(Value::Table(table))
-            .ok()
+        self.call_slot(TIMEOUT_BUSINESS, "clipboardSync.pull", vec![], None)
     }
 
     /// 测试连接；返回 `None` 表示成功，`Some(消息)` 表示失败原因。
+    /// 依次尝试 clipboardSync.test / backup.test（插件按类型实现其一）。
     pub fn test_connection(&self) -> Option<String> {
-        self.call_fn::<String>("testConnection", ())
-            .filter(|s| !s.is_empty())
+        for path in ["clipboardSync.test", "backup.test"] {
+            if let Some(value) = self.call_slot_value(TIMEOUT_BUSINESS, path, vec![], None) {
+                let message = value.js_to_string().unwrap_or_default();
+                return if message.is_empty() {
+                    None
+                } else {
+                    Some(message)
+                };
+            }
+        }
+        None
     }
 
-    // ---- backup 契约（同 Android LuaBackupPluginAdapter）----
+    // ---- backup 契约（同 Android JsBackupPluginAdapter）----
     // 宿主打包/恢复，插件只承载传输协议（WebDAV/S3/自建 HTTP）。
 
     /// 上传备份包。插件返回 bool 或 {ok, id, message} 两种形态。
     pub fn push_backup(&self, name: &str, archive: &[u8]) -> BackupUploadResult {
-        let Some(value) = (|lua: &Lua| -> Option<Value> {
-            let table = lua.create_table().ok()?;
-            table.set("name", name).ok()?;
-            table.set("archive", lua.create_string(archive).ok()?).ok();
-            Some(Value::Table(table))
-        })(&self.lua) else {
-            return BackupUploadResult::failed("构造上传参数失败");
+        let arg = serde_json::json!({ "name": name, "archive": archive });
+        // archive 以 JSON 数组过桥，调用前在 JS 侧转为 Uint8Array（契约形状）。
+        let prep =
+            "globalThis.__ximeArgs[0].archive = new Uint8Array(globalThis.__ximeArgs[0].archive);";
+        let Some(value) =
+            self.call_slot_value(TIMEOUT_BUSINESS, "backup.push", vec![arg], Some(prep))
+        else {
+            return BackupUploadResult::failed("backup.push 调用失败");
         };
-        let Some(result) = self.call_fn::<Value>("pushBackup", value) else {
-            return BackupUploadResult::failed("pushBackup 调用失败");
-        };
-        match result {
-            Value::Boolean(ok) => BackupUploadResult {
+        if let Ok(ok) = bool::try_from(value.clone()) {
+            return BackupUploadResult {
                 ok,
                 id: None,
                 message: None,
+            };
+        }
+        match from_js::<serde_json::Value>(unsafe { self.context.context_raw() }, &value) {
+            Ok(v) => BackupUploadResult {
+                ok: v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false),
+                id: v.get("id").and_then(|v| v.as_str()).map(str::to_owned),
+                message: v.get("message").and_then(|v| v.as_str()).map(str::to_owned),
             },
-            Value::Table(t) => BackupUploadResult {
-                ok: t.get("ok").unwrap_or(false),
-                id: t.get("id").ok().flatten(),
-                message: t.get("message").ok().flatten(),
-            },
-            _ => BackupUploadResult::failed("pushBackup 返回类型无效"),
+            Err(_) => BackupUploadResult::failed("backup.push 返回类型无效"),
         }
     }
 
-    /// 下载备份包（id = 插件 listBackups 返回的条目 id）；nil/失败返回 None。
+    /// 下载备份包（id = 插件 list() 返回的条目 id）；null/失败返回 None。
     pub fn pull_backup(&self, id: &str) -> Option<Vec<u8>> {
-        let value = self.call_fn::<Value>("pullBackup", id)?;
-        match value {
-            Value::String(s) => Some(s.as_bytes().to_vec()),
-            _ => None,
-        }
+        let value = self.call_slot_value(
+            TIMEOUT_BUSINESS,
+            "backup.pull",
+            vec![serde_json::json!(id)],
+            None,
+        )?;
+        self.value_to_bytes(value)
     }
 
     /// 列出远端备份条目；失败返回 None（与 Android 语义一致，区别于空列表）。
     pub fn list_backups(&self) -> Option<Vec<RemoteBackupEntry>> {
-        let raw = self.call_fn::<Vec<Table>>("listBackups", ())?;
+        let value = self.call_slot_value(TIMEOUT_BUSINESS, "backup.list", vec![], None)?;
+        let raw = from_js::<Vec<serde_json::Value>>(unsafe { self.context.context_raw() }, &value)
+            .ok()?;
         let mut out = Vec::new();
-        for t in raw {
-            let id: String = match t.get::<String>("id") {
-                Ok(v) if !v.is_empty() => v,
+        for item in raw {
+            let id = match item.get("id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => id.to_string(),
                 _ => continue,
             };
             out.push(RemoteBackupEntry {
-                name: t
+                name: item
                     .get("name")
-                    .ok()
-                    .filter(|s: &String| !s.is_empty())
-                    .unwrap_or(id.clone()),
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&id)
+                    .to_string(),
                 id,
-                created_at: t.get("createdAt").unwrap_or(0),
-                size: t.get("size").unwrap_or(-1),
+                created_at: item.get("createdAt").and_then(|v| v.as_i64()).unwrap_or(0),
+                size: item.get("size").and_then(|v| v.as_i64()).unwrap_or(-1),
             });
         }
         Some(out)
@@ -382,246 +759,326 @@ impl PluginRuntime {
 
     /// 删除远端备份条目。
     pub fn delete_backup(&self, id: &str) -> bool {
-        self.call_fn::<bool>("deleteBackup", id).unwrap_or(false)
+        self.call_slot::<bool>(
+            TIMEOUT_BUSINESS,
+            "backup.remove",
+            vec![serde_json::json!(id)],
+            None,
+        )
+        .unwrap_or(false)
     }
 
-    /// 配置表单 schema（UiNode 契约的 text/secret/button 子集）。
+    /// 配置表单 schema（XimeUiNode 的 text/secret/button 子集映射；
+    /// select/switch/section/divider/multi_select 节点暂被跳过，≤64 节点）。
     pub fn get_settings_schema(&self) -> Vec<SettingField> {
-        let raw = self.call_fn::<Vec<Table>>("getSettingsSchema", ());
-        raw.unwrap_or_default()
-            .into_iter()
-            .filter_map(|t| {
-                let key: String = t.get("key").ok()?;
+        let raw = self
+            .call_slot::<Vec<serde_json::Value>>(TIMEOUT_BUSINESS, "settings.schema", vec![], None)
+            .unwrap_or_default();
+        raw.into_iter()
+            .take(64)
+            .filter_map(|node| {
+                let key = node.get("key").and_then(|v| v.as_str())?.to_string();
+                let node_type = node.get("type").and_then(|v| v.as_str()).unwrap_or("text");
+                let ftype = match node_type {
+                    "secret" => "secret",
+                    "button" | "action" => "button",
+                    "text" | "input" | "textarea" | "number" | "metric" => "text",
+                    other => {
+                        tracing::debug!(
+                            "[{}] settings.schema 节点 {key} 类型 {other} 暂不支持，跳过",
+                            self.plugin_id
+                        );
+                        return None;
+                    }
+                };
                 Some(SettingField {
-                    label: t.get("label").unwrap_or_else(|_| key.clone()),
+                    label: node
+                        .get("label")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&key)
+                        .to_string(),
                     key,
-                    ftype: t.get("type").unwrap_or_else(|_| "text".to_string()),
-                    placeholder: t.get("placeholder").ok().flatten(),
-                    help_text: t.get("helpText").ok().flatten(),
-                    required: t.get("required").unwrap_or(false),
-                    default_value: t.get("defaultValue").ok().flatten(),
+                    ftype: ftype.to_string(),
+                    placeholder: node
+                        .get("placeholder")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    help_text: node
+                        .get("helpText")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    required: node
+                        .get("required")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    default_value: node
+                        .get("defaultValue")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
                 })
             })
             .collect()
     }
 
-    // ---- tool 契约（同 Android LuaToolPluginAdapter）----
+    // ---- tool 契约（同 Android JsToolPluginAdapter）----
 
-    /// 获取工具面板状态（同步调用，200ms 超时由宿主控制）。
-    /// 返回 JSON 对象描述面板 UI；插件返回 nil 表示无面板。
+    /// 获取工具面板状态；插件返回 null/undefined 表示无面板。
     pub fn get_panel_state(&self, input_text: &str) -> Option<serde_json::Value> {
-        let table: Table = self.call_fn("getPanelState", (input_text,))?;
-        self.lua
-            .from_value::<serde_json::Value>(Value::Table(table))
-            .ok()
+        self.call_slot(
+            TIMEOUT_BUSINESS,
+            "panel.state",
+            vec![serde_json::json!(input_text)],
+            None,
+        )
     }
 
-    /// 面板输入事件（异步，fire-and-forget）。
+    /// 面板输入事件（fire-and-forget，5s 超时）。
     pub fn on_panel_input(&self, input_text: &str) {
-        let _ = self.call_fn::<()>("onPanelInput", (input_text,));
+        let _ = self.call_slot_value(
+            TIMEOUT_CALLBACK,
+            "panel.onInput",
+            vec![serde_json::json!(input_text)],
+            None,
+        );
     }
 
-    /// 面板动作事件（异步，fire-and-forget）。
+    /// 面板动作事件（fire-and-forget，5s 超时）。
     pub fn on_panel_action(&self, action: &str) {
-        let _ = self.call_fn::<()>("onPanelAction", (action,));
+        let _ = self.call_slot_value(
+            TIMEOUT_CALLBACK,
+            "panel.onAction",
+            vec![serde_json::json!(action)],
+            None,
+        );
     }
 
-    /// 面板列表项点击事件（异步，fire-and-forget）。
+    /// 面板列表项点击事件（fire-and-forget，5s 超时）。
     pub fn on_panel_item_click(&self, item_id: &str) {
-        let _ = self.call_fn::<()>("onPanelItemClick", (item_id,));
+        let _ = self.call_slot_value(
+            TIMEOUT_CALLBACK,
+            "panel.onItemClick",
+            vec![serde_json::json!(item_id)],
+            None,
+        );
     }
 
-    // ---- speech/ASR 契约（同 Android LuaAsrPluginAdapter）----
+    // ---- speech/ASR 契约（同 Android JsAsrPluginAdapter，best-effort）----
 
-    /// 创建 ASR 后端；插件返回 true 表示就绪，false / nil 表示失败。
+    /// 准备 ASR 后端（调用 plugin.speech.configure）；缺失/失败返回 false。
     pub fn create_asr_backend(&self) -> bool {
-        self.call_fn::<bool>("createBackend", ()).unwrap_or(false)
+        self.call_slot_value(TIMEOUT_BUSINESS, "speech.configure", vec![], None)
+            .is_some()
     }
 
     /// 发送音频数据块（PCM 16bit mono）到 ASR 插件。
     pub fn feed_audio_data(&self, data: &[u8]) {
-        let _ = self.lua.to_value(data).map(|value| {
-            self.call_fn::<()>("feedAudioData", value);
-        });
+        let prep = "globalThis.__ximeArgs[0] = new Uint8Array(globalThis.__ximeArgs[0]);";
+        let _ = self.call_slot_value(
+            TIMEOUT_CALLBACK,
+            "speech.feed",
+            vec![serde_json::to_value(data).unwrap_or_default()],
+            Some(prep),
+        );
     }
 
     /// 停止 ASR 识别。
     pub fn stop_asr(&self) {
-        let _ = self.call_fn::<()>("stopRecognition", ());
+        let _ = self.call_slot_value(TIMEOUT_CALLBACK, "speech.stop", vec![], None);
     }
 
     // ---- candidate transform 契约（热路径，15ms 硬超时）----
 
-    /// 候选词转换（热路径）：宿主传入候选词列表，插件返回转换后的列表。
-    /// 超时 15ms，连续 3 次失败后熔断（不再调用）。
+    /// 候选词转换（热路径）：构造 Android 契约请求
+    /// `{inputText, preedit, asciiMode, candidates}`，插件返回
+    /// `{candidates: [{engineIndex} | {text, comment?}]}` 或 null（不干预）。
+    /// 超时/缺失/报错一律原样返回输入。
     pub fn transform_candidates(
         &self,
+        input_text: &str,
+        preedit: &str,
+        ascii_mode: bool,
         candidates: &[CandidateTransformItem],
     ) -> Vec<CandidateTransformItem> {
-        let Ok(input_table) = self.lua.to_value(candidates) else {
+        let request = serde_json::json!({
+            "inputText": input_text,
+            "preedit": preedit,
+            "asciiMode": ascii_mode,
+            "candidates": candidates,
+        });
+        let Some(value) = self.call_slot_value(
+            TIMEOUT_TRANSFORM,
+            "transform.candidates",
+            vec![request],
+            None,
+        ) else {
             return candidates.to_vec();
         };
-        match self.call_fn::<Vec<Table>>("transformCandidates", input_table) {
-            Some(raw) => raw
-                .into_iter()
-                .filter_map(|t| {
-                    let text: String = t.get("text").unwrap_or_default();
-                    if text.is_empty() {
-                        return None;
-                    }
-                    let id: Option<String> = t.get("id").ok().flatten();
-                    let insert_text: Option<String> = t.get("insertText").ok().flatten();
-                    let image_url: Option<String> = t.get("imageUrl").ok().flatten();
-                    Some(CandidateTransformItem {
-                        id,
-                        text,
-                        insert_text,
-                        image_url,
-                    })
-                })
-                .collect(),
-            None => candidates.to_vec(),
+        let Ok(response) =
+            from_js::<serde_json::Value>(unsafe { self.context.context_raw() }, &value)
+        else {
+            return candidates.to_vec();
+        };
+        let Some(items) = response.get("candidates").and_then(|v| v.as_array()) else {
+            return candidates.to_vec();
+        };
+        let mut out = candidates.to_vec();
+        for (i, item) in items.iter().enumerate().take(out.len()) {
+            if let Some(idx) = item.get("engineIndex").and_then(|v| v.as_u64()) {
+                if (idx as usize) < candidates.len() {
+                    out[i] = candidates[idx as usize].clone();
+                }
+                continue;
+            }
+            if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                if text.is_empty() {
+                    continue;
+                }
+                out[i] = CandidateTransformItem {
+                    id: item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                        .or_else(|| candidates[i].id.clone()),
+                    text: text.to_string(),
+                    insert_text: item
+                        .get("insertText")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    image_url: item
+                        .get("imageUrl")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                };
+            }
         }
+        out
     }
 
     // ---- event 契约（事件分发）----
 
-    /// 向插件发送事件（异步，fire-and-forget）。
-    /// 事件类型需在 manifest.capabilities.events 中声明。
+    /// 向插件发送下行事件（fire-and-forget，5s 超时）。
+    /// 事件类型需在 manifest.capabilities.events 中声明；slot 命名
+    /// snake_case → onPascalCase（同 Android `eventSlotName`）：
+    /// text_committed → plugin.events.onTextCommitted(payload)。
     pub fn send_event(&self, event_type: &str, data: &serde_json::Value) {
-        let Ok(data_value) = self.lua.to_value(data) else {
-            return;
-        };
-        let _ = self.call_fn::<()>("onPluginEvent", (event_type, data_value));
+        let path = format!("events.{}", event_slot_name(event_type));
+        let _ = self.call_slot_value(TIMEOUT_CALLBACK, &path, vec![data.clone()], None);
+    }
+
+    // ---- 私有辅助 ----
+
+    /// 经 bootstrap `__ximeToBytes` 把 Uint8Array/Array/字符串统一转字节数组。
+    fn value_to_bytes(&self, value: OwnedJsValue) -> Option<Vec<u8>> {
+        let global = self.context.global().ok()?;
+        let converter = global
+            .property("__ximeToBytes")
+            .ok()?
+            .filter(|v| v.is_function())?;
+        let converted = converter.try_into_function().ok()?.call(vec![value]).ok()?;
+        from_js(unsafe { self.context.context_raw() }, &converted).ok()
     }
 }
 
-/// 受限 require：只能加载 `libs/<name>.lua`，禁止路径穿越。
-fn setup_require(lua: &Lua, libs_dir: &Path) -> mlua::Result<()> {
-    lua.set_named_registry_value("__xime_plugin_cache", lua.create_table()?)?;
-    let libs_dir = libs_dir.to_path_buf();
-
-    let require = lua.create_function(move |lua, name: String| -> LuaResult<Value> {
-        if name.contains('/') || name.contains('\\') || name.contains("..") {
-            return Err(mlua::Error::RuntimeError(format!(
-                "require 非法模块名: {name}"
-            )));
-        }
-        let cache: Table = lua.named_registry_value("__xime_plugin_cache")?;
-        let cached: Value = cache.get(name.clone())?;
-        if !cached.is_nil() {
-            return Ok(cached);
-        }
-        let path = libs_dir.join(format!("{name}.lua"));
-        let src = std::fs::read(&path).map_err(|_| {
-            mlua::Error::RuntimeError(format!("module '{name}' not found in libs/"))
-        })?;
-        let result = lua.load(src).set_name(format!("@{name}")).eval::<Value>()?;
-        let module = if result.is_nil() {
-            Value::Boolean(true)
-        } else {
-            result
-        };
-        cache.set(name, module.clone())?;
-        Ok(module)
-    })?;
-    lua.globals().set("require", require)
+/// 入口路径安全检查：禁空、绝对路径、反斜杠与 `..` 穿越。
+fn entry_is_safe(entry: &str) -> bool {
+    !entry.is_empty()
+        && !entry.contains('\\')
+        && !entry.starts_with('/')
+        && Path::new(entry)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
-/// 构造注入的 host 白名单 API 表。
-fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::Result<Table> {
-    let host = lua.create_table()?;
-    host.set("sdkVersion", SDK_VERSION)?;
+/// 事件类型 → slot 名（同 Android `JsPluginContract.eventSlotName`）。
+fn event_slot_name(event_type: &str) -> String {
+    let mut out = String::from("on");
+    for segment in event_type.split('_') {
+        let mut chars = segment.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
+}
 
-    let plugin_id = plugin_dir
+/// 注册全部 `__ximeNative_*` 原生回调（bootstrap 装配前的裸 API）。
+fn install_native_api(
+    context: &Context,
+    plugin_dir: &Path,
+    config_file: &Path,
+) -> Result<(), RuntimeError> {
+    let ptr = unsafe { context.context_raw() };
+    let config_file = config_file.to_path_buf();
+    let resources_dir = plugin_dir.join("resources");
+    let plugin_dir = plugin_dir.to_path_buf();
+
+    context.add_callback("__ximeNative_sdkVersion", || SDK_VERSION.to_string())?;
+
+    let log_id = plugin_dir
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
+        .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-
-    let log_id = plugin_id.clone();
-    let log = lua.create_function(move |_, message: String| {
-        tracing::debug!("[{log_id}] {message}");
-        Ok(())
+    let err_id = log_id.clone();
+    context.add_callback("__ximeNative_log", move |args: Arguments| {
+        tracing::debug!("[{log_id}] {}", join_args(args));
     })?;
-    host.set("log", log)?;
-
-    let log_error = lua.create_function(move |_, message: String| {
-        tracing::error!("[{plugin_id}] {message}");
-        Ok(())
+    context.add_callback("__ximeNative_logError", move |args: Arguments| {
+        tracing::error!("[{err_id}] {}", join_args(args));
     })?;
-    host.set("logError", log_error)?;
+    context.add_callback("__ximeNative_uuid", uuid_string)?;
 
     // ---- config（持久化到 <root>/config/<id>.yaml）----
-    let config_file = config_file.to_path_buf();
-    let config = lua.create_table()?;
-    let config_get_file = config_file.clone();
-    config.set(
-        "get",
-        lua.create_function(move |lua, key: String| -> LuaResult<Value> {
-            let config_file = &config_get_file;
-            let map = load_config(config_file).map_err(lua_err)?;
-            Ok(map
-                .get(&key)
-                .map(|v| Value::String(lua.create_string(v.as_bytes()).unwrap()))
-                .unwrap_or(Value::Nil))
-        })?,
+    let file = config_file.clone();
+    context.add_callback(
+        "__ximeNative_configGet",
+        move |key: String| -> Option<String> { load_config(&file).ok()?.remove(&key) },
     )?;
-    let config_set_file = config_file.clone();
-    config.set(
-        "set",
-        lua.create_function(move |_, (key, value): (String, String)| -> LuaResult<()> {
-            let config_file = &config_set_file;
-            let mut map = load_config(config_file).map_err(lua_err)?;
+    let file = config_file.clone();
+    context.add_callback(
+        "__ximeNative_configSet",
+        move |key: String, value: String| -> Result<bool, String> {
+            let mut map = load_config(&file).map_err(|e| e.to_string())?;
             map.insert(key, value);
-            save_config(config_file, &map).map_err(lua_err)?;
-            Ok(())
-        })?,
+            save_config(&file, &map).map_err(|e| e.to_string())?;
+            Ok(true)
+        },
     )?;
-    let config_remove_file = config_file.clone();
-    config.set(
-        "remove",
-        lua.create_function(move |_, key: String| -> LuaResult<()> {
-            let config_file = &config_remove_file;
-            let mut map = load_config(config_file).map_err(lua_err)?;
+    let file = config_file.clone();
+    context.add_callback(
+        "__ximeNative_configRemove",
+        move |key: String| -> Result<bool, String> {
+            let mut map = load_config(&file).map_err(|e| e.to_string())?;
             map.remove(&key);
-            save_config(config_file, &map).map_err(lua_err)?;
-            Ok(())
-        })?,
+            save_config(&file, &map).map_err(|e| e.to_string())?;
+            Ok(true)
+        },
     )?;
-    let config_keys_file = config_file.clone();
-    config.set(
-        "keys",
-        lua.create_function(move |_, ()| -> LuaResult<Vec<String>> {
-            let config_file = &config_keys_file;
-            Ok(load_config(config_file)
-                .map_err(lua_err)?
-                .into_keys()
-                .collect())
-        })?,
-    )?;
-    host.set("config", config)?;
+    let file = config_file;
+    context.add_callback("__ximeNative_configKeys", move || -> Vec<String> {
+        load_config(&file)
+            .map(|m| m.into_keys().collect())
+            .unwrap_or_default()
+    })?;
 
     // ---- resource（只给路径，插件不读内容）----
-    let resources_dir = plugin_dir.join("resources");
-    let resource = lua.create_table()?;
-    let resources_path_dir = resources_dir.clone();
-    resource.set(
-        "path",
-        lua.create_function(move |lua, name: String| -> LuaResult<Value> {
-            let path = resources_path_dir.join(&name);
-            Ok(if path.is_file() {
-                Value::String(lua.create_string(path.to_string_lossy().as_bytes())?)
-            } else {
-                Value::Nil
-            })
-        })?,
+    let dir = resources_dir.clone();
+    context.add_callback(
+        "__ximeNative_resourcePath",
+        move |name: String| -> Option<String> {
+            if name.split(['/', '\\']).any(|seg| seg == "..") {
+                return None;
+            }
+            let path = dir.join(name);
+            path.is_file().then(|| path.to_string_lossy().to_string())
+        },
     )?;
-    let resources_list_dir = plugin_dir.join("resources");
-    resource.set(
-        "list",
-        lua.create_function(move |_, dir: String| -> LuaResult<Vec<String>> {
-            let dir = resources_list_dir.join(&dir);
-            let mut names: Vec<String> = std::fs::read_dir(&dir)
+    let dir = resources_dir;
+    context.add_callback(
+        "__ximeNative_resourceList",
+        move |sub: String| -> Vec<String> {
+            let target = dir.join(sub);
+            let mut names: Vec<String> = std::fs::read_dir(&target)
                 .map(|entries| {
                     entries
                         .flatten()
@@ -631,244 +1088,167 @@ fn build_host_table(lua: &Lua, plugin_dir: &Path, config_file: &Path) -> mlua::R
                 })
                 .unwrap_or_default();
             names.sort();
-            Ok(names)
-        })?,
+            names
+        },
     )?;
-    host.set("resource", resource)?;
-
-    // ---- json ----
-    let json = lua.create_table()?;
-    json.set(
-        "encode",
-        lua.create_function(|lua, arg: Value| -> LuaResult<Value> {
-            let value: serde_json::Value = match lua.from_value(arg) {
-                Ok(v) => v,
-                Err(_) => return Ok(Value::Nil),
-            };
-            match serde_json::to_string(&value) {
-                Ok(s) => Ok(Value::String(lua.create_string(&s)?)),
-                Err(_) => Ok(Value::Nil),
-            }
-        })?,
-    )?;
-    json.set(
-        "decode",
-        lua.create_function(|lua, s: String| -> LuaResult<Value> {
-            match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(v) => Ok(lua.to_value(&v)?),
-                Err(_) => Ok(Value::Nil),
-            }
-        })?,
-    )?;
-    host.set("json", json)?;
-
-    // ---- uuid ----
-    host.set("uuid", lua.create_function(|_, ()| Ok(uuid_string()))?)?;
 
     // ---- bin（大端整数原语）----
-    let bin = lua.create_table()?;
-    let int32be = lua.create_function(|lua, n: i64| {
-        let bytes = [
+    context.add_callback("__ximeNative_binInt32be", |n: i32| -> Vec<u8> {
+        vec![
             ((n >> 24) & 0xFF) as u8,
             ((n >> 16) & 0xFF) as u8,
             ((n >> 8) & 0xFF) as u8,
             (n & 0xFF) as u8,
-        ];
-        lua.create_string(bytes)
+        ]
     })?;
-    bin.set("int32be", int32be.clone())?;
-    bin.set("uint32be", int32be)?;
-    host.set("bin", bin)?;
 
-    // ---- zlib（gzip/gunzip）----
-    let zlib = lua.create_table()?;
-    zlib.set(
-        "gzip",
-        lua.create_function(|lua, data: Vec<u8>| -> LuaResult<Value> {
+    // ---- zlib（gzip/gunzip；入参为 JS 侧转好的字节数组）----
+    context.add_callback(
+        "__ximeNative_zlibGzip",
+        move |args: Arguments| -> Option<Vec<u8>> {
+            let data = args_bytes(args, ptr)?;
             let mut encoder =
                 flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            encoder.write_all(&data).ok();
-            match encoder.finish() {
-                Ok(bytes) => Ok(Value::String(lua.create_string(bytes)?)),
-                Err(_) => Ok(Value::Nil),
-            }
-        })?,
+            encoder.write_all(&data).ok()?;
+            encoder.finish().ok()
+        },
     )?;
-    zlib.set(
-        "gunzip",
-        lua.create_function(|lua, data: Vec<u8>| -> LuaResult<Value> {
+    context.add_callback(
+        "__ximeNative_zlibGunzip",
+        move |args: Arguments| -> Option<Vec<u8>> {
+            let data = args_bytes(args, ptr)?;
             use std::io::Read;
             let mut decoder = flate2::read::GzDecoder::new(&data[..]);
             let mut out = Vec::new();
-            match decoder.read_to_end(&mut out) {
-                Ok(_) => Ok(Value::String(lua.create_string(&out)?)),
-                Err(_) => Ok(Value::Nil),
+            decoder.read_to_end(&mut out).ok()?;
+            Some(out)
+        },
+    )?;
+
+    // ---- crypto（契约同 Android CryptoHostApi；协议插件签名用）----
+    context.add_callback(
+        "__ximeNative_cryptoSha256",
+        move |args: Arguments| -> Vec<u8> {
+            args_bytes(args, ptr)
+                .map(|data| Sha256::digest(&data).to_vec())
+                .unwrap_or_default()
+        },
+    )?;
+    context.add_callback(
+        "__ximeNative_cryptoHmacSha256",
+        move |args: Arguments| -> Option<Vec<u8>> {
+            let (key, data) = args_two_bytes(args, ptr)?;
+            let mut mac = Hmac::<Sha256>::new_from_slice(&key).ok()?;
+            mac.update(&data);
+            Some(mac.finalize().into_bytes().to_vec())
+        },
+    )?;
+    context.add_callback(
+        "__ximeNative_cryptoHmacSha1",
+        move |args: Arguments| -> Option<Vec<u8>> {
+            let (key, data) = args_two_bytes(args, ptr)?;
+            let mut mac = Hmac::<Sha1>::new_from_slice(&key).ok()?;
+            mac.update(&data);
+            Some(mac.finalize().into_bytes().to_vec())
+        },
+    )?;
+    context.add_callback("__ximeNative_cryptoHex", move |args: Arguments| -> String {
+        args_bytes(args, ptr).map(hex::encode).unwrap_or_default()
+    })?;
+    context.add_callback(
+        "__ximeNative_cryptoBase64",
+        move |args: Arguments| -> String {
+            args_bytes(args, ptr)
+                .map(|data| base64::engine::general_purpose::STANDARD.encode(data))
+                .unwrap_or_default()
+        },
+    )?;
+    context.add_callback("__ximeNative_cryptoUtcTime", |format: String| -> String {
+        format_utc_time(&format)
+    })?;
+    context.add_callback("__ximeNative_cryptoEpochSeconds", || -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+    })?;
+
+    // ---- http（同步白名单请求；失败返回 null，bootstrap 包装成 XimeError）----
+    context.add_callback(
+        "__ximeNative_httpRequest",
+        move |args: Arguments| -> Result<OwnedJsValue, String> {
+            let response = http_request_impl(args, ptr)?;
+            to_js(ptr, &response).map_err(|e| e.to_string())
+        },
+    )?;
+
+    // ---- require 路径解析/读取（仅插件包内 .js，≤2MB）----
+    let base = plugin_dir.clone();
+    context.add_callback(
+        "__ximeNative_resolveModule",
+        move |spec: String| -> Option<String> {
+            resolve_module(&base, &spec).map(|p| p.to_string_lossy().to_string())
+        },
+    )?;
+    let base = plugin_dir;
+    context.add_callback(
+        "__ximeNative_readModule",
+        move |path: String| -> Option<String> {
+            let path = PathBuf::from(&path);
+            if !path.is_file() || !starts_with_dir(&path, &base) {
+                return None;
             }
-        })?,
-    )?;
-    host.set("zlib", zlib)?;
-
-    // ---- crypto（契约同 Android CryptoHostApi；clipboard_sync 协议插件签名用）----
-    let crypto = lua.create_table()?;
-    crypto.set(
-        "sha256",
-        lua.create_function(|lua, data: mlua::LuaString| -> LuaResult<Value> {
-            let digest = Sha256::digest(data.as_bytes());
-            Ok(Value::String(lua.create_string(digest.as_slice())?))
-        })?,
-    )?;
-    crypto.set(
-        "hmacSha256",
-        lua.create_function(
-            |lua, (key, data): (mlua::LuaString, mlua::LuaString)| -> LuaResult<Value> {
-                let mut mac = Hmac::<Sha256>::new_from_slice(&key.as_bytes())
-                    .map_err(|_| mlua::Error::RuntimeError("invalid hmac key".into()))?;
-                mac.update(&data.as_bytes());
-                let out = mac.finalize().into_bytes();
-                Ok(Value::String(lua.create_string(out.as_slice())?))
-            },
-        )?,
-    )?;
-    crypto.set(
-        "hex",
-        lua.create_function(|_, data: mlua::LuaString| -> LuaResult<String> {
-            Ok(hex::encode(data.as_bytes()))
-        })?,
-    )?;
-    crypto.set(
-        "base64",
-        lua.create_function(|_, data: mlua::LuaString| -> LuaResult<String> {
-            Ok(base64::engine::general_purpose::STANDARD.encode(data.as_bytes()))
-        })?,
-    )?;
-    crypto.set(
-        "utcTime",
-        lua.create_function(|_, format: String| -> LuaResult<String> {
-            Ok(format_utc_time(&format))
-        })?,
-    )?;
-    host.set("crypto", crypto)?;
-
-    // ---- quickSend（只读 API，需 capabilities.quick_send_read = true）----
-    // 注：实际注入由宿主根据 capabilities 决定，这里提供占位
-    let quick_send = lua.create_table()?;
-    quick_send.set(
-        "send",
-        lua.create_function(|_, _text: String| -> LuaResult<bool> {
-            // 占位：宿主实际实现时替换
-            Ok(false)
-        })?,
-    )?;
-    host.set("quickSend", quick_send)?;
-
-    // ---- clipboard（只读 API，需 capabilities.clipboard_read = true）----
-    // 注：实际注入由宿主根据 capabilities 决定，这里提供占位
-    let clipboard = lua.create_table()?;
-    clipboard.set(
-        "getText",
-        lua.create_function(|_lua, ()| -> LuaResult<Value> {
-            // 占位：宿主实际实现时替换
-            Ok(Value::Nil)
-        })?,
-    )?;
-    clipboard.set(
-        "setText",
-        lua.create_function(|_, _text: String| -> LuaResult<()> {
-            // 占位：宿主实际实现时替换
-            Ok(())
-        })?,
-    )?;
-    host.set("clipboard", clipboard)?;
-
-    // ---- http（同步白名单请求，20s 超时）----
-    let http = lua.create_table()?;
-    http.set(
-        "request",
-        lua.create_function(|lua, args: MultiValue| -> LuaResult<Value> {
-            let arg_string = |i: usize| -> Option<String> {
-                args.get(i)
-                    .filter(|v| !v.is_nil())
-                    .and_then(|v| v.to_string().ok())
-            };
-
-            let method = arg_string(0).unwrap_or_else(|| "GET".to_string());
-            let url = arg_string(1).unwrap_or_default();
-
-            let body: Vec<u8> = match args.get(3) {
-                Some(Value::String(s)) => s.as_bytes().to_vec(),
-                Some(v) if !v.is_nil() => v.to_string().unwrap_or_default().into_bytes(),
-                _ => Vec::new(),
-            };
-
-            let method_parsed = match method.to_uppercase().parse::<ureq::http::Method>() {
-                Ok(m) => m,
-                Err(_) => {
-                    return Ok(Value::Nil);
-                }
-            };
-            let mut builder = ureq::http::Request::builder()
-                .method(method_parsed)
-                .uri(&url);
-            if let Some(Value::Table(t)) = args.get(2) {
-                for pair in t.clone().pairs::<Value, Value>() {
-                    let Ok((k, v)) = pair else { continue };
-                    let Ok(key) = k.to_string()?.parse::<ureq::http::HeaderName>() else {
-                        continue;
-                    };
-                    let Ok(value) = v.to_string()?.parse::<ureq::http::HeaderValue>() else {
-                        continue;
-                    };
-                    builder = builder.header(key, value);
-                }
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if size > MODULE_MAX_BYTES {
+                return None;
             }
-            let request = builder
-                .body(body)
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-
-            let agent = ureq::Agent::config_builder()
-                .timeout_global(Some(std::time::Duration::from_secs(20)))
-                .build()
-                .new_agent();
-
-            let response = match agent.run(request) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::debug!("[plugin http] {} {}: {}", method, url, e);
-                    return Ok(Value::Nil);
-                }
-            };
-
-            let status = response.status().as_u16();
-            let response_headers = response
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        v.to_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            let body_bytes = response.into_body().read_to_vec().unwrap_or_default();
-            let text = String::from_utf8_lossy(&body_bytes).into_owned();
-
-            let out = lua.create_table()?;
-            out.set("status", status)?;
-            let header_table = lua.create_table()?;
-            for (k, v) in response_headers {
-                header_table.set(k, v)?;
-            }
-            out.set("headers", header_table)?;
-            out.set("body", lua.create_string(&body_bytes)?)?;
-            out.set("text", text)?;
-            Ok(Value::Table(out))
-        })?,
+            std::fs::read_to_string(&path).ok()
+        },
     )?;
-    http.set("lastError", lua.create_function(|_, ()| Ok(Value::Nil))?)?;
-    host.set("http", http)?;
 
-    Ok(host)
+    // ---- polyfill 后端（utf8/base64 原语）----
+    context.add_callback("__ximeNative_utf8Encode", |s: String| -> Vec<u8> {
+        s.into_bytes()
+    })?;
+    context.add_callback(
+        "__ximeNative_utf8Decode",
+        move |args: Arguments| -> Option<String> { String::from_utf8(args_bytes(args, ptr)?).ok() },
+    )?;
+    context.add_callback(
+        "__ximeNative_base64Decode",
+        |s: String| -> Option<Vec<u8>> {
+            base64::engine::general_purpose::STANDARD
+                .decode(s.as_bytes())
+                .ok()
+        },
+    )?;
+    context.add_callback("__ximeNative_base64Encode", |s: String| -> String {
+        base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
+    })?;
+
+    Ok(())
+}
+
+fn join_args(args: Arguments) -> String {
+    args.into_vec()
+        .iter()
+        .map(|v| v.js_to_string().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Arguments 首参 → 字节数组（bootstrap 已把 Uint8Array/字符串转为数组）。
+fn args_bytes(args: Arguments, ptr: *mut q::JSContext) -> Option<Vec<u8>> {
+    let first = args.into_vec().into_iter().next()?;
+    from_js(ptr, &first).ok()
+}
+
+/// Arguments 前两参 → 两个字节数组（hmac key/data）。
+fn args_two_bytes(args: Arguments, ptr: *mut q::JSContext) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut iter = args.into_vec().into_iter();
+    let key = from_js(ptr, &iter.next()?).ok()?;
+    let data = from_js(ptr, &iter.next()?).ok()?;
+    Some((key, data))
 }
 
 /// 当前 UTC 时间按 SigV4 占位符格式化（同 Android CryptoHostApi）：
@@ -946,111 +1326,373 @@ fn save_config(path: &Path, map: &HashMap<String, String>) -> Result<(), Runtime
     std::fs::write(path, yaml).map_err(|e| RuntimeError::Config(format!("写入失败: {e}")))
 }
 
-/// RuntimeError → mlua 错误（host 闭包内统一转换）。
-fn lua_err(e: RuntimeError) -> mlua::Error {
-    mlua::Error::RuntimeError(e.to_string())
+/// host.http.request 实现（ureq 同步请求；超时参数毫秒，默认/上限见内常量）。
+/// 返回 `{status, headers, body: number[], text}`；传输失败返回 Null（bootstrap
+/// 包装层转 XimeError），参数非法返回 Err（直接抛 JS 异常）。
+fn http_request_impl(args: Arguments, ptr: *mut q::JSContext) -> Result<serde_json::Value, String> {
+    let argv = args.into_vec();
+    let get = |i: usize| -> Option<&OwnedJsValue> {
+        argv.get(i).filter(|v| !v.is_undefined() && !v.is_null())
+    };
+
+    let method = get(0)
+        .map(|v| v.js_to_string().unwrap_or_default())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "GET".to_string());
+    let url = get(1)
+        .map(|v| v.js_to_string().unwrap_or_default())
+        .unwrap_or_default();
+    if url.is_empty() {
+        return Err("http.request: url 不能为空".to_string());
+    }
+
+    let mut builder = ureq::http::Request::builder()
+        .method(method.to_uppercase().as_str())
+        .uri(&url);
+    if let Some(headers) = get(2).filter(|v| v.is_object()) {
+        let obj = headers
+            .clone()
+            .try_into_object()
+            .map_err(|e| e.to_string())?;
+        let entries: Vec<_> = obj
+            .properties_iter()
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        for pair in entries.chunks(2) {
+            if pair.len() != 2 {
+                continue;
+            }
+            let key_str = pair[0].js_to_string().map_err(|e| e.to_string())?;
+            let value_str = pair[1].js_to_string().map_err(|e| e.to_string())?;
+            let Ok(key) = key_str.parse::<ureq::http::HeaderName>() else {
+                continue;
+            };
+            let Ok(value) = value_str.parse::<ureq::http::HeaderValue>() else {
+                continue;
+            };
+            builder = builder.header(key, value);
+        }
+    }
+
+    let mut body: Vec<u8> = Vec::new();
+    if let Some(v) = get(3) {
+        if v.is_string() {
+            body = from_js::<String>(ptr, v)
+                .map_err(|e| e.to_string())?
+                .into_bytes();
+        } else if v.is_array() {
+            body = from_js::<Vec<u8>>(ptr, v).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let timeout_ms = get(4)
+        .and_then(|v| v.to_float().ok())
+        .unwrap_or(20_000.0)
+        .clamp(1.0, 120_000.0) as u64;
+
+    let request = builder.body(body).map_err(|e| e.to_string())?;
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_millis(timeout_ms)))
+        .build()
+        .new_agent();
+
+    let response = match agent.run(request) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("[plugin http] {method} {url}: {e}");
+            return Ok(serde_json::Value::Null);
+        }
+    };
+
+    let status = response.status().as_u16();
+    let mut header_map = serde_json::Map::new();
+    for (k, v) in response.headers() {
+        header_map.insert(
+            k.as_str().to_string(),
+            serde_json::Value::String(v.to_str().unwrap_or_default().to_string()),
+        );
+    }
+    let body_bytes = response.into_body().read_to_vec().unwrap_or_default();
+    let text = String::from_utf8_lossy(&body_bytes).into_owned();
+
+    Ok(serde_json::json!({
+        "status": status,
+        "headers": header_map,
+        "body": body_bytes,
+        "text": text,
+    }))
+}
+
+/// require 模块解析：仅插件包内相对路径 `.js`。候选：`<spec>.js` /
+/// `<spec>/index.js`；裸模块名（无路径分隔符）兼容旧约定回退 `libs/<spec>.js`。
+/// 拒绝绝对路径与 `..` 穿越；canonicalize 复核确保落点在插件目录内（含
+/// 符号链接场景）。
+fn resolve_module(plugin_dir: &Path, spec: &str) -> Option<PathBuf> {
+    if spec.is_empty() || spec.contains('\\') {
+        return None;
+    }
+    let rel = spec.strip_prefix("./").unwrap_or(spec);
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute()
+        || rel_path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let base = plugin_dir.join(rel_path);
+    let mut candidates = Vec::new();
+    if base.extension().map(|e| e == "js").unwrap_or(false) {
+        candidates.push(base);
+    } else {
+        let mut with_js = base.clone().into_os_string();
+        with_js.push(".js");
+        candidates.push(PathBuf::from(with_js));
+        candidates.push(base.join("index.js"));
+        if !rel.contains('/') {
+            let libs = plugin_dir.join("libs");
+            let mut with_js = libs.join(rel_path).into_os_string();
+            with_js.push(".js");
+            candidates.push(PathBuf::from(with_js));
+            candidates.push(libs.join(rel_path).join("index.js"));
+        }
+    }
+    let canonical_base = plugin_dir.canonicalize().ok()?;
+    for candidate in candidates {
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if !starts_with_dir(&canonical, &canonical_base) {
+            continue;
+        }
+        let size = std::fs::metadata(&candidate).map(|m| m.len()).unwrap_or(0);
+        if candidate.is_file() && size <= MODULE_MAX_BYTES {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// 路径前缀检查（目录边界，按组件比较）。
+fn starts_with_dir(path: &Path, base: &Path) -> bool {
+    path.strip_prefix(base).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    /// 用真实 kaomoji 插件包（Xime 仓库构建产物）做端到端验证。
-    const KAOMOJI_XIPK: &str =
-        "/home/kkch/vscode/Xime/app/build/intermediates/assets/debug/mergeDebugAssets/plugins/kaomoji-2.1.0.xipk";
-
-    fn extract_kaomoji(label: &str) -> PathBuf {
+    fn temp_dir(label: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("xime_plugin_rt_{}_{}", std::process::id(), label));
+            std::env::temp_dir().join(format!("xime_plugin_js_{label}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
-        if std::path::Path::new(KAOMOJI_XIPK).exists() {
-            let file = std::fs::File::open(KAOMOJI_XIPK).unwrap();
-            let mut archive = zip::ZipArchive::new(file).unwrap();
-            for i in 0..archive.len() {
-                let mut entry = archive.by_index(i).unwrap();
-                let path = entry.enclosed_name().unwrap().to_path_buf();
-                if path.components().count() > 2 {
-                    continue;
-                }
-                let dest = dir.join(&path);
-                if entry.is_dir() {
-                    std::fs::create_dir_all(&dest).unwrap();
-                } else {
-                    if let Some(parent) = dest.parent() {
-                        std::fs::create_dir_all(parent).unwrap();
-                    }
-                    let mut out = std::fs::File::create(&dest).unwrap();
-                    std::io::copy(&mut entry, &mut out).unwrap();
-                }
-            }
-        } else {
-            // 无法访问真实插件包时，写一个同契约的最小实现
-            std::fs::write(
-                dir.join("manifest.yaml"),
-                "id: com.example.kaomoji\nname: Kaomoji\nversion: 1.0.0\ntype: emoji\n",
-            )
-            .unwrap();
-            std::fs::write(
-                dir.join("main.lua"),
-                r#"
-local kaomojis = { "(ﾟ∀ﾟ)", "(^u^)", "ಥ_ಥ", "(・ω・)" }
-local plugin = {}
-function plugin.getCategories() return { "颜文字" } end
-function plugin.getEmojis(category, searchText, topK)
-    local list = {}
-    for i, k in ipairs(kaomojis) do
-        if searchText == "" or string.find(k, searchText, 1, true) then
-            table.insert(list, { id = "k" .. i, text = k, category = "颜文字" })
-        end
-        if #list >= topK then break end
-    end
-    return list
-end
-function plugin.getCategoryLayoutConfig(category)
-    return { columns = 3, itemHeightDp = 30 }
-end
-return plugin
-"#,
-            )
-            .unwrap();
+    /// kaomoji 契约插件（Android `plugins/kaomoji` 的最小 JS 形态）。
+    fn extract_kaomoji(label: &str) -> PathBuf {
+        let dir = temp_dir(label);
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.kaomoji\nname: Kaomoji\nversion: 2.1.0\ntype: emoji\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  var kaomojis = ["(ﾟ∀ﾟ)", "(^u^)", "ಥ_ಥ", "(・ω・)"];
+  globalThis.plugin = {
+    emoji: {
+      listCategories: function () { return ["颜文字"]; },
+      query: function (q) {
+        var list = [];
+        for (var i = 0; i < kaomojis.length; i++) {
+          var k = kaomojis[i];
+          if (!q.keyword || k.indexOf(q.keyword) !== -1) {
+            list.push({ id: "k" + (i + 1), text: k });
+          }
+          if (list.length >= q.topK) break;
         }
+        return list;
+      },
+    },
+  };
+})();
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    /// clipboard_sync 契约插件（host.config 充当远端存储）。
+    fn extract_clipboard_sync_plugin(label: &str) -> PathBuf {
+        let dir = temp_dir(label);
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.clipboard_sync\nname: Test Sync\nversion: 1.0.0\ntype: clipboard_sync\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  globalThis.plugin = {
+    clipboardSync: {
+      push: function (profile) {
+        var list = host.config.getJson("remote") || [];
+        list.push(profile);
+        host.config.set("remote", JSON.stringify(list));
+        return true;
+      },
+      pull: function () {
+        var raw = host.config.get("remote");
+        if (raw == null) return null;
+        var list = JSON.parse(raw);
+        return list.length ? list[list.length - 1] : null;
+      },
+      test: function () { return null; },
+      remoteCount: function () {
+        var list = host.config.getJson("remote") || [];
+        return list.length;
+      },
+    },
+  };
+})();
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    /// backup + settings 契约插件（内存态存储；含一个应被跳过的 select 节点）。
+    fn extract_backup_plugin(label: &str) -> PathBuf {
+        let dir = temp_dir(label);
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: test.backup\nname: TestBackup\nversion: 1.0.0\ntype: backup\ncapabilities:\n  backup:\n    protocols:\n      - webdav\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  var store = {};
+  globalThis.plugin = {
+    backup: {
+      push: function (args) {
+        store[args.name] = args.archive;
+        return { ok: true, id: args.name };
+      },
+      list: function () {
+        var out = [];
+        for (var name in store) {
+          out.push({ id: name, name: name, createdAt: 1700000000, size: store[name].length });
+        }
+        return out;
+      },
+      pull: function (id) { return store[id] || null; },
+      remove: function (id) { delete store[id]; return true; },
+      test: function () { return null; },
+    },
+    settings: {
+      schema: function () {
+        return [
+          { type: "text", key: "url", label: "地址", required: true },
+          { type: "secret", key: "password", label: "密码" },
+          { type: "button", key: "test", label: "测试连接" },
+          { type: "select", key: "proto", options: ["webdav", "s3"] },
+        ];
+      },
+    },
+  };
+})();
+"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    /// tool 契约插件（panel/transform/events；内部状态供断言回读）。
+    fn extract_tool_plugin(label: &str) -> PathBuf {
+        let dir = temp_dir(label);
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.tool\nname: Test Tool\nversion: 1.0.0\ntype: tool\ncapabilities:\n  tool:\n    display: direct\n  candidate_transform: true\n  events:\n    - input_changed\n    - text_committed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  var state = { lastInput: null, lastAction: null, lastItemId: null, eventLog: [] };
+  globalThis.plugin = {
+    panel: {
+      state: function (inputText) {
+        state.lastInput = inputText;
+        return {
+          type: "panel",
+          title: "Test Tool",
+          items: [
+            { id: "item1", text: "Item 1" },
+            { id: "item2", text: "Item 2" },
+          ],
+        };
+      },
+      onInput: function (inputText) { state.lastInput = inputText; },
+      onAction: function (action) { state.lastAction = action; },
+      onItemClick: function (itemId) { state.lastItemId = itemId; },
+    },
+    transform: {
+      candidates: function (req) {
+        return {
+          candidates: req.candidates.map(function (c) {
+            return { id: c.id, text: c.text.toUpperCase(), insertText: c.insertText };
+          }),
+        };
+      },
+    },
+    events: {
+      onInputChanged: function (payload) {
+        state.eventLog.push({ type: "input_changed", data: payload });
+      },
+      onTextCommitted: function (payload) {
+        state.eventLog.push({ type: "text_committed", data: payload });
+      },
+    },
+    __state: state,
+  };
+})();
+"#,
+        )
+        .unwrap();
         dir
     }
 
     #[test]
     fn load_and_call_kaomoji_contract() {
         let dir = extract_kaomoji("main");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
 
         let categories = runtime.get_categories();
         assert_eq!(categories, vec!["颜文字".to_string()]);
 
-        let all = runtime.get_emojis("", "", 500);
-        let expected_total = if std::path::Path::new(KAOMOJI_XIPK).exists() {
-            174
-        } else {
-            4
-        };
-        assert_eq!(all.len(), expected_total);
+        let all = runtime.get_emojis("颜文字", "", 500);
+        assert_eq!(all.len(), 4);
         assert!(all
             .iter()
             .all(|e| !e.text.is_empty() && e.category == "颜文字"));
 
         // topK 限制
-        assert_eq!(runtime.get_emojis("", "", 3).len(), 3);
+        assert_eq!(runtime.get_emojis("颜文字", "", 3).len(), 3);
 
         // 搜索
-        let found = runtime.get_emojis("", "ﾟ", 500);
-        assert!(!found.is_empty());
+        let found = runtime.get_emojis("颜文字", "ﾟ", 500);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "(ﾟ∀ﾟ)");
 
-        // 布局
-        let layout = runtime.get_category_layout("颜文字").unwrap();
-        assert_eq!(layout.columns, Some(3));
-        assert_eq!(layout.item_height, Some(30));
-
+        // 生命周期钩子缺失时静默降级
         runtime.call_on_load();
         runtime.call_on_unload();
         drop(runtime);
@@ -1059,31 +1701,22 @@ return plugin
     }
 
     #[test]
-    fn sandbox_strips_dangerous_libs() {
+    fn sandbox_masks_dynamic_evaluation() {
         let dir = extract_kaomoji("sandbox");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
 
-        let io_absent: bool = runtime
-            .lua
-            .globals()
-            .get::<Option<Value>>("io")
-            .unwrap()
-            .is_none();
-        assert!(io_absent, "io 不应存在");
-        let os_absent: bool = runtime
-            .lua
-            .globals()
-            .get::<Option<Value>>("os")
-            .unwrap()
-            .is_none();
-        assert!(os_absent, "os 不应存在");
-        let loadfile_absent: bool = runtime
-            .lua
-            .globals()
-            .get::<Option<Value>>("loadfile")
-            .unwrap()
-            .is_none();
-        assert!(loadfile_absent, "loadfile 不应存在");
+        let eval_type: String = runtime.context.eval_as("typeof globalThis.eval").unwrap();
+        assert_eq!(eval_type, "undefined", "eval 不应存在");
+        let function_type: String = runtime
+            .context
+            .eval_as("typeof globalThis.Function")
+            .unwrap();
+        assert_eq!(function_type, "undefined", "Function 不应存在");
+        let host_ok: bool = runtime
+            .context
+            .eval_as("host.sdkVersion === '3.0.0'")
+            .unwrap();
+        assert!(host_ok, "host.sdkVersion 应为 3.0.0");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1092,34 +1725,49 @@ return plugin
     fn host_config_and_json_roundtrip() {
         let dir = extract_kaomoji("config");
         let config_file = dir.join("config.yaml");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &config_file).unwrap();
-        let lua = &runtime.lua;
+        let runtime = PluginRuntime::load(&dir, "main.js", &config_file).unwrap();
+        let ctx = &runtime.context;
 
-        lua.load(
+        ctx.eval(
             r#"
-            host.config.set("k1", "v1")
-            host.config.set("k2", "v2")
+            host.config.set("k1", "v1");
+            host.config.set("k2", "v2");
         "#,
+            false,
         )
-        .exec()
         .unwrap();
-        assert_eq!(
-            lua.load("return host.config.get('k1')")
-                .eval::<String>()
-                .unwrap(),
-            "v1"
-        );
-
-        // json roundtrip
-        lua.load(
-            r#"
-            local s = host.json.encode({ a = 1, b = { "x", "y" } })
-            assert(s == '{"a":1,"b":["x","y"]}')
-            local t = host.json.decode('{"ok":true}')
-            assert(t.ok == true)
-        "#,
+        let v1: String = ctx.eval_as("host.config.get('k1')").unwrap();
+        assert_eq!(v1, "v1");
+        // getJson 只解析 JSON 值（非 JSON 字符串按 Android 语义容错返回 null）
+        let json_sugar: bool = ctx.eval_as("(host.config.getJson('k2') === null)").unwrap();
+        assert!(json_sugar, "非 JSON 字符串应返回 null");
+        ctx.eval(
+            r#"host.config.set("cfg", JSON.stringify({ n: 1 }));"#,
+            false,
         )
-        .exec()
+        .unwrap();
+        let parsed: bool = ctx
+            .eval_as("(function(){ var c = host.config.getJson('cfg'); return c !== null && c.n === 1; })()")
+            .unwrap();
+        assert!(parsed, "JSON 值应被 getJson 解析");
+
+        // keys/remove
+        let keys: Vec<String> = ctx.eval_as("host.config.keys()").unwrap();
+        assert_eq!(keys.len(), 3, "k1/k2/cfg");
+        ctx.eval("host.config.remove('k2')", false).unwrap();
+        let gone: bool = ctx.eval_as("host.config.get('k2') === null").unwrap();
+        assert!(gone);
+
+        // 原生 JSON roundtrip（Lua 时代的 host.json 已被原生 JSON 取代）
+        ctx.eval(
+            r#"
+            var s = JSON.stringify({ a: 1, b: ["x", "y"] });
+            if (s !== '{"a":1,"b":["x","y"]}') throw new Error(s);
+            var t = JSON.parse('{"ok":true}');
+            if (t.ok !== true) throw new Error("parse");
+        "#,
+            false,
+        )
         .unwrap();
 
         // 配置落盘
@@ -1135,69 +1783,43 @@ return plugin
         let dir = extract_kaomoji("require");
         std::fs::create_dir_all(dir.join("libs")).unwrap();
         std::fs::write(
-            dir.join("libs/util.lua"),
-            "return { doubled = function(n) return n * 2 end }",
+            dir.join("libs/util.js"),
+            "module.exports = { doubled: function (n) { return n * 2; } };",
         )
         .unwrap();
 
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
-        let lua = &runtime.lua;
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+        let ctx = &runtime.context;
 
-        let doubled: i64 = lua
-            .load("local u = require('util'); return u.doubled(21)")
-            .eval()
+        let doubled: i32 = ctx
+            .eval_as("var u = require('util'); u.doubled(21)")
             .unwrap();
         assert_eq!(doubled, 42);
 
-        // 缓存
-        let again: i64 = lua
-            .load("local u = require('util'); return u.doubled(10)")
-            .eval()
-            .unwrap();
+        // 缓存：二次 require 命中同一模块
+        let again: i32 = ctx.eval_as("require('util').doubled(10)").unwrap();
         assert_eq!(again, 20);
 
         // 路径穿越被拒绝
-        let err: mlua::Result<String> = lua.load("return require('../etc/passwd')").eval();
-        assert!(err.is_err());
+        let escape = ctx.eval("require('../etc/passwd')", false);
+        assert!(escape.is_err());
 
         // 不存在的模块报错
-        let err: mlua::Result<String> = lua.load("return require('nope')").eval();
-        assert!(err.is_err());
+        let missing = ctx.eval("require('nope')", false);
+        assert!(missing.is_err());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn format_utc_time_matches_sigv4_shapes() {
-        // epoch 0 = 1970-01-01T00:00:00Z
-        assert_eq!(
-            format_utc_time_from_epoch(0, "YYYYMMDDTHHMMSSZ"),
-            "19700101T000000Z"
-        );
-        assert_eq!(format_utc_time_from_epoch(0, "YYYYMMDD"), "19700101");
-        // 已知日期：2023-08-11T12:00:00Z = 1691755200
-        assert_eq!(
-            format_utc_time_from_epoch(1_691_755_200, "YYYYMMDDTHHMMSSZ"),
-            "20230811T120000Z"
-        );
-        assert_eq!(
-            format_utc_time_from_epoch(1_691_755_200, "YYYYMMDD"),
-            "20230811"
-        );
-        // 未知占位符按字面输出
-        assert_eq!(format_utc_time_from_epoch(0, "T"), "T");
-    }
-
-    #[test]
-    fn host_crypto_roundtrip() {
+    fn host_crypto_and_binary_roundtrip() {
         let dir = extract_kaomoji("crypto");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
-        let lua = &runtime.lua;
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+        let ctx = &runtime.context;
 
-        // sha256("abc") 已知摘要
-        let sha: String = lua
-            .load("return host.crypto.hex(host.crypto.sha256('abc'))")
-            .eval()
+        // sha256("abc") 已知摘要（返回 Uint8Array → hex 接受）
+        let sha: String = ctx
+            .eval_as("host.crypto.hex(host.crypto.sha256('abc'))")
             .unwrap();
         assert_eq!(
             sha,
@@ -1205,80 +1827,66 @@ return plugin
         );
 
         // base64（Basic Auth 用）
-        let b64: String = lua
-            .load("return host.crypto.base64('user:pass')")
-            .eval()
-            .unwrap();
+        let b64: String = ctx.eval_as("host.crypto.base64('user:pass')").unwrap();
         assert_eq!(b64, "dXNlcjpwYXNz");
 
-        // hmacSha256（RFC 4231 测试向量 key="key" data="The quick brown fox jumps over the lazy dog"）
-        let hmac: String = lua
-            .load(
-                "return host.crypto.hex(host.crypto.hmacSha256('key', 'The quick brown fox jumps over the lazy dog'))",
+        // hmacSha256（RFC 4231 测试向量）
+        let hmac: String = ctx
+            .eval_as(
+                "host.crypto.hex(host.crypto.hmacSha256('key', 'The quick brown fox jumps over the lazy dog'))",
             )
-            .eval()
             .unwrap();
         assert_eq!(
             hmac,
             "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
         );
 
+        // hmacSha1（同输入的常用测试向量）
+        let hmac1: String = ctx
+            .eval_as(
+                "host.crypto.hex(host.crypto.hmacSha1('key', 'The quick brown fox jumps over the lazy dog'))",
+            )
+            .unwrap();
+        assert_eq!(hmac1, "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9");
+
         // utcTime 格式形状
-        let now: String = lua
-            .load("return host.crypto.utcTime('YYYYMMDDTHHMMSSZ')")
-            .eval()
+        let now: String = ctx
+            .eval_as("host.crypto.utcTime('YYYYMMDDTHHMMSSZ')")
             .unwrap();
         assert_eq!(now.len(), 16);
         assert!(now.ends_with('Z') && now.as_bytes()[8] == b'T');
+        let epoch: f64 = ctx.eval_as("host.crypto.epochSeconds()").unwrap();
+        assert!(epoch > 1_700_000_000.0);
+
+        // zlib/bin/utf8/base64 原语与 Uint8Array 桥
+        ctx.eval(
+            r#"
+            var src = [0, 1, 2, 255, 128, 0];
+            var gz = host.zlib.gzip(src);
+            if (!(gz instanceof Uint8Array)) throw new Error("gzip 应返回 Uint8Array");
+            var back = host.zlib.gunzip(gz);
+            if (back.length !== src.length) throw new Error("gzip roundtrip 长度");
+            for (var i = 0; i < src.length; i++) {
+              if (back[i] !== src[i]) throw new Error("gzip roundtrip 内容 @" + i);
+            }
+            var be = host.bin.uint32be(1);
+            if (be[3] !== 1 || be[2] !== 0) throw new Error("bin.uint32be");
+            var enc = new TextEncoder().encode("héllo");
+            if (enc.length !== 6) throw new Error("utf8 encode");
+            if (new TextDecoder().decode(enc) !== "héllo") throw new Error("utf8 decode");
+            if (atob(btoa("Hi!")) !== "Hi!") throw new Error("atob/btoa");
+        "#,
+            false,
+        )
+        .unwrap();
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn extract_clipboard_sync_plugin(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "xime_plugin_clipboard_{}_{}",
-            std::process::id(),
-            label
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("manifest.yaml"),
-            "id: com.example.clipboard_sync\n\
-             name: Test Sync\n\
-             version: 1.0.0\n\
-             type: clipboard_sync\n\
-             activation: single\n",
-        )
-        .unwrap();
-        // 用 host.config 充当远端存储，验证 push/pull/testConnection 契约桥接
-        std::fs::write(
-            dir.join("main.lua"),
-            r#"
-local plugin = {}
-function plugin.push(profile)
-    host.config.set("remote", host.json.encode(profile))
-    return true
-end
-function plugin.pull()
-    local raw = host.config.get("remote")
-    if raw == nil then return nil end
-    return host.json.decode(raw)
-end
-function plugin.testConnection()
-    return nil
-end
-return plugin
-"#,
-        )
-        .unwrap();
-        dir
     }
 
     #[test]
     fn clipboard_sync_contract_roundtrip() {
         let dir = extract_clipboard_sync_plugin("roundtrip");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
         let profile = serde_json::json!({
             "type": "text",
             "hash": "abc",
@@ -1293,20 +1901,23 @@ return plugin
         assert_eq!(pulled["text"], "你好");
         assert_eq!(pulled["hash"], "abc");
         assert_eq!(pulled["source"], "dev-a");
-        // testConnection 返回 nil → None（成功）
+        // test 返回 null → None（成功）
         assert!(runtime.test_connection().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
+    fn clipboard_sync_contract_empty_pull_is_none() {
+        let dir = extract_clipboard_sync_plugin("empty");
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+        assert!(runtime.clipboard_pull().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn backup_contract_binary_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
-            "xime_plugin_backup_{}_roundtrip",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        write_backup_plugin(&dir);
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let dir = extract_backup_plugin("binary");
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
 
         // 含 0 字节与多字节 UTF-8 的二进制备份包
         let archive: Vec<u8> = vec![0, 1, 2, 0xFF, 0xE4, 0xBD, 0xA0, 0x00, 0x7F];
@@ -1317,136 +1928,39 @@ return plugin
         let pulled = runtime.pull_backup(&id).expect("pull must return bytes");
         assert_eq!(pulled, archive);
 
-        let list = runtime.list_backups().expect("listBackups must return list");
+        let list = runtime.list_backups().expect("list must return entries");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].size, archive.len() as i64);
+        assert_eq!(list[0].created_at, 1_700_000_000);
 
         assert!(runtime.delete_backup(&id));
         assert!(runtime.pull_backup(&id).is_none());
+
+        // schema：select 节点被跳过，text/secret/button 三类映射保留
+        let schema = runtime.get_settings_schema();
+        assert_eq!(schema.len(), 3);
+        assert_eq!(schema[0].key, "url");
+        assert_eq!(schema[0].ftype, "text");
+        assert!(schema[0].required);
+        assert_eq!(schema[1].ftype, "secret");
+        assert_eq!(schema[2].ftype, "button");
+
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn clipboard_sync_contract_empty_pull_is_none() {
-        let dir = extract_clipboard_sync_plugin("empty");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
-        assert!(runtime.clipboard_pull().is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn extract_tool_plugin(label: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("xime_plugin_tool_{}_{}", std::process::id(), label));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("manifest.yaml"),
-            "id: com.example.tool\n\
-             name: Test Tool\n\
-             version: 1.0.0\n\
-             type: tool\n\
-             activation: single\n\
-             capabilities:\n\
-               tool:\n\
-                 display: direct\n\
-               candidate_transform: true\n\
-               events:\n\
-                 - input_changed\n\
-                 - text_committed\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("main.lua"),
-            r#"
-local last_input = nil
-local last_action = nil
-local last_item_id = nil
-local event_log = {}
-
-local plugin = {}
-
-function plugin.getPanelState(inputText)
-    last_input = inputText
-    return {
-        type = "panel",
-        title = "Test Tool",
-        items = {
-            { id = "item1", text = "Item 1" },
-            { id = "item2", text = "Item 2" },
-        }
-    }
-end
-
-function plugin.onPanelInput(inputText)
-    last_input = inputText
-end
-
-function plugin.onPanelAction(action)
-    last_action = action
-end
-
-function plugin.onPanelItemClick(itemId)
-    last_item_id = itemId
-end
-
-function plugin.transformCandidates(candidates)
-    local result = {}
-    for _, c in ipairs(candidates) do
-        table.insert(result, {
-            id = c.id,
-            text = string.upper(c.text),
-            insertText = c.insertText,
-            imageUrl = c.imageUrl,
-        })
-    end
-    return result
-end
-
-function plugin.onPluginEvent(eventType, data)
-    table.insert(event_log, { type = eventType, data = data })
-end
-
-function plugin.getEventLog()
-    return event_log
-end
-
-function plugin.getLastInput()
-    return last_input
-end
-
-function plugin.getLastAction()
-    return last_action
-end
-
-function plugin.getLastItemId()
-    return last_item_id
-end
-
--- Store in global for test access
-_plugin_test = plugin
-
-return plugin
-"#,
-        )
-        .unwrap();
-        dir
     }
 
     #[test]
     fn tool_plugin_panel_state() {
         let dir = extract_tool_plugin("panel");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
 
         let state = runtime.get_panel_state("hello").expect("panel state");
         assert_eq!(state["type"], "panel");
         assert_eq!(state["title"], "Test Tool");
         assert!(state["items"].is_array());
 
-        // Verify the input was passed correctly by calling the function directly
         let last_input: String = runtime
-            .lua
-            .load("return _plugin_test.getLastInput()")
-            .eval()
+            .context
+            .eval_as("globalThis.plugin.__state.lastInput")
             .unwrap();
         assert_eq!(last_input, "hello");
 
@@ -1456,29 +1970,26 @@ return plugin
     #[test]
     fn tool_plugin_panel_actions() {
         let dir = extract_tool_plugin("actions");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
 
         runtime.on_panel_input("test input");
         let last_input: String = runtime
-            .lua
-            .load("return _plugin_test.getLastInput()")
-            .eval()
+            .context
+            .eval_as("globalThis.plugin.__state.lastInput")
             .unwrap();
         assert_eq!(last_input, "test input");
 
         runtime.on_panel_action("open_settings");
         let last_action: String = runtime
-            .lua
-            .load("return _plugin_test.getLastAction()")
-            .eval()
+            .context
+            .eval_as("globalThis.plugin.__state.lastAction")
             .unwrap();
         assert_eq!(last_action, "open_settings");
 
         runtime.on_panel_item_click("item1");
         let last_item_id: String = runtime
-            .lua
-            .load("return _plugin_test.getLastItemId()")
-            .eval()
+            .context
+            .eval_as("globalThis.plugin.__state.lastItemId")
             .unwrap();
         assert_eq!(last_item_id, "item1");
 
@@ -1488,7 +1999,7 @@ return plugin
     #[test]
     fn candidate_transform_contract() {
         let dir = extract_tool_plugin("transform");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
 
         let input = vec![
             CandidateTransformItem {
@@ -1505,11 +2016,12 @@ return plugin
             },
         ];
 
-        let output = runtime.transform_candidates(&input);
+        let output = runtime.transform_candidates("hello", "hello", false, &input);
         assert_eq!(output.len(), 2);
         assert_eq!(output[0].text, "HELLO");
         assert_eq!(output[1].text, "WORLD");
         assert_eq!(output[1].insert_text, Some("World".to_string()));
+        assert_eq!(output[1].id, Some("2".to_string()));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1517,25 +2029,111 @@ return plugin
     #[test]
     fn event_system_contract() {
         let dir = extract_tool_plugin("events");
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
 
-        let event_data = serde_json::json!({
-            "text": "hello",
-            "timestamp": 1234567890
-        });
+        runtime.send_event(
+            "input_changed",
+            &serde_json::json!({ "text": "hello", "timestamp": 1_234_567_890 }),
+        );
+        runtime.send_event("text_committed", &serde_json::json!({ "text": "done" }));
 
-        runtime.send_event("input_changed", &event_data);
-        runtime.send_event("text_committed", &serde_json::json!({"text": "done"}));
-
-        let event_log: Vec<Table> = runtime
-            .lua
-            .load("return _plugin_test.getEventLog()")
-            .eval()
+        let count: i32 = runtime
+            .context
+            .eval_as("globalThis.plugin.__state.eventLog.length")
             .unwrap();
+        assert_eq!(count, 2);
+        let first_type: String = runtime
+            .context
+            .eval_as("globalThis.plugin.__state.eventLog[0].type")
+            .unwrap();
+        assert_eq!(first_type, "input_changed");
+        let second_text: String = runtime
+            .context
+            .eval_as("globalThis.plugin.__state.eventLog[1].data.text")
+            .unwrap();
+        assert_eq!(second_text, "done");
 
-        assert_eq!(event_log.len(), 2);
-        let first_event_type: String = event_log[0].get("type").unwrap();
-        assert_eq!(first_event_type, "input_changed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn transform_timeout_degrades_and_poisons() {
+        let dir = temp_dir("poison");
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  globalThis.plugin = {
+    emoji: { listCategories: function () { return ["a"]; } },
+    transform: { candidates: function () { while (true) {} } },
+  };
+})();
+"#,
+        )
+        .unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+
+        let input = vec![CandidateTransformItem {
+            id: None,
+            text: "hi".to_string(),
+            insert_text: None,
+            image_url: None,
+        }];
+        // 死循环触发 15ms 超时：原样返回输入并熔断运行时
+        let output = runtime.transform_candidates("", "", false, &input);
+        assert_eq!(output, input);
+        assert!(runtime.poisoned.load(Ordering::Relaxed), "应已熔断");
+
+        // 熔断后所有契约调用降级
+        assert!(runtime.get_categories().is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn async_plugin_methods_settle() {
+        let dir = temp_dir("async");
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  globalThis.plugin = {
+    clipboardSync: {
+      push: function (profile) {
+        return Promise.resolve(true).then(function (ok) {
+          host.config.set("last", JSON.stringify(profile));
+          return ok;
+        });
+      },
+      pull: function () { return Promise.resolve(null); },
+    },
+  };
+})();
+"#,
+        )
+        .unwrap();
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+
+        // 返回 Promise 的方法应被阻塞落定
+        assert!(runtime.clipboard_push(&serde_json::json!({ "text": "x" })));
+        let stored: String = runtime.context.eval_as("host.config.get('last')").unwrap();
+        assert_eq!(stored, r#"{"text":"x"}"#);
+        assert!(runtime.clipboard_pull().is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn entry_not_found_and_bad_plugin_object() {
+        let dir = temp_dir("entry");
+        std::fs::write(
+            dir.join("main.js"),
+            "globalThis.other = {}; // 未定义 plugin 导出对象",
+        )
+        .unwrap();
+        let err = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap_err();
+        assert!(matches!(err, RuntimeError::NoPluginTable));
+
+        let err = PluginRuntime::load(&dir, "missing.js", &dir.join("config.yaml")).unwrap_err();
+        assert!(matches!(err, RuntimeError::EntryMissing(_)));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1552,106 +2150,48 @@ return plugin
         breaker.record_failure();
         assert!(breaker.is_tripped());
 
-        // Reset
         breaker.reset();
         assert!(!breaker.is_tripped());
 
-        // Success resets failures
         breaker.record_failure();
         breaker.record_failure();
         breaker.record_success();
         assert_eq!(breaker.failures, 0);
-
-        std::fs::remove_dir_all(std::env::temp_dir().join("xime_plugin_tool_events")).ok();
-    }
-    /// 写一个最小 backup 契约插件（内存态存储），验证宿主侧桥接。
-    fn write_backup_plugin(dir: &std::path::Path) {
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(
-            dir.join("manifest.yaml"),
-            "id: test.backup\nname: TestBackup\nversion: 1.0.0\ntype: backup\nentry: main.lua\ncapabilities:\n  backup:\n    protocols:\n      - webdav\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.join("main.lua"),
-            r#"
-    local store = {}
-    local plugin = {}
-    function plugin.pushBackup(args)
-        store[args.name] = args.archive
-        return { ok = true, id = args.name }
-    end
-    function plugin.listBackups()
-        local out = {}
-        for name, data in pairs(store) do
-            out[#out + 1] = { id = name, name = name, createdAt = 1700000000, size = #data }
-        end
-        return out
-    end
-    function plugin.pullBackup(id)
-        return store[id]
-    end
-    function plugin.deleteBackup(id)
-        store[id] = nil
-        return true
-    end
-    function plugin.getSettingsSchema()
-        return {
-            { type = "text", key = "url", label = "地址", required = true },
-            { type = "secret", key = "password", label = "密码" },
-            { type = "button", key = "testConnection", label = "测试连接" },
-        }
-    end
-    function plugin.testConnection()
-        return nil
-    end
-    return plugin
-    "#,
-        )
-        .unwrap();
     }
 
     #[test]
-    fn backup_contract_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("xime_plugin_backup_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        write_backup_plugin(&dir);
+    fn format_utc_time_matches_sigv4_shapes() {
+        assert_eq!(
+            format_utc_time_from_epoch(0, "YYYYMMDDTHHMMSSZ"),
+            "19700101T000000Z"
+        );
+        assert_eq!(format_utc_time_from_epoch(0, "YYYYMMDD"), "19700101");
+        assert_eq!(
+            format_utc_time_from_epoch(1_691_755_200, "YYYYMMDDTHHMMSSZ"),
+            "20230811T120000Z"
+        );
+        assert_eq!(
+            format_utc_time_from_epoch(1_691_755_200, "YYYYMMDD"),
+            "20230811"
+        );
+        assert_eq!(format_utc_time_from_epoch(0, "T"), "T");
+    }
 
-        let runtime = PluginRuntime::load(&dir, "main.lua", &dir.join("config.yaml")).unwrap();
+    #[test]
+    fn event_slot_naming_matches_android() {
+        assert_eq!(event_slot_name("text_committed"), "onTextCommitted");
+        assert_eq!(event_slot_name("input_changed"), "onInputChanged");
+        assert_eq!(event_slot_name("quick_send_changed"), "onQuickSendChanged");
+    }
 
-        // 上传（table 返回形态）。
-        let result = runtime.push_backup("ximeyi-1.tar.gz", b"payload");
-        assert!(result.ok, "push failed: {:?}", result.message);
-        assert_eq!(result.id.as_deref(), Some("ximeyi-1.tar.gz"));
-
-        // 列表。
-        let list = runtime.list_backups().expect("list failed");
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, "ximeyi-1.tar.gz");
-        assert_eq!(list[0].size, 7);
-        assert_eq!(list[0].created_at, 1_700_000_000);
-
-        // 下载 + 字节一致。
-        let data = runtime.pull_backup("ximeyi-1.tar.gz").expect("pull failed");
-        assert_eq!(data, b"payload");
-
-        // 删除后列表为空。
-        assert!(runtime.delete_backup("ximeyi-1.tar.gz"));
-        assert_eq!(runtime.list_backups().unwrap().len(), 0);
-
-        // schema：text/secret/button 三类字段。
-        let schema = runtime.get_settings_schema();
-        assert_eq!(schema.len(), 3);
-        assert_eq!(schema[0].key, "url");
-        assert_eq!(schema[0].ftype, "text");
-        assert!(schema[0].required);
-        assert_eq!(schema[1].ftype, "secret");
-        assert_eq!(schema[2].ftype, "button");
-
-        // bool 形态的 pushBackup 返回值 + manifest 类型解析。
-        let manifest = crate::PluginManifest::from_dir(&dir).unwrap();
-        assert_eq!(manifest.plugin_type(), crate::PluginType::Backup);
-
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn entry_path_checks() {
+        assert!(entry_is_safe("main.js"));
+        assert!(entry_is_safe("dist/entry.js"));
+        assert!(entry_is_safe("./main.js"));
+        assert!(!entry_is_safe(""));
+        assert!(!entry_is_safe("../evil.js"));
+        assert!(!entry_is_safe("/etc/passwd"));
+        assert!(!entry_is_safe("a\\b.js"));
     }
 }

@@ -32,6 +32,10 @@ serde_yaml = "0.9"
 thiserror = "2"
 tracing = "0.1"
 once_cell = "1"
+# 插件脚本引擎（QuickJS-NG 绑定，对齐 xime 3.0 Android 插件系统）
+# 注：0.14.0 的 serde 模块依赖 bigint 代码路径，两者需同时启用
+quickjs-rusty = { version = "0.14.0", default-features = false, features = ["serde", "bigint"] }
+sha1 = "0.10"
 
 # ---- 同步服务（xime-sync-*）----
 async-trait = "0.1"

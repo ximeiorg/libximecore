@@ -4,13 +4,15 @@ use thiserror::Error;
 
 use crate::capabilities::PluginCapabilities;
 
-/// manifest.yaml 解析错误。
+/// manifest 解析错误（manifest.json 优先，兼容旧 manifest.yaml）。
 #[derive(Debug, Error)]
 pub enum ManifestError {
-    #[error("读取 manifest.yaml 失败: {0}")]
+    #[error("读取 manifest 失败: {0}")]
     Io(#[from] std::io::Error),
+    #[error("解析 manifest.json 失败: {0}")]
+    ParseJson(#[from] serde_json::Error),
     #[error("解析 manifest.yaml 失败: {0}")]
-    Parse(#[from] serde_yaml::Error),
+    ParseYaml(#[from] serde_yaml::Error),
     #[error("manifest 缺少 id 字段")]
     MissingId,
     #[error("manifest 缺少 entry 字段")]
@@ -37,7 +39,7 @@ pub enum PluginType {
     Other,
 }
 
-/// 插件包根目录的 manifest.yaml（.xipk 元数据）。
+/// 插件包根目录的 manifest（.xipk 元数据；manifest.json 优先，兼容旧 manifest.yaml）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
     #[serde(default)]
@@ -56,7 +58,7 @@ pub struct PluginManifest {
     /// single / multi / none
     #[serde(default)]
     pub activation: String,
-    /// 入口脚本（相对插件包根目录），默认 main.lua。
+    /// 入口脚本（相对插件包根目录），默认 main.js。
     #[serde(default = "default_entry")]
     pub entry: String,
     #[serde(rename = "minHostVersion", default)]
@@ -77,7 +79,7 @@ pub struct PluginManifest {
 }
 
 fn default_entry() -> String {
-    "main.lua".to_string()
+    "main.js".to_string()
 }
 
 /// 网络访问声明（联网域名白名单）。
@@ -109,7 +111,14 @@ fn default_action() -> String {
 }
 
 impl PluginManifest {
-    /// 从 YAML 文本解析并校验必填字段。
+    /// 从 JSON 文本解析并校验必填字段（xipm 工具链产物 / Android 包格式）。
+    pub fn parse_json(json: &str) -> Result<Self, ManifestError> {
+        let manifest: PluginManifest = serde_json::from_str(json)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// 从 YAML 文本解析并校验必填字段（兼容存量插件包）。
     pub fn parse(yaml: &str) -> Result<Self, ManifestError> {
         let manifest: PluginManifest = serde_yaml::from_str(yaml)?;
         manifest.validate()?;
@@ -139,10 +148,13 @@ impl PluginManifest {
         }
     }
 
-    /// 从已解压的插件目录读取 manifest.yaml。
+    /// 从已解压的插件目录读取 manifest：manifest.json 优先，回落 manifest.yaml。
     pub fn from_dir(dir: &Path) -> Result<Self, ManifestError> {
-        let yaml = std::fs::read_to_string(dir.join("manifest.yaml"))?;
-        Self::parse(&yaml)
+        let json_path = dir.join("manifest.json");
+        if json_path.is_file() {
+            return Self::parse_json(&std::fs::read_to_string(json_path)?);
+        }
+        Self::parse(&std::fs::read_to_string(dir.join("manifest.yaml"))?)
     }
 }
 
@@ -249,9 +261,58 @@ toolbarButtons:
     }
 
     #[test]
-    fn default_entry_is_main_lua() {
+    fn default_entry_is_main_js() {
         let m = PluginManifest::parse("id: a\nname: b\nversion: 1\n").unwrap();
-        assert_eq!(m.entry, "main.lua");
+        assert_eq!(m.entry, "main.js");
         assert_eq!(m.plugin_type(), PluginType::Other);
+    }
+
+    #[test]
+    fn parse_json_manifest_and_from_dir_prefers_json() {
+        let dir = std::env::temp_dir().join(format!("xime_manifest_json_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{
+  "id": "com.example.jsplugin",
+  "name": "JS 插件",
+  "version": "1.0.0",
+  "type": "tool",
+  "capabilities": {
+    "tool": { "display": "direct" },
+    "candidate_transform": true,
+    "events": ["text_committed"]
+  }
+}"#,
+        )
+        .unwrap();
+
+        // entry 缺省 → main.js
+        let m = PluginManifest::from_dir(&dir).unwrap();
+        assert_eq!(m.id, "com.example.jsplugin");
+        assert_eq!(m.entry, "main.js");
+        assert_eq!(m.plugin_type(), PluginType::Tool);
+        assert!(m.capabilities.candidate_transform);
+        assert_eq!(m.capabilities.events, vec!["text_committed"]);
+
+        // 存放 YAML 时回落可读（写入 JSON 后再放 YAML，from_dir 仍优先 JSON）
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.old\nname: Old\nversion: 0.9.0\n",
+        )
+        .unwrap();
+        assert_eq!(
+            PluginManifest::from_dir(&dir).unwrap().id,
+            "com.example.jsplugin"
+        );
+
+        // 仅 YAML 的存量包
+        std::fs::remove_file(dir.join("manifest.json")).unwrap();
+        let old = PluginManifest::from_dir(&dir).unwrap();
+        assert_eq!(old.id, "com.example.old");
+        assert_eq!(old.entry, "main.js", "YAML 缺省 entry 也应回落 main.js");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,10 +1,12 @@
-//! Xime Lua 插件系统。
+//! Xime JS 插件系统（QuickJS，契约对齐 xime 3.0 Android `JsScriptRuntime`）。
 //!
-//! 插件包（.xipk）为 zip 容器：`manifest.yaml`（元数据）+ `entry` 指定的 Lua 入口脚本，
-//! 可选 `resources/`（资源，宿主只给路径）与 `libs/`（受限 require 的纯 Lua 库）。
-//! 契约与 Android 版一致（见 Xime 仓库 `plugin-core` 的 LuaPluginContract）：
-//! 入口脚本 `return` 一个导出表，宿主按类型调用 `getCategories`/`getEmojis` 等函数；
-//! 沙箱剥离 io/os/loadfile/dofile，插件只能访问注入的 `host` 白名单 API。
+//! 插件包（.xipk）为 zip 容器：`manifest.json`（元数据，兼容旧 `manifest.yaml`）+
+//! `entry` 指定的 JS 入口脚本（默认 main.js，IIFE 把导出对象挂到 `globalThis.plugin`，
+//! 分组命名空间：emoji / clipboardSync / backup / settings / transform / panel /
+//! speech / events），可选 `resources/`（资源，宿主只给路径）与 `libs/`（受限
+//! require 的模块）。
+//! 沙箱屏蔽 eval/Function，插件只能访问注入的 `host` 白名单 API；
+//! 契约调用带硬超时（15ms transform / 5s 回调 / 180s 业务），超时熔断降级。
 
 pub mod capabilities;
 mod manifest;
