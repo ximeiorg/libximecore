@@ -814,7 +814,9 @@ impl SettingsState {
 
         std::thread::spawn(|| {
             let result = (|| -> Result<String, String> {
-                ureq::get("https://index.ximei.me/plugins/index.yaml")
+                // v2 子索引：JS/QuickJS 插件（minHostVersion 3.0.0，对齐
+                // xime-plugin quickjs 运行时）；根路径 v1 为 Lua 时代遗留索引。
+                ureq::get("https://index.ximei.me/plugins/v2/index.yaml")
                     .call()
                     .map_err(|e| format!("网络请求失败: {}", e))?
                     .into_body()
@@ -2816,6 +2818,67 @@ fn find_schema_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// v2 插件子索引（JS/QuickJS 插件）的裁剪样本——字段形态取自
+    /// https://index.ximei.me/plugins/v2/index.yaml。
+    const PLUGIN_INDEX_V2_YAML: &str = r#"
+index_version: 2
+updated_at: '2026-09-26'
+plugins:
+- id: com.kingzcheung.xime.plugin.ai_reply
+  name: AI 智能回复
+  author: Xime
+  description: 根据对方消息生成回复候选。
+  type: remote
+  tags:
+  - AI
+  pluginType: tool
+  icon: 应
+  activation: multi
+  minHostVersion: 3.0.0
+  platforms:
+  - android
+  capabilities:
+    tool:
+      display: passive
+  network:
+    allowCustomHosts: true
+  homepage: https://example.com
+  license: GPL-3.0
+  appVersion: '>=3.0.0'
+  currentVersion: 1.0.0
+  versions:
+  - version: 1.0.0
+    date: '2026-09-24'
+    changelog: v3 重构：TypeScript/QuickJS 插件
+    downloadUrl:
+    - url: https://example.com/ai-reply-1.0.0.xipk
+      sha256: 4e5454210000000000000000000000000000000000000000000000000000000
+      size: 3.4 KB
+      sizeBytes: 3469
+"#;
+
+    #[test]
+    fn parse_plugin_index_v2() {
+        let index: PluginIndex = serde_yaml::from_str(PLUGIN_INDEX_V2_YAML).unwrap();
+        assert_eq!(index.index_version, 2);
+        assert_eq!(index.updated_at, "2026-09-26");
+        assert_eq!(index.plugins.len(), 1);
+
+        let plugin = &index.plugins[0];
+        assert_eq!(plugin.id, "com.kingzcheung.xime.plugin.ai_reply");
+        assert_eq!(plugin.plugin_kind, "tool", "pluginType 字段应被解析");
+        assert_eq!(plugin.current_version.as_deref(), Some("1.0.0"));
+
+        let version = &plugin.versions[0];
+        assert_eq!(version.version, "1.0.0");
+        assert_eq!(version.download_url.len(), 1);
+        assert_eq!(
+            version.download_url[0].url,
+            "https://example.com/ai-reply-1.0.0.xipk"
+        );
+        assert!(version.download_url[0].sha256.is_some(), "sha256 用于下载校验");
+    }
 
     const MODEL_INDEX_YAML: &str = r#"
 index_version: 1
