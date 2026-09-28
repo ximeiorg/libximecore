@@ -23,6 +23,8 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::manifest::{NetworkDecl, PluginManifest};
+
 /// 运行时错误。
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -311,9 +313,12 @@ var host = {
     epochSeconds: __ximeNative_cryptoEpochSeconds,
   },
   http: {
-    request: function (method, url, headers, body, timeoutMillis) {
+    request: async function (method, url, headers, body, timeoutMillis) {
       if (body instanceof Uint8Array) body = Array.from(body);
       var r = __ximeNative_httpRequest(method, url, headers, body, timeoutMillis);
+      if (r != null && r.__ximeError) {
+        throw new XimeError(r.__ximeError.code, r.__ximeError.message);
+      }
       if (r == null) throw new XimeError('E_NETWORK', method + ' ' + url + ' 请求失败');
       if (r.body != null) r.body = Uint8Array.from(r.body);
       return r;
@@ -403,6 +408,8 @@ pub struct PluginRuntime {
     deadline: Box<AtomicI64>,
     /// 超时熔断标志：置位后所有契约调用直接降级。
     poisoned: AtomicBool,
+    /// manifest.capabilities.events：下行事件订阅（send_event 门禁）。
+    subscribed_events: Vec<String>,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -428,7 +435,18 @@ impl PluginRuntime {
 
         let context = Context::builder().memory_limit(MEMORY_LIMIT).build()?;
 
-        install_native_api(&context, plugin_dir, config_file)?;
+        // manifest 读取失败按最严策略（无域名授权、无事件订阅）。
+        let subscribed_events = match PluginManifest::from_dir(plugin_dir) {
+            Ok(m) => {
+                install_native_api(&context, plugin_dir, config_file, &m.network)?;
+                m.capabilities.events
+            }
+            Err(e) => {
+                tracing::warn!("[{plugin_id}] 读取 manifest 失败，按最严策略处理: {e}");
+                install_native_api(&context, plugin_dir, config_file, &NetworkDecl::default())?;
+                Vec::new()
+            }
+        };
         context.update_stack_top();
         context.eval(BOOTSTRAP_JS, false)?;
 
@@ -452,6 +470,7 @@ impl PluginRuntime {
             plugin_id,
             deadline: Box::new(AtomicI64::new(0)),
             poisoned: AtomicBool::new(false),
+            subscribed_events,
         };
         // 字段声明顺序保证 context 先于 deadline 析构（handler 指向 deadline）。
         runtime.context.set_interrupt_handler(
@@ -656,21 +675,46 @@ impl PluginRuntime {
 
     // ---- clipboard_sync 契约（同 Android JsClipboardSyncPluginAdapter）----
 
-    /// 推送 profile（JSON 对象）到远端；插件返回 false / 函数缺失 / 报错视为失败。
+    /// 推送 profile（宿主 snake_case JSON）到远端；插件收到 SDK camelCase 形态。
+    /// 插件返回 false / 函数缺失 / 报错视为失败。
     pub fn clipboard_push(&self, profile: &serde_json::Value) -> bool {
-        self.call_slot::<serde_json::Value>(
-            TIMEOUT_BUSINESS,
-            "clipboardSync.push",
-            vec![profile.clone()],
-            None,
-        )
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+        let arg = clipboard_profile_to_sdk(profile);
+        self.call_slot::<serde_json::Value>(TIMEOUT_BUSINESS, "clipboardSync.push", vec![arg], None)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 
     /// 拉取远端 profile；插件返回 null/undefined（无变更）时返回 None。
+    /// SDK camelCase → 宿主 snake_case；hash 缺失时按 text 补算 sha256
+    /// （同 Android adapter；附件字节桌面宿主尚未启用，仅文本路径）。
     pub fn clipboard_pull(&self) -> Option<serde_json::Value> {
-        self.call_slot(TIMEOUT_BUSINESS, "clipboardSync.pull", vec![], None)
+        let mut profile: serde_json::Value =
+            self.call_slot(TIMEOUT_BUSINESS, "clipboardSync.pull", vec![], None)?;
+        if let Some(obj) = profile.as_object_mut() {
+            if let Some(v) = obj.remove("hasData") {
+                obj.insert("has_data".to_string(), v);
+            }
+            if let Some(v) = obj.remove("dataName") {
+                obj.insert("data_name".to_string(), v);
+            }
+        }
+        let hash_missing = profile
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .is_none_or(str::is_empty);
+        if hash_missing {
+            let text = profile
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
+            if !text.is_empty() {
+                let hash = hex::encode(Sha256::digest(text.as_bytes()));
+                profile
+                    .as_object_mut()?
+                    .insert("hash".to_string(), serde_json::Value::String(hash));
+            }
+        }
+        Some(profile)
     }
 
     /// 测试连接；返回 `None` 表示成功，`Some(消息)` 表示失败原因。
@@ -768,8 +812,9 @@ impl PluginRuntime {
         .unwrap_or(false)
     }
 
-    /// 配置表单 schema（XimeUiNode 的 text/secret/button 子集映射；
-    /// select/switch/section/divider/multi_select 节点暂被跳过，≤64 节点）。
+    /// 配置表单 schema（XimeUiNode 的 text/secret/button 子集映射）。
+    /// select/multi_select/switch 降级为文本输入（桌面表单子集）；section/
+    /// divider/metric 等展示节点无 key 被过滤；≤64 节点。
     pub fn get_settings_schema(&self) -> Vec<SettingField> {
         let raw = self
             .call_slot::<Vec<serde_json::Value>>(TIMEOUT_BUSINESS, "settings.schema", vec![], None)
@@ -783,9 +828,16 @@ impl PluginRuntime {
                     "secret" => "secret",
                     "button" | "action" => "button",
                     "text" | "input" | "textarea" | "number" | "metric" => "text",
+                    "select" | "multi_select" | "switch" => {
+                        tracing::debug!(
+                            "[{}] settings.schema 节点 {key} 类型 {node_type} 降级为文本输入",
+                            self.plugin_id
+                        );
+                        "text"
+                    }
                     other => {
                         tracing::debug!(
-                            "[{}] settings.schema 节点 {key} 类型 {other} 暂不支持，跳过",
+                            "[{}] settings.schema 节点 {key} 类型 {other} 不支持，跳过",
                             self.plugin_id
                         );
                         return None;
@@ -957,10 +1009,13 @@ impl PluginRuntime {
     // ---- event 契约（事件分发）----
 
     /// 向插件发送下行事件（fire-and-forget，5s 超时）。
-    /// 事件类型需在 manifest.capabilities.events 中声明；slot 命名
-    /// snake_case → onPascalCase（同 Android `eventSlotName`）：
-    /// text_committed → plugin.events.onTextCommitted(payload)。
+    /// 事件类型必须在 manifest.capabilities.events 中声明（同 Android
+    /// `initEvents` 订阅门禁）；slot 命名 snake_case → onPascalCase
+    /// （同 Android `eventSlotName`）：text_committed → plugin.events.onTextCommitted(payload)。
     pub fn send_event(&self, event_type: &str, data: &serde_json::Value) {
+        if !self.subscribed_events.iter().any(|e| e == event_type) {
+            return;
+        }
         let path = format!("events.{}", event_slot_name(event_type));
         let _ = self.call_slot_value(TIMEOUT_CALLBACK, &path, vec![data.clone()], None);
     }
@@ -1007,6 +1062,7 @@ fn install_native_api(
     context: &Context,
     plugin_dir: &Path,
     config_file: &Path,
+    network: &NetworkDecl,
 ) -> Result<(), RuntimeError> {
     let ptr = unsafe { context.context_raw() };
     let config_file = config_file.to_path_buf();
@@ -1054,12 +1110,18 @@ fn install_native_api(
             Ok(true)
         },
     )?;
-    let file = config_file;
+    let file = config_file.clone();
     context.add_callback("__ximeNative_configKeys", move || -> Vec<String> {
         load_config(&file)
             .map(|m| m.into_keys().collect())
             .unwrap_or_default()
     })?;
+
+    // 网络白名单策略（同 Android NetworkPolicy 三重门的桌面等价物）：
+    // ① manifest.network.hosts 声明域名；② allowCustomHosts 时，插件配置值中
+    // 出现过的服务器域名（用户配置即授权）。未命中 → fail-closed E_DENIED。
+    let network = network.clone();
+    let policy_config = config_file.clone();
 
     // ---- resource（只给路径，插件不读内容）----
     let dir = resources_dir.clone();
@@ -1173,11 +1235,12 @@ fn install_native_api(
             .unwrap_or(0.0)
     })?;
 
-    // ---- http（同步白名单请求；失败返回 null，bootstrap 包装成 XimeError）----
+    // ---- http（同步白名单请求；失败返回 null，bootstrap 包装成 XimeError；
+    //      域名未授权返回 __ximeError 标记 → XimeError E_DENIED）----
     context.add_callback(
         "__ximeNative_httpRequest",
         move |args: Arguments| -> Result<OwnedJsValue, String> {
-            let response = http_request_impl(args, ptr)?;
+            let response = http_request_impl(args, ptr, &network, &policy_config)?;
             to_js(ptr, &response).map_err(|e| e.to_string())
         },
     )?;
@@ -1329,7 +1392,12 @@ fn save_config(path: &Path, map: &HashMap<String, String>) -> Result<(), Runtime
 /// host.http.request 实现（ureq 同步请求；超时参数毫秒，默认/上限见内常量）。
 /// 返回 `{status, headers, body: number[], text}`；传输失败返回 Null（bootstrap
 /// 包装层转 XimeError），参数非法返回 Err（直接抛 JS 异常）。
-fn http_request_impl(args: Arguments, ptr: *mut q::JSContext) -> Result<serde_json::Value, String> {
+fn http_request_impl(
+    args: Arguments,
+    ptr: *mut q::JSContext,
+    network: &NetworkDecl,
+    config_file: &Path,
+) -> Result<serde_json::Value, String> {
     let argv = args.into_vec();
     let get = |i: usize| -> Option<&OwnedJsValue> {
         argv.get(i).filter(|v| !v.is_undefined() && !v.is_null())
@@ -1344,6 +1412,20 @@ fn http_request_impl(args: Arguments, ptr: *mut q::JSContext) -> Result<serde_js
         .unwrap_or_default();
     if url.is_empty() {
         return Err("http.request: url 不能为空".to_string());
+    }
+
+    // 网络门禁：fail-closed（域名未声明且不属于用户配置的服务器 → 拒绝）
+    let host = url_host(&url).ok_or_else(|| "http.request: 无法解析 URL 域名".to_string())?;
+    if !network_allowed(network, config_file, &host) {
+        tracing::warn!("[plugin http] 域名未授权，已拒绝: {host}");
+        return Ok(serde_json::json!({
+            "__ximeError": {
+                "code": "E_DENIED",
+                "message": format!(
+                    "域名 {host} 未在 manifest network.hosts 声明，也不属于插件配置的服务器地址"
+                ),
+            }
+        }));
     }
 
     let mut builder = ureq::http::Request::builder()
@@ -1422,6 +1504,75 @@ fn http_request_impl(args: Arguments, ptr: *mut q::JSContext) -> Result<serde_js
         "body": body_bytes,
         "text": text,
     }))
+}
+
+/// 从 URL（或裸 host[:port]）提取小写域名；容忍 scheme 缺失、userinfo 与端口。
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    // IPv6 字面量 [::1]:443
+    if let Some(inner) = authority.strip_prefix('[') {
+        return inner.split(']').next().map(str::to_lowercase);
+    }
+    let host = authority.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_lowercase())
+    }
+}
+
+/// 从单个配置值推导授权域名：带 scheme 的值按 URL 解析；无 `@`/路径/空白
+/// 且含 `.` 的裸值按 host[:port] 解析（用户配置的服务器地址自动授权，
+/// 同 Android NetworkPolicy 第三重门；避免把邮箱形用户名误当域名）。
+fn authorized_host_from_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    let is_url = value.contains("://");
+    let is_bare_host =
+        !value.is_empty() && !value.contains(['@', '/', ' ', '\\']) && value.contains('.');
+    if is_url || is_bare_host {
+        url_host(value)
+    } else {
+        None
+    }
+}
+
+/// 域名是否放行：manifest.network.hosts 声明，或 allowCustomHosts 且该域名
+/// 出现在插件配置值中（配置文件即用户授权记录，每次请求重读以覆盖配置变更）。
+fn network_allowed(network: &NetworkDecl, config_file: &Path, host: &str) -> bool {
+    if network.hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+        return true;
+    }
+    if network.allow_custom_hosts {
+        let lower = host.to_lowercase();
+        return load_config(config_file)
+            .map(|m| {
+                m.into_values()
+                    .filter_map(|v| authorized_host_from_value(&v))
+                    .any(|h| h == lower)
+            })
+            .unwrap_or(false);
+    }
+    false
+}
+
+/// 宿主 snake_case clipboard profile → SDK camelCase（has_data → hasData、
+/// data_name → dataName；同 Android adapter 的字段映射，其余键原样透传）。
+fn clipboard_profile_to_sdk(profile: &serde_json::Value) -> serde_json::Value {
+    let Some(obj) = profile.as_object() else {
+        return profile.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (k, v) in obj {
+        let key = match k.as_str() {
+            "has_data" => "hasData",
+            "data_name" => "dataName",
+            other => other,
+        };
+        out.insert(key.to_string(), v.clone());
+    }
+    serde_json::Value::Object(out)
 }
 
 /// require 模块解析：仅插件包内相对路径 `.js`。候选：`<spec>.js` /
@@ -1936,14 +2087,17 @@ mod tests {
         assert!(runtime.delete_backup(&id));
         assert!(runtime.pull_backup(&id).is_none());
 
-        // schema：select 节点被跳过，text/secret/button 三类映射保留
+        // schema：select 节点降级为文本输入，text/secret/button 三类映射保留
         let schema = runtime.get_settings_schema();
-        assert_eq!(schema.len(), 3);
+        assert_eq!(schema.len(), 4);
         assert_eq!(schema[0].key, "url");
         assert_eq!(schema[0].ftype, "text");
         assert!(schema[0].required);
         assert_eq!(schema[1].ftype, "secret");
+        assert_eq!(schema[2].key, "test");
         assert_eq!(schema[2].ftype, "button");
+        assert_eq!(schema[3].key, "proto");
+        assert_eq!(schema[3].ftype, "text", "select 应降级为文本输入");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2193,5 +2347,325 @@ mod tests {
         assert!(!entry_is_safe("../evil.js"));
         assert!(!entry_is_safe("/etc/passwd"));
         assert!(!entry_is_safe("a\\b.js"));
+    }
+
+    // ---- 网络白名单（fail-closed）----
+
+    /// http 门禁端到端：未声明域名 → XimeError E_DENIED（经 bootstrap 包装）。
+    #[test]
+    fn http_denied_without_host_declaration() {
+        let dir = temp_dir("http_deny");
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.http\ntype: tool\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  globalThis.plugin = {
+    panel: {
+      state: async function (inputText) {
+        try {
+          await host.http.request('GET', 'https://denied.example.com/x');
+          globalThis.plugin.__code = 'no-error';
+        } catch (e) {
+          globalThis.plugin.__code = (e && e.code) ? e.code : ('no-code:' + e);
+        }
+        return { items: [] };
+      },
+    },
+    dumpCode: function () { return globalThis.plugin.__code || 'unset'; },
+  };
+})();
+"#,
+        )
+        .unwrap();
+
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+        let _ = runtime.get_panel_state("");
+        let code = runtime.call_plugin_fn("dumpCode", &[]).unwrap();
+        assert_eq!(code, serde_json::Value::String("E_DENIED".to_string()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn http_policy_helpers() {
+        // url_host 解析
+        assert_eq!(
+            url_host("https://a.b.com/dav/x?y=1").as_deref(),
+            Some("a.b.com")
+        );
+        assert_eq!(
+            url_host("http://user:pw@Host.EXAMPLE.com:8080/p").as_deref(),
+            Some("host.example.com")
+        );
+        assert_eq!(
+            url_host("dav.example.com:443").as_deref(),
+            Some("dav.example.com")
+        );
+        assert_eq!(url_host("https://[::1]:8443/x").as_deref(), Some("::1"));
+        assert_eq!(url_host(""), None);
+
+        // 授权值推导：URL / 裸域名放行；邮箱形用户名不放行
+        assert_eq!(
+            authorized_host_from_value("https://dav.example.com/dav/").as_deref(),
+            Some("dav.example.com")
+        );
+        assert_eq!(
+            authorized_host_from_value(" dav.example.com ").as_deref(),
+            Some("dav.example.com")
+        );
+        assert_eq!(authorized_host_from_value("me@mail.example.com"), None);
+        assert_eq!(authorized_host_from_value("password123"), None);
+
+        let dir = temp_dir("http_policy");
+        let config = dir.join("config.yaml");
+        std::fs::write(
+            &config,
+            "url: https://dav.example.com/dav/\nuser: me@wrong.com\n",
+        )
+        .unwrap();
+
+        let declared = NetworkDecl {
+            hosts: vec!["api.example.org".to_string()],
+            allow_custom_hosts: false,
+        };
+        assert!(network_allowed(&declared, &config, "api.example.org"));
+        assert!(!network_allowed(&declared, &config, "dav.example.com"));
+        // 子域不算命中（精确匹配）
+        assert!(!network_allowed(&declared, &config, "evil.api.example.org"));
+
+        let custom = NetworkDecl {
+            hosts: vec![],
+            allow_custom_hosts: true,
+        };
+        // 配置值中出现过的服务器域名 → 授权（用户配置即授权）
+        assert!(network_allowed(&custom, &config, "dav.example.com"));
+        // 邮箱形用户名不应授权其域名
+        assert!(!network_allowed(&custom, &config, "wrong.com"));
+        assert!(!network_allowed(&custom, &config, "other.example.com"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- clipboard profile 键名形态（宿主 snake_case ↔ SDK camelCase）----
+
+    #[test]
+    fn clipboard_profile_sdk_case_roundtrip() {
+        let dir = temp_dir("clip_case");
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.clip\ntype: clipboard_sync\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  var seen = null;
+  globalThis.plugin = {
+    clipboardSync: {
+      push: function (profile) {
+        seen = profile;
+        return typeof profile.hasData === 'boolean';
+      },
+      pull: function () {
+        // SDK 形态（camelCase），不带 hash：宿主应补算
+        return { type: 'text', text: 'hello', hasData: false, dataName: null, size: 5 };
+      },
+    },
+    dumpSeen: function () { return seen; },
+  };
+})();
+"#,
+        )
+        .unwrap();
+
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+
+        // push：宿主 snake_case → 插件收到 camelCase
+        let pushed = runtime.clipboard_push(&serde_json::json!({
+            "type": "text", "hash": "h1", "text": "hello", "has_data": false, "size": 5
+        }));
+        assert!(pushed);
+        let seen = runtime.call_plugin_fn("dumpSeen", &[]).unwrap();
+        assert_eq!(seen.get("hasData").and_then(|v| v.as_bool()), Some(false));
+        assert!(
+            seen.get("has_data").is_none(),
+            "snake_case 键不应透传给插件"
+        );
+
+        // pull：插件 camelCase → 宿主 snake_case + hash 按 text 补算
+        let profile = runtime.clipboard_pull().unwrap();
+        assert_eq!(
+            profile.get("has_data").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert!(
+            profile.get("hasData").is_none(),
+            "camelCase 键不应透传给宿主"
+        );
+        assert_eq!(profile.get("text").and_then(|v| v.as_str()), Some("hello"));
+        let hash = profile.get("hash").and_then(|v| v.as_str()).unwrap();
+        let expect = hex::encode(Sha256::digest(b"hello"));
+        assert_eq!(hash, expect, "hash 缺失时应按 text 补算 sha256");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- 事件订阅门禁 ----
+
+    #[test]
+    fn send_event_requires_manifest_subscription() {
+        let dir = temp_dir("event_gate");
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.ev\ntype: tool\ncapabilities:\n  events:\n    - input_changed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  var log = [];
+  globalThis.plugin = {
+    events: {
+      onInputChanged: function (p) { log.push('input_changed'); },
+      onTextCommitted: function (p) { log.push('text_committed'); },
+    },
+    dumpLog: function () { return log; },
+  };
+})();
+"#,
+        )
+        .unwrap();
+
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+        runtime.send_event("input_changed", &serde_json::json!({ "inputText": "a" }));
+        runtime.send_event(
+            "text_committed",
+            &serde_json::json!({ "committedText": "a" }),
+        );
+        let log = runtime
+            .call_plugin_fn("dumpLog", &[])
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(log.len(), 1, "未订阅的事件不应投递");
+        assert_eq!(
+            log[0],
+            serde_json::Value::String("input_changed".to_string())
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ---- settings schema 降级 ----
+
+    #[test]
+    fn settings_schema_degrades_select_and_skips_unknown() {
+        let dir = temp_dir("schema_degrade");
+        std::fs::write(
+            dir.join("manifest.yaml"),
+            "id: com.example.schema\ntype: backup\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.js"),
+            r#"(function () {
+  globalThis.plugin = {
+    settings: {
+      schema: function () {
+        return [
+          { type: 'text', key: 'url', label: '服务器地址' },
+          { type: 'secret', key: 'password', label: '密码' },
+          { type: 'select', key: 'mode', label: '模式', options: ['a', 'b'] },
+          { type: 'switch', key: 'auto', label: '自动' },
+          { type: 'section', label: '分组标题' },
+          { type: 'mystery', key: 'weird', label: '未知类型' },
+          { type: 'button', key: 'testConnection', label: '测试连接' },
+        ];
+      },
+    },
+  };
+})();
+"#,
+        )
+        .unwrap();
+
+        let runtime = PluginRuntime::load(&dir, "main.js", &dir.join("config.yaml")).unwrap();
+        let fields = runtime.get_settings_schema();
+        let keys: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|f| (f.key.as_str(), f.ftype.as_str()))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("url", "text"),
+                ("password", "secret"),
+                ("mode", "text"), // select 降级为文本输入
+                ("auto", "text"), // switch 降级为文本输入
+                ("testConnection", "button"),
+            ],
+            "无 key 的 section 与未知类型节点应被过滤"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 真实安装插件的冒烟验证（需要本机数据目录有 Android xipm 构建产物）：
+    /// `cargo test -p xime-plugin --lib -- --ignored real_plugins_smoke`
+    #[test]
+    #[ignore = "依赖本机 ~/Library/Application Support/XimeYi/plugins 的真实插件"]
+    fn real_plugins_smoke() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let base = PathBuf::from(home).join("Library/Application Support/XimeYi/plugins");
+
+        // kaomoji：emoji 契约（分类 + 查询）
+        let kaomoji = base.join("com.kingzcheung.xime.plugin.kaomoji");
+        if kaomoji.join("main.js").is_file() {
+            let runtime = PluginRuntime::load(
+                &kaomoji,
+                "main.js",
+                &base.join("config/com.kingzcheung.xime.plugin.kaomoji.yaml"),
+            )
+            .expect("kaomoji 加载失败");
+            let categories = runtime.get_categories();
+            assert!(!categories.is_empty(), "kaomoji 分类为空");
+            let items = runtime.get_emojis(&categories[0], "", 10);
+            assert!(!items.is_empty(), "kaomoji 表情为空");
+            let manifest = PluginManifest::from_dir(&kaomoji).unwrap();
+            assert_eq!(manifest.id, "com.kingzcheung.xime.plugin.kaomoji");
+        } else {
+            eprintln!("跳过：未找到 JS 版 kaomoji（{kaomoji:?}）");
+        }
+
+        // webdav-backup：settings schema 扁平化（真实 XimeUiNode 形态）
+        let webdav = base.join("com.kingzcheung.xime.plugin.webdav_backup");
+        if webdav.join("main.js").is_file() {
+            let runtime = PluginRuntime::load(
+                &webdav,
+                "main.js",
+                &base.join("config/com.kingzcheung.xime.plugin.webdav_backup.yaml"),
+            )
+            .expect("webdav-backup 加载失败");
+            let schema = runtime.get_settings_schema();
+            let keys: Vec<&str> = schema.iter().map(|f| f.key.as_str()).collect();
+            assert!(keys.contains(&"url"), "schema 应含 url 字段: {keys:?}");
+            assert!(
+                keys.contains(&"password"),
+                "schema 应含 password 字段: {keys:?}"
+            );
+            assert!(
+                keys.contains(&"testConnection"),
+                "schema 应含测试连接按钮: {keys:?}"
+            );
+        } else {
+            eprintln!("跳过：未找到 JS 版 webdav-backup（{webdav:?}）");
+        }
     }
 }

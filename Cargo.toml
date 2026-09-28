@@ -36,6 +36,8 @@ once_cell = "1"
 # 注：0.14.0 的 serde 模块依赖 bigint 代码路径，两者需同时启用
 quickjs-rusty = { version = "0.14.0", default-features = false, features = ["serde", "bigint"] }
 sha1 = "0.10"
+# 插件 manifest.json 宽松解析（注释/尾逗号，对齐 Android kotlinx lenient）
+json5 = "1.3.1"
 
 # ---- 同步服务（xime-sync-*）----
 async-trait = "0.1"

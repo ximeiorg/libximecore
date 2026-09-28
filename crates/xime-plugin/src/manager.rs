@@ -1,8 +1,15 @@
-use crate::manifest::PluginManifest;
+use crate::manifest::{self, PluginManifest};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+/// 插件包大小上限（同 Android InstallerManager）。
+const MAX_PACKAGE_BYTES: u64 = 10 * 1024 * 1024;
+/// zip 条目数上限。
+const MAX_ZIP_ENTRIES: usize = 512;
+/// 解压后总大小上限。
+const MAX_TOTAL_UNCOMPRESSED: u64 = 64 * 1024 * 1024;
 
 /// 插件管理错误。
 #[derive(Debug, Error)]
@@ -21,6 +28,10 @@ pub enum ManagerError {
     MissingEntry(String),
     #[error("插件已安装: {0}")]
     AlreadyInstalled(String),
+    #[error("宿主版本不满足插件要求: {0}")]
+    IncompatibleHost(String),
+    #[error("插件包超出限制: {0}")]
+    PackageLimit(String),
 }
 
 /// 已安装插件记录（registry.yaml 条目）。
@@ -112,10 +123,38 @@ impl PluginManager {
     /// 安装 .xipk 压缩包到插件目录。
     ///
     /// - 校验包内 manifest（manifest.json 优先，兼容 manifest.yaml）与入口脚本存在
+    /// - 宿主版本门禁（minHostVersion/maxHostVersion，同 Android InstallerManager）
+    /// - 限额：包 ≤10MB、条目 ≤512、解压总量 ≤64MB；`lib/` 前缀条目跳过
     /// - 已安装同版本时报错；不同版本时覆盖（保持 enabled 状态）
     pub fn install_from_zip(&self, xipk: &Path, force: bool) -> Result<PluginRecord, ManagerError> {
+        let package_size = std::fs::metadata(xipk)?.len();
+        if package_size > MAX_PACKAGE_BYTES {
+            return Err(ManagerError::PackageLimit(format!(
+                "包大小 {package_size} 超过 {}MB 上限",
+                MAX_PACKAGE_BYTES / 1024 / 1024
+            )));
+        }
+
         let file = std::fs::File::open(xipk)?;
         let mut archive = zip::ZipArchive::new(file)?;
+
+        let entry_count = archive.len();
+        if entry_count > MAX_ZIP_ENTRIES {
+            return Err(ManagerError::PackageLimit(format!(
+                "条目数 {entry_count} 超过 {MAX_ZIP_ENTRIES} 上限"
+            )));
+        }
+        let mut total_uncompressed = 0u64;
+        for i in 0..entry_count {
+            let entry = archive.by_index(i)?;
+            total_uncompressed += entry.size();
+        }
+        if total_uncompressed > MAX_TOTAL_UNCOMPRESSED {
+            return Err(ManagerError::PackageLimit(format!(
+                "解压总量 {total_uncompressed} 超过 {}MB 上限",
+                MAX_TOTAL_UNCOMPRESSED / 1024 / 1024
+            )));
+        }
 
         let manifest = if let Some(json) = read_zip_entry(&mut archive, "manifest.json") {
             PluginManifest::parse_json(&json)?
@@ -124,6 +163,7 @@ impl PluginManager {
                 .ok_or(ManagerError::MissingManifest)?;
             PluginManifest::parse(&yaml)?
         };
+        check_host_compatibility(&manifest)?;
         let id = manifest.id.clone();
 
         // 入口脚本必须在包内
@@ -175,6 +215,7 @@ impl PluginManager {
         force: bool,
     ) -> Result<PluginRecord, ManagerError> {
         let manifest = PluginManifest::from_dir(source)?;
+        check_host_compatibility(&manifest)?;
         let id = manifest.id.clone();
 
         if !source.join(&manifest.entry).exists() {
@@ -261,6 +302,19 @@ impl PluginManager {
     }
 }
 
+/// 宿主版本门禁：JS 插件宿主代次以 SDK_VERSION 表达（插件声明的
+/// minHostVersion 3.0.0 指向 Android 3.0 / 桌面对齐代次）。
+fn check_host_compatibility(manifest: &PluginManifest) -> Result<(), ManagerError> {
+    let host = crate::runtime::SDK_VERSION;
+    if !manifest::version_compatible(host, &manifest.min_host_version, &manifest.max_host_version) {
+        return Err(ManagerError::IncompatibleHost(format!(
+            "宿主 {host} 不在 [{}, {}] 区间内",
+            manifest.min_host_version, manifest.max_host_version
+        )));
+    }
+    Ok(())
+}
+
 fn now_string() -> String {
     // 近似 RFC3339（无外部时间依赖），用于 installedAt。
     let secs = std::time::SystemTime::now()
@@ -301,13 +355,17 @@ fn read_zip_entry<R: Read + std::io::Seek>(
     Some(content)
 }
 
-/// 安全解压：跳过路径穿越条目，所有路径限定在目标目录内。
+/// 安全解压：跳过路径穿越条目与 `lib/` 前缀原生库，所有路径限定在目标目录内。
 fn extract_zip_safe<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     target: &Path,
 ) -> Result<(), ManagerError> {
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
+        // Android 安装器约定：跳过平台原生库前缀（JS 插件不应携带）
+        if entry.name().trim_start_matches("./").starts_with("lib/") {
+            continue;
+        }
         let Some(path) = entry.enclosed_name().map(|p| p.to_path_buf()) else {
             continue;
         };
@@ -422,6 +480,70 @@ mod tests {
             manager.install_from_zip(&xipk, false),
             Err(ManagerError::MissingEntry(_))
         ));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn install_rejects_incompatible_host_version() {
+        let dir = std::env::temp_dir().join(format!("xime_plugin_ver_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let xipk = dir.join("future.xipk");
+        let file = std::fs::File::create(&xipk).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(
+            br#"{"id":"com.example.future","name":"Future","version":"9.0.0","type":"emoji",
+                "entry":"main.js","minHostVersion":"9.0.0"}"#,
+        )
+        .unwrap();
+        zip.start_file("main.js", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"globalThis.plugin = {};\n").unwrap();
+        zip.finish().unwrap();
+
+        let manager = PluginManager::new(dir.join("root"));
+        assert!(matches!(
+            manager.install_from_zip(&xipk, false),
+            Err(ManagerError::IncompatibleHost(_))
+        ));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn install_skips_lib_prefix_entries() {
+        let dir = std::env::temp_dir().join(format!("xime_plugin_lib_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let xipk = test_xipk(&dir);
+        // 追加 lib/ 前缀条目
+        {
+            let file = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(&xipk)
+                .unwrap();
+            let mut zip = zip::ZipWriter::new_append(file).unwrap();
+            zip.start_file(
+                "lib/arm64-v8a/libnative.so",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"\x7fELF").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let manager = PluginManager::new(dir.join("root"));
+        let record = manager.install_from_zip(&xipk, false).unwrap();
+        let plugin_dir = manager.plugin_dir(&record.id);
+        assert!(plugin_dir.join("main.js").exists());
+        assert!(plugin_dir.join("libs/util.js").exists(), "libs/ 不应被误伤");
+        assert!(!plugin_dir.join("lib").exists(), "lib/ 前缀条目应被跳过");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

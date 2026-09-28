@@ -10,7 +10,7 @@ pub enum ManifestError {
     #[error("读取 manifest 失败: {0}")]
     Io(#[from] std::io::Error),
     #[error("解析 manifest.json 失败: {0}")]
-    ParseJson(#[from] serde_json::Error),
+    ParseJson(#[from] json5::Error),
     #[error("解析 manifest.yaml 失败: {0}")]
     ParseYaml(#[from] serde_yaml::Error),
     #[error("manifest 缺少 id 字段")]
@@ -73,6 +73,10 @@ pub struct PluginManifest {
     /// 网络访问声明。
     #[serde(default)]
     pub network: NetworkDecl,
+    /// 目标平台（android/ios/windows/macos/linux）；缺省视为 `["android"]`
+    /// （同 Android `PluginInfo.supportsPlatform`）。
+    #[serde(default)]
+    pub platforms: Vec<String>,
     /// 工具栏按钮声明。
     #[serde(rename = "toolbarButtons", default)]
     pub toolbar_buttons: Vec<ToolbarButton>,
@@ -112,8 +116,9 @@ fn default_action() -> String {
 
 impl PluginManifest {
     /// 从 JSON 文本解析并校验必填字段（xipm 工具链产物 / Android 包格式）。
+    /// 对齐 Android kotlinx 宽松模式：容忍 `//`/`/* */` 注释与尾逗号（JSON5 超集）。
     pub fn parse_json(json: &str) -> Result<Self, ManifestError> {
-        let manifest: PluginManifest = serde_json::from_str(json)?;
+        let manifest: PluginManifest = json5::from_str(json)?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -148,6 +153,18 @@ impl PluginManifest {
         }
     }
 
+    /// 平台门禁：目标平台是否在声明列表内（大小写不敏感）。
+    /// 缺省 `platforms` 视为 `["android"]`（同 Android 契约；宿主自行决定是否启用门禁）。
+    pub fn supports_platform(&self, platform: &str) -> bool {
+        if self.platforms.is_empty() {
+            platform == "android"
+        } else {
+            self.platforms
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(platform))
+        }
+    }
+
     /// 从已解压的插件目录读取 manifest：manifest.json 优先，回落 manifest.yaml。
     pub fn from_dir(dir: &Path) -> Result<Self, ManifestError> {
         let json_path = dir.join("manifest.json");
@@ -156,6 +173,39 @@ impl PluginManifest {
         }
         Self::parse(&std::fs::read_to_string(dir.join("manifest.yaml"))?)
     }
+}
+
+/// 版本段解析（同 Android `VersionUtil`：按 `.` `-` `+` 切分，仅保留纯数字段，
+/// 最多 4 段，缺失补 0；预发布后缀被忽略，如 `2.6.0-beta3` ≈ `2.6.0`）。
+fn version_segments(version: &str) -> [u64; 4] {
+    let mut segments = [0u64; 4];
+    let mut idx = 0;
+    for part in version.split(['.', '-', '+']) {
+        if idx >= segments.len() {
+            break;
+        }
+        if !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) {
+            segments[idx] = part.parse().unwrap_or(u64::MAX);
+            idx += 1;
+        }
+    }
+    segments
+}
+
+/// 比较两个版本号（返回正/零/负；同 Android `VersionUtil.compare` 语义）。
+pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    version_segments(a).cmp(&version_segments(b))
+}
+
+/// 宿主版本是否满足插件的 `minHostVersion`/`maxHostVersion` 区间（空 = 不限制）。
+pub(crate) fn version_compatible(host: &str, min: &str, max: &str) -> bool {
+    if !min.is_empty() && compare_versions(host, min) == std::cmp::Ordering::Less {
+        return false;
+    }
+    if !max.is_empty() && compare_versions(host, max) == std::cmp::Ordering::Greater {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -261,10 +311,83 @@ toolbarButtons:
     }
 
     #[test]
+    fn parse_json_lenient_comments_and_trailing_commas() {
+        // Android xipm 产物形态：行注释 + 块注释 + 尾逗号
+        let json = r#"{
+  // 插件唯一标识
+  "id": "com.example.lenient",
+  "name": "宽松解析",
+  "version": "1.0.0", // 尾注释
+  "type": "emoji",
+  "platforms": ["android", "macos",],
+  /* 块注释 */
+  "network": {
+    "hosts": [
+      "api.example.org", /* 内联块注释 */ "cdn.example.org",
+    ],
+    "allowCustomHosts": true,
+  },
+}"#;
+        let m = PluginManifest::parse_json(json).unwrap();
+        assert_eq!(m.id, "com.example.lenient");
+        assert_eq!(m.plugin_type(), PluginType::Emoji);
+        assert_eq!(
+            m.network.hosts,
+            vec!["api.example.org".to_string(), "cdn.example.org".to_string()]
+        );
+        assert!(m.network.allow_custom_hosts);
+        assert!(m.supports_platform("macos"));
+
+        // 字符串内的 //（URL scheme）不受注释剥离影响
+        let url_json = r#"{
+  // 服务器地址
+  "id": "com.example.url",
+  "name": "https://dav.example.com/dav/",
+}"#;
+        let m = PluginManifest::parse_json(url_json).unwrap();
+        assert_eq!(m.name, "https://dav.example.com/dav/");
+    }
+
+    #[test]
     fn default_entry_is_main_js() {
         let m = PluginManifest::parse("id: a\nname: b\nversion: 1\n").unwrap();
         assert_eq!(m.entry, "main.js");
         assert_eq!(m.plugin_type(), PluginType::Other);
+    }
+
+    #[test]
+    fn platforms_parse_and_gate() {
+        let m = PluginManifest::parse_json(
+            r#"{"id":"a","name":"b","version":"1","platforms":["Android","MacOS"]}"#,
+        )
+        .unwrap();
+        assert!(m.supports_platform("android"));
+        assert!(m.supports_platform("macos"));
+        assert!(!m.supports_platform("ios"));
+
+        // 缺省视为 ["android"]（同 Android 契约）
+        let m = PluginManifest::parse("id: a\nname: b\nversion: 1\n").unwrap();
+        assert!(m.supports_platform("android"));
+        assert!(!m.supports_platform("macos"));
+    }
+
+    #[test]
+    fn version_utils_match_android_semantics() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_versions("3.0.0", "2.9.9"), Ordering::Greater);
+        assert_eq!(compare_versions("2.6.0", "2.6.0"), Ordering::Equal);
+        // 预发布后缀被忽略
+        assert_eq!(compare_versions("2.6.0-beta3", "2.6.0"), Ordering::Equal);
+        // 段缺失补 0
+        assert_eq!(compare_versions("3", "3.0.0"), Ordering::Equal);
+        assert_eq!(compare_versions("3.0.1", "3"), Ordering::Greater);
+        // 非数字段忽略
+        assert_eq!(compare_versions("3.0.0.rc1", "3.0.0"), Ordering::Equal);
+
+        assert!(version_compatible("3.0.0", "3.0.0", ""));
+        assert!(!version_compatible("3.0.0", "3.1.0", ""));
+        assert!(!version_compatible("3.0.0", "", "2.9.9"));
+        assert!(version_compatible("3.0.0", "", ""));
     }
 
     #[test]
