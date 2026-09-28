@@ -9,6 +9,19 @@ use crate::theme::ThemeColors;
 use iced::widget::{container, pick_list, row, text, text_input};
 use iced::{Color, Element, Length};
 
+/// 下拉选项：id 参与相等性比较，避免同名插件选中错乱。
+#[derive(Clone, PartialEq)]
+struct PluginOption {
+    id: String,
+    name: String,
+}
+
+impl std::fmt::Display for PluginOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
 /// 剪贴板同步配置：本地同步服务器（xime-sync-server）启停 + 认证。
 pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     let c = &settings.clipboard;
@@ -58,7 +71,8 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
         switch(sp.enabled, colors, Message::SyncPluginEnabled),
     ));
 
-    // 插件选择。
+    // 插件选择：列出全部已安装的 clipboard_sync 插件（对齐 Android 端，
+    // 停用的也显示——选中即启用并通知 daemon 重载）。
     if sp.plugins.is_empty() {
         sync_items.push(settings_item(
             "同步插件",
@@ -67,17 +81,31 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
             label("", colors),
         ));
     } else {
-        let names: Vec<&str> = sp.plugins.iter().map(|p| p.name.as_str()).collect();
-        let current = names.get(sp.plugin_index).copied().unwrap_or("");
+        let options: Vec<PluginOption> = sp
+            .plugins
+            .iter()
+            .map(|p| PluginOption {
+                id: p.id.clone(),
+                name: if p.enabled {
+                    p.name.clone()
+                } else {
+                    format!("{}（未启用）", p.name)
+                },
+            })
+            .collect();
+        let current = sp.plugins.get(sp.plugin_index).map(|p| PluginOption {
+            id: p.id.clone(),
+            name: p.name.clone(),
+        });
         sync_items.push(settings_item(
             "同步插件",
-            None::<String>,
+            Some("选择承载剪贴板同步的插件，选中后立即生效"),
             colors,
-            pick_list(names, Some(current), |chosen| {
+            pick_list(options, current, |chosen| {
                 Message::SyncPluginSelected(
                     sp.plugins
                         .iter()
-                        .position(|p| p.name == chosen)
+                        .position(|p| p.id == chosen.id)
                         .unwrap_or(0),
                 )
             })

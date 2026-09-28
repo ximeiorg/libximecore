@@ -1422,6 +1422,8 @@ pub struct ClipboardSyncPluginInfo {
     pub id: String,
     pub name: String,
     pub dir: std::path::PathBuf,
+    /// 注册表中的启用状态（无记录默认 true，与 daemon 扫描一致）。
+    pub enabled: bool,
 }
 
 /// 插件同步配置（clipboard_sync.toml，与 IME 共享）。
@@ -1455,7 +1457,8 @@ pub fn write_clipboard_sync_config(cfg: &ClipboardSyncConfig) {
     }
 }
 
-/// 扫描 clipboard_sync 类型且启用的插件。
+/// 扫描全部已安装的 clipboard_sync 类型插件（含未启用，对齐 Android
+/// `getAllInstalledPlugins` 按分类过滤：下拉选择即激活，不应把停用的藏起来）。
 #[cfg(feature = "clipboard-page")]
 pub fn scan_clipboard_sync_plugins() -> Vec<ClipboardSyncPluginInfo> {
     let root = config_base_dir().join("plugins");
@@ -1477,13 +1480,11 @@ pub fn scan_clipboard_sync_plugins() -> Vec<ClipboardSyncPluginInfo> {
             continue;
         }
         let enabled = manager.get(&manifest.id).map(|r| r.enabled).unwrap_or(true);
-        if !enabled {
-            continue;
-        }
         out.push(ClipboardSyncPluginInfo {
             id: manifest.id,
             name: manifest.name,
             dir,
+            enabled,
         });
     }
     out
@@ -1584,8 +1585,9 @@ impl SyncPluginUiState {
         let mut cfg = read_clipboard_sync_config();
         cfg.enabled = enabled;
         write_clipboard_sync_config(&cfg);
+        notify_daemon_reload_plugins();
         self.message = Some(if enabled {
-            "插件同步已启用，输入法将在数秒内开始同步".to_string()
+            "插件同步已启用".to_string()
         } else {
             "插件同步已停用".to_string()
         });
@@ -1597,9 +1599,24 @@ impl SyncPluginUiState {
         }
         self.plugin_index = index;
         self.message = None;
+        let id = self.plugins[index].id.clone();
         let mut cfg = read_clipboard_sync_config();
-        cfg.plugin_id = self.plugins[index].id.clone();
+        cfg.plugin_id = id.clone();
         write_clipboard_sync_config(&cfg);
+        // 对齐 Android：选中的同步插件自动启用（daemon 仅加载 plugin_id 一项）。
+        let manager = xime_plugin::PluginManager::new(config_base_dir().join("plugins"));
+        if let Err(e) = manager.set_enabled(&id, true) {
+            let not_found = matches!(
+                e,
+                xime_plugin::manager::ManagerError::Io(ref io)
+                    if io.kind() == std::io::ErrorKind::NotFound
+            );
+            // 无注册记录的目录直装插件默认视为启用，NotFound 可忽略。
+            if !not_found {
+                self.message = Some(format!("启用插件失败: {e}"));
+            }
+        }
+        notify_daemon_reload_plugins();
         self.start_schema_load();
     }
 
@@ -2877,7 +2894,10 @@ plugins:
             version.download_url[0].url,
             "https://example.com/ai-reply-1.0.0.xipk"
         );
-        assert!(version.download_url[0].sha256.is_some(), "sha256 用于下载校验");
+        assert!(
+            version.download_url[0].sha256.is_some(),
+            "sha256 用于下载校验"
+        );
     }
 
     const MODEL_INDEX_YAML: &str = r#"
