@@ -1,4 +1,4 @@
-//! 极简同步 WebDAV 客户端（ureq，阻塞式，供云备份页使用）。
+//! 极简同步 WebDAV 客户端（reqwest blocking，供云备份页使用）。
 //! 语义对齐先前 `xime-sync-store::webdav` 后端（RFC 4918）：
 //! - `put`    → `PUT {base}/{key}`（自动 MKCOL 建父目录）
 //! - `get`    → `GET {base}/{key}`（404 → None）
@@ -56,18 +56,19 @@ impl WebDavClient {
         format!("{}/{}", self.base_url, key)
     }
 
-    /// 发送任意方法请求（含认证头），非 2xx 转换为携带状态码的错误字符串。
+    /// 发送任意方法请求（含认证头），返回原始响应（状态码由调用方判断，
+    /// WebDAV 依赖 207/404/405/409 等非标准语义，不能把 ≥400 当异常）。
     fn send(
         &self,
         method: &'static str,
         url: &str,
         body: Option<Vec<u8>>,
         headers: &[(&str, &str)],
-    ) -> Result<ureq::http::Response<ureq::Body>, String> {
-        let mut builder = ureq::http::Request::builder()
-            .method(method)
-            .uri(url)
-            .header("User-Agent", "xime-setup");
+    ) -> Result<reqwest::blocking::Response, String> {
+        let method = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| format!("非法 HTTP 方法 '{method}': {e}"))?;
+        let mut builder = crate::state::http_client().request(method, url);
+        builder = builder.header("User-Agent", "xime-setup");
         if let (Some(u), Some(p)) = (&self.username, &self.password) {
             let token =
                 base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}").as_bytes());
@@ -76,14 +77,10 @@ impl WebDavClient {
         for (k, v) in headers {
             builder = builder.header(*k, *v);
         }
-        let request = builder
+        builder
             .body(body.unwrap_or_default())
-            .map_err(|e| format!("构造请求失败: {e}"))?;
-        match ureq::run(request) {
-            Ok(res) => Ok(res),
-            Err(ureq::Error::StatusCode(code)) => Err(format!("HTTP {code}")),
-            Err(e) => Err(format!("{e}")),
-        }
+            .send()
+            .map_err(|e| format!("{e}"))
     }
 
     /// 递归创建 key 的父目录（MKCOL；405/409 视为已存在）。
@@ -103,9 +100,12 @@ impl WebDavClient {
         for d in dirs.into_iter().rev() {
             let url = self.url(&d);
             match self.send("MKCOL", &url, None, &[]) {
-                Ok(_) => {}
+                Ok(res)
+                    if res.status().is_success()
+                        || res.status().as_u16() == 405
+                        || res.status().as_u16() == 409 => {}
                 // 405 = 资源已存在，409 = 中间目录已存在，均可继续
-                Err(e) if e.contains("HTTP 405") || e.contains("HTTP 409") => {}
+                Ok(res) => return Err(format!("MKCOL {d} 失败: HTTP {}", res.status().as_u16())),
                 Err(e) => return Err(format!("MKCOL {d} 失败: {e}")),
             }
         }
@@ -115,32 +115,38 @@ impl WebDavClient {
     /// 上传字节（自动建父目录）。
     pub fn put(&self, key: &str, data: &[u8]) -> Result<(), String> {
         self.ensure_parents(key)?;
-        self.send("PUT", &self.url(key), Some(data.to_vec()), &[])
-            .map(|_| ())
+        let res = self.send("PUT", &self.url(key), Some(data.to_vec()), &[])?;
+        if !res.status().is_success() {
+            return Err(format!("PUT 失败: HTTP {}", res.status().as_u16()));
+        }
+        Ok(())
     }
 
     /// 下载（404 → None）。`path` 为 list 返回的资源路径。
     pub fn get(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
-        match self.send("GET", &format!("{}{}", self.origin, path), None, &[]) {
-            Ok(mut res) => {
-                let bytes = res
-                    .body_mut()
-                    .read_to_vec()
-                    .map_err(|e| format!("读取响应失败: {e}"))?;
-                Ok(Some(bytes))
-            }
-            Err(e) if e.contains("HTTP 404") => Ok(None),
-            Err(e) => Err(format!("GET 失败: {e}")),
+        let res = self.send("GET", &format!("{}{}", self.origin, path), None, &[])?;
+        let status = res.status().as_u16();
+        if status == 404 {
+            return Ok(None);
         }
+        if !res.status().is_success() {
+            return Err(format!("GET 失败: HTTP {status}"));
+        }
+        let bytes = res
+            .bytes()
+            .map_err(|e| format!("读取响应失败: {e}"))?
+            .to_vec();
+        Ok(Some(bytes))
     }
 
     /// 删除（404 视为成功）。
     pub fn delete(&self, path: &str) -> Result<(), String> {
-        match self.send("DELETE", &format!("{}{}", self.origin, path), None, &[]) {
-            Ok(_) => Ok(()),
-            Err(e) if e.contains("HTTP 404") => Ok(()),
-            Err(e) => Err(format!("DELETE 失败: {e}")),
+        let res = self.send("DELETE", &format!("{}{}", self.origin, path), None, &[])?;
+        let status = res.status().as_u16();
+        if res.status().is_success() || status == 404 {
+            return Ok(());
         }
+        Err(format!("DELETE 失败: HTTP {status}"))
     }
 
     /// 列出 `prefix`（目录）下的文件（Depth:1，404 → 空列表）。
@@ -152,11 +158,15 @@ impl WebDavClient {
             self.url(prefix)
         };
         match self.send("PROPFIND", &url, None, &[("Depth", "1")]) {
-            Ok(mut res) => {
-                let body = res
-                    .body_mut()
-                    .read_to_string()
-                    .map_err(|e| format!("读取响应失败: {e}"))?;
+            Ok(res) => {
+                let status = res.status().as_u16();
+                if status == 404 {
+                    return Ok(Vec::new());
+                }
+                if !res.status().is_success() {
+                    return Err(format!("PROPFIND 失败: HTTP {status}"));
+                }
+                let body = res.text().map_err(|e| format!("读取响应失败: {e}"))?;
                 let base_path = self
                     .base_url
                     .strip_prefix(self.origin.as_str())
@@ -170,18 +180,21 @@ impl WebDavClient {
                 };
                 Ok(parse_propfind(&body, &self.origin, &scope))
             }
-            Err(e) if e.contains("HTTP 404") => Ok(Vec::new()),
             Err(e) => Err(format!("PROPFIND 失败: {e}")),
         }
     }
 
     /// 连通性测试（PROPFIND 根目录 Depth:0）。
     pub fn test(&self) -> Result<(), String> {
-        match self.send("PROPFIND", &self.base_url, None, &[("Depth", "0")]) {
-            Ok(_) => Ok(()),
-            Err(e) if e.contains("HTTP 401") => Err("认证失败：请检查用户名/密码".to_string()),
-            Err(e) => Err(format!("连接失败: {e}")),
+        let res = self.send("PROPFIND", &self.base_url, None, &[("Depth", "0")])?;
+        let status = res.status().as_u16();
+        if res.status().is_success() {
+            return Ok(());
         }
+        if status == 401 {
+            return Err("认证失败：请检查用户名/密码".to_string());
+        }
+        Err(format!("连接失败: HTTP {status}"))
     }
 }
 

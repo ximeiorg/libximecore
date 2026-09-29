@@ -18,7 +18,7 @@ thiserror.workspace = true
 tracing.workspace = true
 zip = "8.6.0"
 flate2 = "1"
-ureq = "3.3.0"
+reqwest.workspace = true
 # host.crypto（clipboard_sync 协议插件：Basic Auth / S3 SigV4）
 sha2.workspace = true
 sha1.workspace = true

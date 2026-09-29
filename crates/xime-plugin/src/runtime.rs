@@ -1389,7 +1389,13 @@ fn save_config(path: &Path, map: &HashMap<String, String>) -> Result<(), Runtime
     std::fs::write(path, yaml).map_err(|e| RuntimeError::Config(format!("写入失败: {e}")))
 }
 
-/// host.http.request 实现（ureq 同步请求；超时参数毫秒，默认/上限见内常量）。
+/// 共享 blocking 客户端（reqwest blocking 每个实例内建 runtime 线程，必须复用）。
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::blocking::Client::new)
+}
+
+/// host.http.request 实现（reqwest blocking 同步请求；超时参数毫秒，默认/上限见内常量）。
 /// 返回 `{status, headers, body: number[], text}`；传输失败返回 Null（bootstrap
 /// 包装层转 XimeError），参数非法返回 Err（直接抛 JS 异常）。
 fn http_request_impl(
@@ -1428,9 +1434,15 @@ fn http_request_impl(
         }));
     }
 
-    let mut builder = ureq::http::Request::builder()
-        .method(method.to_uppercase().as_str())
-        .uri(&url);
+    // reqwest blocking：支持 WebDAV 扩展方法（PROPFIND/MKCOL，ureq 3 会拒绝），
+    // 且非 2xx 也返回响应对象（插件需自行区分 401/404/503，ureq 把 ≥400 当错误）。
+    let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
+        .map_err(|e| format!("http.request: 非法 HTTP 方法 '{method}': {e}"))?;
+    let parsed_url: reqwest::Url = url
+        .parse()
+        .map_err(|e| format!("http.request: URL 无效: {e}"))?;
+
+    let mut builder = http_client().request(method.clone(), parsed_url);
     if let Some(headers) = get(2).filter(|v| v.is_object()) {
         let obj = headers
             .clone()
@@ -1447,10 +1459,10 @@ fn http_request_impl(
             }
             let key_str = pair[0].js_to_string().map_err(|e| e.to_string())?;
             let value_str = pair[1].js_to_string().map_err(|e| e.to_string())?;
-            let Ok(key) = key_str.parse::<ureq::http::HeaderName>() else {
+            let Ok(key) = key_str.parse::<reqwest::header::HeaderName>() else {
                 continue;
             };
-            let Ok(value) = value_str.parse::<ureq::http::HeaderValue>() else {
+            let Ok(value) = value_str.parse::<reqwest::header::HeaderValue>() else {
                 continue;
             };
             builder = builder.header(key, value);
@@ -1472,14 +1484,9 @@ fn http_request_impl(
         .and_then(|v| v.to_float().ok())
         .unwrap_or(20_000.0)
         .clamp(1.0, 120_000.0) as u64;
+    builder = builder.timeout(Duration::from_millis(timeout_ms));
 
-    let request = builder.body(body).map_err(|e| e.to_string())?;
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_millis(timeout_ms)))
-        .build()
-        .new_agent();
-
-    let response = match agent.run(request) {
+    let response = match builder.body(body).send() {
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("[plugin http] {method} {url}: {e}");
@@ -1495,7 +1502,7 @@ fn http_request_impl(
             serde_json::Value::String(v.to_str().unwrap_or_default().to_string()),
         );
     }
-    let body_bytes = response.into_body().read_to_vec().unwrap_or_default();
+    let body_bytes = response.bytes().map(|b| b.to_vec()).unwrap_or_default();
     let text = String::from_utf8_lossy(&body_bytes).into_owned();
 
     Ok(serde_json::json!({

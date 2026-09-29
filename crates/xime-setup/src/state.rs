@@ -568,12 +568,12 @@ impl SettingsState {
 
         std::thread::spawn(|| {
             let result = (|| -> Result<String, String> {
-                ureq::get("https://index.ximei.me/rimes/index.yaml")
-                    .call()
-                    .map_err(|e| format!("网络请求失败: {}", e))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| format!("读取响应失败: {}", e))
+                let response = http_client()
+                    .get("https://index.ximei.me/rimes/index.yaml")
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| format!("网络请求失败: {}", e))?;
+                response.text().map_err(|e| format!("读取响应失败: {}", e))
             })();
 
             *market_yaml_result().lock().unwrap() = Some(result);
@@ -671,12 +671,12 @@ impl SettingsState {
 
         std::thread::spawn(|| {
             let result = (|| -> Result<String, String> {
-                ureq::get("https://index.ximei.me/models/index.yaml")
-                    .call()
-                    .map_err(|e| format!("网络请求失败: {}", e))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| format!("读取响应失败: {}", e))
+                let response = http_client()
+                    .get("https://index.ximei.me/models/index.yaml")
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| format!("网络请求失败: {}", e))?;
+                response.text().map_err(|e| format!("读取响应失败: {}", e))
             })();
 
             *model_yaml_result().lock().unwrap() = Some(result);
@@ -816,12 +816,12 @@ impl SettingsState {
             let result = (|| -> Result<String, String> {
                 // v2 子索引：JS/QuickJS 插件（minHostVersion 3.0.0，对齐
                 // xime-plugin quickjs 运行时）；根路径 v1 为 Lua 时代遗留索引。
-                ureq::get("https://index.ximei.me/plugins/v2/index.yaml")
-                    .call()
-                    .map_err(|e| format!("网络请求失败: {}", e))?
-                    .into_body()
-                    .read_to_string()
-                    .map_err(|e| format!("读取响应失败: {}", e))
+                let response = http_client()
+                    .get("https://index.ximei.me/plugins/v2/index.yaml")
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .map_err(|e| format!("网络请求失败: {}", e))?;
+                response.text().map_err(|e| format!("读取响应失败: {}", e))
             })();
 
             *plugin_yaml_result().lock().unwrap() = Some(result);
@@ -1392,6 +1392,12 @@ impl ClipboardState {
             }
         }
     }
+}
+
+/// 共享 blocking 客户端（reqwest blocking 每个实例内建 runtime 线程，必须复用）。
+pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::blocking::Client::new)
 }
 
 #[cfg(any(feature = "clipboard-page", feature = "backup-page"))]
@@ -2662,17 +2668,13 @@ fn download_file(
     sha256: Option<&str>,
     on_progress: impl Fn(f64),
 ) -> anyhow::Result<()> {
-    let mut response = ureq::get(url)
-        .call()
+    let mut response = http_client()
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
         .map_err(|e| anyhow::anyhow!("网络请求失败: {}", e))?;
-    let total = response
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(0);
+    let total = response.content_length().unwrap_or(0);
 
-    let mut reader = response.body_mut().as_reader();
     let mut hasher = sha256.map(|_| sha2::Sha256::new());
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| anyhow::anyhow!("创建目录失败: {}", e))?;
@@ -2683,7 +2685,7 @@ fn download_file(
     let mut buf = [0u8; 8192];
     let mut done: u64 = 0;
     loop {
-        let n = reader
+        let n = response
             .read(&mut buf)
             .map_err(|e| anyhow::anyhow!("读取响应失败: {}", e))?;
         if n == 0 {
