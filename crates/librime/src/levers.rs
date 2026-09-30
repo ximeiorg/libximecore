@@ -298,3 +298,104 @@ impl Drop for SwitcherSettings {
         // The levers API doesn't expose a destroy for switcher settings
     }
 }
+
+// ------------------------------------------------------------------
+// 用户词典管理（对齐 weasel DictManagementDialog：函数位于 levers API）
+// ------------------------------------------------------------------
+
+/// 列出全部用户词典名（rime 遍历 userdb，如 `luna_pinyin`）。
+pub fn list_user_dicts() -> Vec<String> {
+    let Some(api) = get_levers_api() else {
+        return Vec::new();
+    };
+    unsafe {
+        let (Some(init), Some(next), Some(destroy)) = (
+            (*api).user_dict_iterator_init,
+            (*api).next_user_dict,
+            (*api).user_dict_iterator_destroy,
+        ) else {
+            return Vec::new();
+        };
+        let mut iter = librime_sys2::RimeUserDictIterator {
+            ptr: ptr::null_mut(),
+            i: 0,
+        };
+        if init(&mut iter) == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        loop {
+            let name = next(&mut iter);
+            if name.is_null() {
+                break;
+            }
+            out.push(CStr::from_ptr(name).to_string_lossy().into_owned());
+        }
+        destroy(&mut iter);
+        out
+    }
+}
+
+/// 备份用户词典快照到同步目录（`<sync_dir>/<name>.userdb.txt`）。
+pub fn backup_user_dict(dict_name: &str) -> Result<()> {
+    let api = get_levers_api().ok_or(Error::FunctionNotAvailable("rime_get_levers_api"))?;
+    let name = CString::new(dict_name)?;
+    unsafe {
+        let func = (*api)
+            .backup_user_dict
+            .ok_or(Error::FunctionNotAvailable("backup_user_dict"))?;
+        if func(name.as_ptr()) == 0 {
+            return Err(Error::BackupUserDict);
+        }
+    }
+    Ok(())
+}
+
+/// 从快照文件恢复用户词典（快照内含词典名）。
+pub fn restore_user_dict(snapshot_file: &str) -> Result<()> {
+    let api = get_levers_api().ok_or(Error::FunctionNotAvailable("rime_get_levers_api"))?;
+    let path = CString::new(snapshot_file)?;
+    unsafe {
+        let func = (*api)
+            .restore_user_dict
+            .ok_or(Error::FunctionNotAvailable("restore_user_dict"))?;
+        if func(path.as_ptr()) == 0 {
+            return Err(Error::RestoreUserDict);
+        }
+    }
+    Ok(())
+}
+
+/// 导出用户词典为文本（TSV），返回导出的记录条数。
+pub fn export_user_dict(dict_name: &str, text_file: &str) -> Result<i32> {
+    let api = get_levers_api().ok_or(Error::FunctionNotAvailable("rime_get_levers_api"))?;
+    let name = CString::new(dict_name)?;
+    let path = CString::new(text_file)?;
+    unsafe {
+        let func = (*api)
+            .export_user_dict
+            .ok_or(Error::FunctionNotAvailable("export_user_dict"))?;
+        let count = func(name.as_ptr(), path.as_ptr());
+        if count < 0 {
+            return Err(Error::ExportUserDict);
+        }
+        Ok(count)
+    }
+}
+
+/// 从文本导入用户词典（合并去重），返回导入的记录条数。
+pub fn import_user_dict(dict_name: &str, text_file: &str) -> Result<i32> {
+    let api = get_levers_api().ok_or(Error::FunctionNotAvailable("rime_get_levers_api"))?;
+    let name = CString::new(dict_name)?;
+    let path = CString::new(text_file)?;
+    unsafe {
+        let func = (*api)
+            .import_user_dict
+            .ok_or(Error::FunctionNotAvailable("import_user_dict"))?;
+        let count = func(name.as_ptr(), path.as_ptr());
+        if count < 0 {
+            return Err(Error::ImportUserDict);
+        }
+        Ok(count)
+    }
+}

@@ -13,6 +13,14 @@ pub enum Error {
     StartMaintenance,
     #[error("Failed to sync user data")]
     SyncUserData,
+    #[error("Failed to backup user dict")]
+    BackupUserDict,
+    #[error("Failed to restore user dict")]
+    RestoreUserDict,
+    #[error("Failed to export user dict")]
+    ExportUserDict,
+    #[error("Failed to import user dict")]
+    ImportUserDict,
     #[error("Failed to get context")]
     GetContext,
     #[error("Failed to get status")]

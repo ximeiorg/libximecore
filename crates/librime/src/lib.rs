@@ -17,12 +17,17 @@ pub use key::{
     KeyCode, Modifier, K_ALT_MASK, K_CONTROL_MASK, K_LOCK_MASK, K_RELEASE_MASK, K_SHIFT_MASK,
     XK_SHIFT_L,
 };
-pub use levers::{deploy_all, CustomSettings, SchemaInfo, SwitcherSettings};
+pub use levers::{
+    backup_user_dict, deploy_all, export_user_dict, import_user_dict, list_user_dicts,
+    restore_user_dict, CustomSettings, SchemaInfo, SwitcherSettings,
+};
 pub use librime_sys2::rime_struct;
 pub use session::Session;
 pub use traits::Traits;
 
 use once_cell::sync::Lazy;
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::sync::Mutex;
 
 use librime_sys2::rime_get_api;
@@ -165,6 +170,26 @@ pub fn sync_user_data() -> error::Result<()> {
         Err(error::Error::SyncUserData)
     } else {
         Ok(())
+    }
+}
+
+// ------------------------------------------------------------------
+// 用户词典管理（对齐 weasel DictManagementDialog 的四个操作 + 列表）
+// ------------------------------------------------------------------
+
+/// 用户数据同步目录（快照存放位置；rime 由 installation.yaml 的 sync_dir 决定）。
+pub fn get_user_data_sync_dir() -> String {
+    unsafe {
+        let api = get_api();
+        if api.is_null() {
+            return String::new();
+        }
+        let Some(func) = (*api).get_user_data_sync_dir else {
+            return String::new();
+        };
+        let mut buf: [std::ffi::c_char; 512] = [0 as std::ffi::c_char; 512];
+        (func)(buf.as_mut_ptr(), buf.len());
+        CStr::from_ptr(buf.as_ptr()).to_string_lossy().into_owned()
     }
 }
 
