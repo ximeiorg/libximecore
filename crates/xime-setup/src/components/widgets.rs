@@ -1,6 +1,6 @@
 use crate::theme::ThemeColors;
 use iced::widget::{
-    button, container, row, text, toggler, toggler::Status as TogglerStatus, Button,
+    button, container, row, stack, text, toggler, toggler::Status as TogglerStatus, Button,
 };
 use iced::{border, Alignment, Background, Border, Color, Element, Length};
 
@@ -9,10 +9,16 @@ pub const RADIUS_LG: f32 = 12.0;
 pub const RADIUS_MD: f32 = 10.0;
 pub const RADIUS_SM: f32 = 8.0;
 
+/// 应用 UI 字体：显式指定微软雅黑 UI（Windows 全版本自带，拉丁+中文覆盖完整）。
+/// 不用通用族名（Sans Serif）：fontdb 在 Windows 上的通用族解析可能命中
+/// 图标字体（Segoe Fluent Icons 等，也被归类为 sans-serif），ASCII 会渲染成
+/// 符号乱码（中文不受影响——图标字体不含 CJK，回退雅黑）。
+pub const UI_FONT: iced::font::Font = iced::font::Font::with_name("Microsoft YaHei UI");
+
 pub fn semibold() -> iced::font::Font {
     iced::font::Font {
         weight: iced::font::Weight::Semibold,
-        ..iced::font::Font::DEFAULT
+        ..UI_FONT
     }
 }
 
@@ -21,8 +27,48 @@ pub fn semibold() -> iced::font::Font {
 pub fn medium() -> iced::font::Font {
     iced::font::Font {
         weight: iced::font::Weight::Medium,
-        ..iced::font::Font::DEFAULT
+        ..UI_FONT
     }
+}
+
+/// 居中模态弹窗：半透明遮罩 + 居中内容卡片（iced 0.14 无内置 Modal，stack 实现）。
+/// `dialog` 为 None 时原样返回底页。
+pub fn modal_dialog<'a, Message: 'a>(
+    base: Element<'a, Message>,
+    dialog: Option<Element<'a, Message>>,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let Some(dialog) = dialog else {
+        return base;
+    };
+    let colors = *colors;
+    let card = container(dialog)
+        .max_width(520)
+        .width(Length::Shrink)
+        .padding(16)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(colors.surface)),
+            text_color: Some(colors.foreground),
+            border: Border {
+                color: colors.border,
+                width: 1.0,
+                radius: border::radius(RADIUS_MD),
+            },
+            ..container::Style::default()
+        });
+    stack![
+        base,
+        container(card)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::BLACK.scale_alpha(0.4))),
+                ..container::Style::default()
+            })
+    ]
+    .into()
 }
 
 // ---- container styles ----

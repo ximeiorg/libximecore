@@ -47,6 +47,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tokio-stream = "0.1"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+aes-gcm = "0.10"
 base64 = "0.22"
 getrandom = "0.3"
 config = "0.15"
@@ -55,6 +56,7 @@ subtle = "2"
 http = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
+rfd = "0.15"
 hmac = "0.12"
 hex = "0.4"
 toml = "0.9"

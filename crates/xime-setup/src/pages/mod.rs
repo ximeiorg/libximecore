@@ -14,6 +14,8 @@ pub mod clipboard;
 pub mod pair;
 #[cfg(feature = "smart-suggestion-page")]
 pub mod smart_suggestion;
+#[cfg(all(feature = "voice-page", windows))]
+pub mod voice;
 #[cfg(target_os = "linux")]
 pub mod sync;
 
@@ -50,8 +52,16 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
         ),
     ];
 
-    #[cfg(feature = "smart-suggestion-page")]
-    groups.push(("智能", vec![("icons/thinking.svg", "智能联想")]));
+    // 「智能」组：智能联想 + 语音转文本（仅 Windows）。
+    #[cfg(any(feature = "smart-suggestion-page", all(feature = "voice-page", windows)))]
+    {
+        let mut smart_items: Vec<(&'static str, &'static str)> = Vec::new();
+        #[cfg(feature = "smart-suggestion-page")]
+        smart_items.push(("icons/thinking.svg", "智能联想"));
+        #[cfg(all(feature = "voice-page", windows))]
+        smart_items.push(("icons/mic.svg", "语音转文本"));
+        groups.push(("智能", smart_items));
+    }
 
     #[cfg(any(
         target_os = "linux",
@@ -68,7 +78,7 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
         #[cfg(feature = "clipboard-page")]
         sync_items.push(("icons/clipboard.svg", "剪贴板"));
         #[cfg(feature = "backup-page")]
-        sync_items.push(("icons/backup.svg", "云备份"));
+        sync_items.push(("icons/backup.svg", "同步与备份"));
         if !sync_items.is_empty() {
             groups.push(("同步与备份", sync_items));
         }
@@ -217,7 +227,9 @@ pub fn page_content<'a>(
         #[cfg(feature = "clipboard-page")]
         "剪贴板" => clipboard::view(settings, colors),
         #[cfg(feature = "backup-page")]
-        "云备份" => backup::view(settings, colors),
+        "同步与备份" => backup::view(settings, colors),
+        #[cfg(all(feature = "voice-page", windows))]
+        "语音转文本" => voice::view(settings, colors),
         _ => about::view(settings, colors),
     }
 }

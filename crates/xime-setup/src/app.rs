@@ -45,6 +45,9 @@ pub fn run() -> iced::Result {
     let title: &'static str = Box::leak(format!("{} 设置", meta.display_name).into_boxed_str());
     iced::application(SettingsApp::new, update, view)
         .title(title)
+        // 显式默认字体：通用族（Sans Serif）在 Windows 上可能被 fontdb 解析到
+        // 图标字体，ASCII 渲染成符号乱码（见 components/widgets.rs UI_FONT 注释）
+        .default_font(crate::components::widgets::UI_FONT)
         .window(iced::window::Settings {
             icon,
             platform_specific: iced::window::settings::PlatformSpecific {
@@ -227,7 +230,82 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         }
         #[cfg(feature = "clipboard-page")]
         Message::ClearClipboardHistory => {
-            state.settings.show_message("功能开发中".to_string());
+            state.settings.clip_history.clear();
+            state.settings.show_message("剪贴板历史已清空".to_string());
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ClipboardHistoryRefresh => {
+            state.settings.clip_history.reload();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ClipboardTab(i) => {
+            state.settings.clipboard_tab = i;
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ClipboardHistorySelected(id) => {
+            state.settings.clip_history.select(id);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ClipboardHistoryRemove(id) => {
+            state.settings.clip_history.remove(id);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendFromHistory(id) => {
+            let text = state
+                .settings
+                .clip_history
+                .items
+                .iter()
+                .find(|item| item.id == id)
+                .map(|item| item.text.clone());
+            if let Some(text) = text {
+                state.settings.quick_send.add_from_text(&text);
+                state.settings.show_message("已添加到快捷发送".to_string());
+            }
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendCodeChanged(v) => {
+            state.settings.quick_send.set_draft_code(v);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendContentChanged(v) => {
+            state.settings.quick_send.set_draft_content(v);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendOpen => {
+            state.settings.quick_send.open_dialog();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendCancel => {
+            state.settings.quick_send.cancel_dialog();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendAdd => {
+            state.settings.quick_send.add_draft();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendSelected(id) => {
+            state.settings.quick_send.select(id);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendRemove(id) => {
+            state.settings.quick_send.remove(id);
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ClipboardHistoryPrevPage => {
+            state.settings.clip_history.prev_page();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::ClipboardHistoryNextPage => {
+            state.settings.clip_history.next_page();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendPrevPage => {
+            state.settings.quick_send.prev_page();
+        }
+        #[cfg(feature = "clipboard-page")]
+        Message::QuickSendNextPage => {
+            state.settings.quick_send.next_page();
         }
         #[cfg(feature = "clipboard-page")]
         Message::ServerStart => match state.settings.clipboard.spawn_server() {
@@ -311,6 +389,80 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         #[cfg(feature = "backup-page")]
         Message::BackupDelete(path) => {
             state.settings.backup.start_delete(path);
+        }
+        #[cfg(feature = "backup-page")]
+        Message::RimeSyncNow => {
+            // IPC 同步等待（词典大时数秒）；完成后刷新快照目录概况。
+            if crate::state::notify_sync_user_data() {
+                state.settings.rime_sync.reload();
+                state.settings.show_message("用户资料同步完成".to_string());
+            } else {
+                state
+                    .settings
+                    .show_message("用户资料同步失败（输入法服务未运行？）".to_string());
+            }
+        }
+        #[cfg(all(feature = "voice-page", windows))]
+        Message::SpeechToggle => {
+            state.settings.speech.toggle();
+        }
+        #[cfg(all(feature = "voice-page", windows))]
+        Message::SpeechClear => {
+            state.settings.speech.clear();
+        }
+        #[cfg(all(feature = "voice-page", windows))]
+        Message::SpeechCopy => {
+            if state.settings.speech.copy_text() {
+                state.settings.show_message("识别文本已复制".to_string());
+            } else {
+                state.settings.show_message("复制失败（无文本？）".to_string());
+            }
+        }
+        #[cfg(windows)]
+        Message::DictRefresh => {
+            state.settings.dict_manage.start_refresh();
+        }
+        #[cfg(windows)]
+        Message::DictBackup(dict) => {
+            state.settings.dict_manage.start_backup(dict);
+        }
+        #[cfg(windows)]
+        Message::DictRestore => {
+            // 原生文件对话框（模态；对齐 weasel 恢复流程）。
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("用户词典快照 (*.userdb.txt)", &["userdb.txt"])
+                .pick_file()
+            {
+                state
+                    .settings
+                    .dict_manage
+                    .start_restore(path.display().to_string());
+            }
+        }
+        #[cfg(windows)]
+        Message::DictExport(dict) => {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("文本文件 (*.txt)", &["txt"])
+                .set_file_name(format!("{dict}_export.txt"))
+                .save_file()
+            {
+                state
+                    .settings
+                    .dict_manage
+                    .start_export(dict, path.display().to_string());
+            }
+        }
+        #[cfg(windows)]
+        Message::DictImport(dict) => {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("文本文件 (*.txt)", &["txt"])
+                .pick_file()
+            {
+                state
+                    .settings
+                    .dict_manage
+                    .start_import(dict, path.display().to_string());
+            }
         }
         #[cfg(feature = "clipboard-page")]
         Message::SyncPluginEnabled(v) => {

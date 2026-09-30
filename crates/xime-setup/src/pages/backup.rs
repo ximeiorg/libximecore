@@ -10,11 +10,12 @@ use iced::{Element, Length};
 
 const MODES: [&str; 2] = ["仅配置", "全量"];
 
-/// 云备份页：提供者选择（内置 WebDAV / backup 插件）+ 备份模式 + 操作
-/// （对齐 Android 云备份页：备份服务 / 备份设置 / 备份操作 / 远端备份）。
+/// 同步与备份页：用户资料同步（rime 词库快照导出/合并）+ 云备份
+/// （提供者选择 / 备份模式 / 操作 / 远端备份，对齐 Android 云备份页）。
 pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     let b = &settings.backup;
     let editable = b.busy.is_none();
+    let mut groups = vec![rime_sync_group(&settings.rime_sync, colors)];
 
     // 提供者 pick_list。
     let provider_labels: Vec<&str> = b.providers.iter().map(|p| p.label()).collect();
@@ -149,15 +150,16 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
         ));
         service_items.push(settings_item("连接", None::<String>, colors, test_control));
     }
-    let mut groups = vec![settings_group(
+    let mut backup_groups = vec![settings_group(
         "备份服务",
         Some("备份内容为 rime 用户目录；backup 插件与 Android 通用"),
         colors,
         service_items,
     )];
     if let Some(g) = plugin_group {
-        groups.push(g);
+        backup_groups.push(g);
     }
+    groups.extend(backup_groups);
 
     // 备份模式。
     let current_mode = MODES.get(b.mode as usize).copied().unwrap_or(MODES[0]);
@@ -248,7 +250,60 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
         remote_items,
     ));
 
-    settings_page("云备份", colors, groups)
+    settings_page("同步与备份", colors, groups)
+}
+
+/// 用户资料同步卡片：本机标识 + 快照目录概况 + 立即同步。
+fn rime_sync_group<'a>(
+    s: &'a crate::state::RimeSyncState,
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    let devices_desc = if s.devices.is_empty() {
+        "尚未生成快照；同步后每台设备的词库快照存放在各自子目录".to_string()
+    } else {
+        format!("已有多端快照（{} 台设备），同步时自动合并", s.devices.len())
+    };
+    settings_group(
+        "用户资料同步",
+        Some("把打字词库（用户词典）导出为快照并合并其他设备的快照；是跨设备词库互通的机制，与整包备份不同"),
+        colors,
+        vec![
+            settings_item(
+                "本机标识",
+                Some("installation_id，快照目录以此隔离各设备"),
+                colors,
+                text(&s.installation_id)
+                    .size(13)
+                    .color(colors.foreground_muted)
+                    .into(),
+            ),
+            settings_item(
+                "快照目录",
+                Some(devices_desc),
+                colors,
+                text(s.sync_dir.display().to_string())
+                    .size(13)
+                    .color(colors.foreground_muted)
+                    .into(),
+            ),
+            settings_item(
+                "上次同步",
+                None::<String>,
+                colors,
+                text(s.last_sync.as_deref().unwrap_or("从未同步"))
+                    .size(13)
+                    .color(colors.foreground_muted)
+                    .into(),
+            ),
+            settings_item(
+                "操作",
+                Some("建议输入法空闲时同步；词典大时可能需要数秒"),
+                colors,
+                text_button("立即同步", colors, Message::RimeSyncNow).into(),
+            ),
+        ],
+    )
+    .into()
 }
 
 /// 字节 → 人类可读大小（KB / MB，与 Android 展示一致）。

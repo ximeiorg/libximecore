@@ -77,6 +77,7 @@ static NOTIFY_RELOAD_STYLE: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_SELECT_SCHEMA: OnceLock<fn(&str) -> bool> = OnceLock::new();
 static NOTIFY_MESSAGE: OnceLock<fn(&str, &str)> = OnceLock::new();
 static NOTIFY_RELOAD_PLUGINS: OnceLock<fn()> = OnceLock::new();
+static NOTIFY_SYNC_USER_DATA: OnceLock<fn() -> bool> = OnceLock::new();
 
 /// 设置宿主进程的「部署后重载」回调（daemon 重载配置）。
 pub fn set_notify_deploy(f: fn()) {
@@ -103,6 +104,96 @@ pub fn set_notify_message(f: fn(&str, &str)) {
 /// 设置宿主进程的「插件变更」回调（daemon 重载插件：安装/卸载/启停后触发）。
 pub fn set_notify_reload_plugins(f: fn()) {
     let _ = NOTIFY_RELOAD_PLUGINS.set(f);
+}
+
+/// 设置宿主进程的「用户资料同步」回调（IPC SyncUserData，阻塞等待完成）。
+pub fn set_notify_sync_user_data(f: fn() -> bool) {
+    let _ = NOTIFY_SYNC_USER_DATA.set(f);
+}
+
+/// 触发 rime 用户资料同步；false = 服务器未运行或同步失败。
+#[cfg(feature = "backup-page")]
+pub fn notify_sync_user_data() -> bool {
+    NOTIFY_SYNC_USER_DATA.get().map(|f| f()).unwrap_or(false)
+}
+
+// ---- 词典管理回调（host 注册，Windows；对齐 weasel DictManagementDialog）----
+
+/// 用户词典列表结果（词典名 + 快照目录）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct DictListResult {
+    pub dicts: Vec<String>,
+    pub sync_dir: String,
+}
+
+#[cfg(windows)]
+static NOTIFY_DICT_LIST: OnceLock<fn() -> Option<DictListResult>> = OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_DICT_BACKUP: OnceLock<fn(&str) -> bool> = OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_DICT_RESTORE: OnceLock<fn(&str) -> bool> = OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_DICT_EXPORT: OnceLock<fn(&str, &str) -> Option<i32>> = OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_DICT_IMPORT: OnceLock<fn(&str, &str) -> Option<i32>> = OnceLock::new();
+
+/// 设置宿主进程的「列出用户词典」回调（IPC ListUserDicts）。
+#[cfg(windows)]
+pub fn set_notify_dict_list(f: fn() -> Option<DictListResult>) {
+    let _ = NOTIFY_DICT_LIST.set(f);
+}
+
+/// 设置宿主进程的「备份用户词典」回调（IPC BackupUserDict）。
+#[cfg(windows)]
+pub fn set_notify_dict_backup(f: fn(&str) -> bool) {
+    let _ = NOTIFY_DICT_BACKUP.set(f);
+}
+
+/// 设置宿主进程的「恢复用户词典」回调（IPC RestoreUserDict）。
+#[cfg(windows)]
+pub fn set_notify_dict_restore(f: fn(&str) -> bool) {
+    let _ = NOTIFY_DICT_RESTORE.set(f);
+}
+
+/// 设置宿主进程的「导出用户词典」回调（IPC ExportUserDict，返回条数）。
+#[cfg(windows)]
+pub fn set_notify_dict_export(f: fn(&str, &str) -> Option<i32>) {
+    let _ = NOTIFY_DICT_EXPORT.set(f);
+}
+
+/// 设置宿主进程的「导入用户词典」回调（IPC ImportUserDict，返回条数）。
+#[cfg(windows)]
+pub fn set_notify_dict_import(f: fn(&str, &str) -> Option<i32>) {
+    let _ = NOTIFY_DICT_IMPORT.set(f);
+}
+
+#[cfg(windows)]
+fn notify_dict_list() -> Option<DictListResult> {
+    NOTIFY_DICT_LIST.get().and_then(|f| f())
+}
+
+#[cfg(windows)]
+fn notify_dict_backup(dict: &str) -> bool {
+    NOTIFY_DICT_BACKUP.get().map(|f| f(dict)).unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn notify_dict_restore(path: &str) -> bool {
+    NOTIFY_DICT_RESTORE
+        .get()
+        .map(|f| f(path))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn notify_dict_export(dict: &str, path: &str) -> Option<i32> {
+    NOTIFY_DICT_EXPORT.get().and_then(|f| f(dict, path))
+}
+
+#[cfg(windows)]
+fn notify_dict_import(dict: &str, path: &str) -> Option<i32> {
+    NOTIFY_DICT_IMPORT.get().and_then(|f| f(dict, path))
 }
 
 fn notify_daemon_reload_plugins() {
@@ -214,6 +305,52 @@ pub enum Message {
     SaveSmartSuggestion,
     #[cfg(feature = "clipboard-page")]
     ClearClipboardHistory,
+    /// 剪贴板历史：刷新（重读 server 持久化文件）。
+    #[cfg(feature = "clipboard-page")]
+    ClipboardHistoryRefresh,
+    /// 剪贴板页：切换 Tab（0=历史 1=快捷发送 2=同步）。
+    #[cfg(feature = "clipboard-page")]
+    ClipboardTab(usize),
+    /// 剪贴板历史：点击卡片选中/取消选中。
+    #[cfg(feature = "clipboard-page")]
+    ClipboardHistorySelected(i64),
+    /// 剪贴板历史：删除单条。
+    #[cfg(feature = "clipboard-page")]
+    ClipboardHistoryRemove(i64),
+    /// 剪贴板历史：将条目添加为快捷发送。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendFromHistory(i64),
+    /// 快捷发送：草稿触发编码变更。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendCodeChanged(String),
+    /// 快捷发送：草稿内容变更。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendContentChanged(String),
+    /// 快捷发送：打开新增弹窗。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendOpen,
+    /// 快捷发送：取消新增弹窗。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendCancel,
+    /// 快捷发送：确认添加（弹窗内）。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendAdd,
+    /// 快捷发送：点击卡片选中/取消选中。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendSelected(i64),
+    /// 快捷发送：删除条目（SQLite id）。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendRemove(i64),
+    /// 剪贴板历史：翻页（上一页 / 下一页）。
+    #[cfg(feature = "clipboard-page")]
+    ClipboardHistoryPrevPage,
+    #[cfg(feature = "clipboard-page")]
+    ClipboardHistoryNextPage,
+    /// 快捷发送：翻页（上一页 / 下一页）。
+    #[cfg(feature = "clipboard-page")]
+    QuickSendPrevPage,
+    #[cfg(feature = "clipboard-page")]
+    QuickSendNextPage,
     #[cfg(feature = "clipboard-page")]
     ServerStart,
     #[cfg(feature = "clipboard-page")]
@@ -272,6 +409,36 @@ pub enum Message {
     /// 云备份：删除指定备份（远端路径）。
     #[cfg(feature = "backup-page")]
     BackupDelete(String),
+    /// 用户资料同步：立即同步（rime sync_user_data，词典快照导出+合并）。
+    #[cfg(feature = "backup-page")]
+    RimeSyncNow,
+    /// 语音转文本：开始/停止听写。
+    #[cfg(feature = "voice-page")]
+    #[cfg(windows)]
+    SpeechToggle,
+    /// 语音转文本：清空识别文本。
+    #[cfg(feature = "voice-page")]
+    #[cfg(windows)]
+    SpeechClear,
+    /// 语音转文本：复制识别文本到剪贴板。
+    #[cfg(feature = "voice-page")]
+    #[cfg(windows)]
+    SpeechCopy,
+    /// 词典管理：刷新用户词典列表。
+    #[cfg(windows)]
+    DictRefresh,
+    /// 词典管理：备份词典快照（词典名）。
+    #[cfg(windows)]
+    DictBackup(String),
+    /// 词典管理：从快照文件恢复（弹文件对话框）。
+    #[cfg(windows)]
+    DictRestore,
+    /// 词典管理：导出词典为文本（词典名，弹保存对话框）。
+    #[cfg(windows)]
+    DictExport(String),
+    /// 词典管理：从文本导入词典（词典名，弹文件对话框）。
+    #[cfg(windows)]
+    DictImport(String),
     #[cfg(feature = "pair-page")]
     StartPairing,
     /// 订阅轮询：后台任务结果。
@@ -297,8 +464,27 @@ pub struct SettingsState {
     pub clipboard: ClipboardState,
     #[cfg(feature = "clipboard-page")]
     pub sync_plugin: SyncPluginUiState,
+    /// 剪贴板历史（clipboard_history.json，server 持久化、设置页展示/清空）。
+    #[cfg(feature = "clipboard-page")]
+    pub clip_history: ClipboardHistoryState,
+    /// 快捷发送（quick_send.yaml，设置页编辑，输入法面板后续消费同一文件）。
+    #[cfg(feature = "clipboard-page")]
+    pub quick_send: QuickSendState,
+    /// 剪贴板页当前 Tab（0=历史 1=快捷发送 2=同步）。
+    #[cfg(feature = "clipboard-page")]
+    pub clipboard_tab: usize,
     #[cfg(feature = "backup-page")]
     pub backup: BackupState,
+    /// rime 用户资料同步（快照目录概况 + 立即同步入口）。
+    #[cfg(feature = "backup-page")]
+    pub rime_sync: RimeSyncState,
+    /// 语音转文本（Windows WinRT 听写；worker 归线程所有，此处只存句柄与镜像）。
+    #[cfg(feature = "voice-page")]
+    #[cfg(windows)]
+    pub speech: SpeechState,
+    /// 词典管理（用户词典列表 + 备份/恢复/导出/导入）。
+    #[cfg(windows)]
+    pub dict_manage: DictManageState,
     #[cfg(target_os = "linux")]
     pub sync: SyncState,
 }
@@ -329,8 +515,20 @@ impl SettingsState {
             clipboard: ClipboardState::default(),
             #[cfg(feature = "clipboard-page")]
             sync_plugin: SyncPluginUiState::default(),
+            #[cfg(feature = "clipboard-page")]
+            clip_history: ClipboardHistoryState::load(),
+            #[cfg(feature = "clipboard-page")]
+            quick_send: QuickSendState::load(),
+            #[cfg(feature = "clipboard-page")]
+            clipboard_tab: 0,
             #[cfg(feature = "backup-page")]
             backup: BackupState::default(),
+            #[cfg(feature = "backup-page")]
+            rime_sync: RimeSyncState::load(),
+            #[cfg(all(feature = "voice-page", windows))]
+            speech: SpeechState::default(),
+            #[cfg(windows)]
+            dict_manage: DictManageState::default(),
             #[cfg(target_os = "linux")]
             sync: SyncState::default(),
         };
@@ -757,6 +955,10 @@ impl SettingsState {
         self.sync_plugin.poll();
         #[cfg(feature = "backup-page")]
         self.backup.poll();
+        #[cfg(windows)]
+        self.dict_manage.poll();
+        #[cfg(all(feature = "voice-page", windows))]
+        self.speech.poll();
     }
 
     /// 扩展商店安装/卸载消息 4 秒后自动消失。
@@ -1496,6 +1698,514 @@ pub fn scan_clipboard_sync_plugins() -> Vec<ClipboardSyncPluginInfo> {
     out
 }
 
+// ------------------------------------------------------------------
+// 剪贴板历史（SQLite：xime_config::clipboard_store，与 server 共享 clipboard.db）
+// ------------------------------------------------------------------
+
+/// 列表分页：每页条数（2 列 × 4 行卡片）。
+#[cfg(feature = "clipboard-page")]
+pub const CLIPBOARD_PAGE_SIZE: usize = 8;
+
+/// 剪贴板历史页面状态：SQLite 读取展示 + 清空。
+#[cfg(feature = "clipboard-page")]
+#[derive(Clone)]
+pub struct ClipboardHistoryState {
+    /// 最新在前。
+    pub items: Vec<xime_config::clipboard_store::ClipboardHistoryItem>,
+    /// 当前选中的历史条目 id（点击卡片选中，再点取消）。
+    pub selected: Option<i64>,
+    /// 当前页（0 起）。
+    pub page: usize,
+}
+
+#[cfg(feature = "clipboard-page")]
+impl ClipboardHistoryState {
+    pub fn load() -> Self {
+        let db = xime_config::clipboard_store::default_db_path();
+        xime_config::clipboard_store::migrate_legacy(
+            &db,
+            &db.with_file_name("clipboard_history.json"),
+            &db.with_file_name("quick_send.yaml"),
+        );
+        Self {
+            items: xime_config::clipboard_store::list_history(&db, 50).unwrap_or_default(),
+            selected: None,
+            page: 0,
+        }
+    }
+
+    pub fn reload(&mut self) {
+        self.items = xime_config::clipboard_store::list_history(
+            &xime_config::clipboard_store::default_db_path(),
+            50,
+        )
+        .unwrap_or_default();
+        self.clamp_page();
+    }
+
+    /// 总页数（至少 1）。
+    pub fn total_pages(&self) -> usize {
+        self.items.len().div_ceil(CLIPBOARD_PAGE_SIZE).max(1)
+    }
+
+    /// 列表变化后把当前页夹回有效范围。
+    pub fn clamp_page(&mut self) {
+        self.page = self.page.min(self.total_pages() - 1);
+    }
+
+    pub fn prev_page(&mut self) {
+        self.page = self.page.saturating_sub(1);
+    }
+
+    pub fn next_page(&mut self) {
+        if self.page + 1 < self.total_pages() {
+            self.page += 1;
+        }
+    }
+
+    /// 点击卡片：选中 / 再点取消。
+    pub fn select(&mut self, id: i64) {
+        self.selected = if self.selected == Some(id) { None } else { Some(id) };
+    }
+
+    /// 删除单条历史。
+    pub fn remove(&mut self, id: i64) {
+        let _ = xime_config::clipboard_store::remove_history_item(
+            &xime_config::clipboard_store::default_db_path(),
+            id,
+        );
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        self.reload();
+    }
+
+    /// 清空（保留快捷发送条目）。
+    pub fn clear(&mut self) {
+        let _ = xime_config::clipboard_store::clear_history(
+            &xime_config::clipboard_store::default_db_path(),
+        );
+        self.items.clear();
+        self.selected = None;
+        self.page = 0;
+    }
+}
+
+// ------------------------------------------------------------------
+// 快捷发送（clipboard_entries 表 isQuickSend=1 子集，对齐 Android QuickSendItem）
+// ------------------------------------------------------------------
+
+/// 快捷发送页面状态：SQLite 列表 + 新增弹窗。
+#[cfg(feature = "clipboard-page")]
+#[derive(Clone)]
+pub struct QuickSendState {
+    pub items: Vec<xime_config::clipboard_store::QuickSendItem>,
+    /// 当前选中的快捷发送条目 id（点击卡片选中，再点取消）。
+    pub selected: Option<i64>,
+    /// 当前页（0 起）。
+    pub page: usize,
+    /// 新增弹窗是否打开。
+    pub dialog_open: bool,
+    /// 新增弹窗草稿（内容 / 触发编码输入框）。
+    pub draft_content: String,
+    pub draft_code: String,
+}
+
+#[cfg(feature = "clipboard-page")]
+impl QuickSendState {
+    pub fn load() -> Self {
+        let db = xime_config::clipboard_store::default_db_path();
+        xime_config::clipboard_store::migrate_legacy(
+            &db,
+            &db.with_file_name("clipboard_history.json"),
+            &db.with_file_name("quick_send.yaml"),
+        );
+        Self {
+            items: xime_config::clipboard_store::list_quick_send(&db).unwrap_or_default(),
+            selected: None,
+            page: 0,
+            dialog_open: false,
+            draft_content: String::new(),
+            draft_code: String::new(),
+        }
+    }
+
+    pub fn reload(&mut self) {
+        self.items = xime_config::clipboard_store::list_quick_send(
+            &xime_config::clipboard_store::default_db_path(),
+        )
+        .unwrap_or_default();
+        self.clamp_page();
+    }
+
+    /// 总页数（至少 1）。
+    pub fn total_pages(&self) -> usize {
+        self.items.len().div_ceil(CLIPBOARD_PAGE_SIZE).max(1)
+    }
+
+    /// 列表变化后把当前页夹回有效范围。
+    pub fn clamp_page(&mut self) {
+        self.page = self.page.min(self.total_pages() - 1);
+    }
+
+    pub fn prev_page(&mut self) {
+        self.page = self.page.saturating_sub(1);
+    }
+
+    pub fn next_page(&mut self) {
+        if self.page + 1 < self.total_pages() {
+            self.page += 1;
+        }
+    }
+
+    /// 点击卡片：选中 / 再点取消。
+    pub fn select(&mut self, id: i64) {
+        self.selected = if self.selected == Some(id) { None } else { Some(id) };
+    }
+
+    pub fn set_draft_code(&mut self, v: String) {
+        self.draft_code = v;
+    }
+
+    pub fn set_draft_content(&mut self, v: String) {
+        self.draft_content = v;
+    }
+
+    /// 打开新增弹窗（清空上次草稿）。
+    pub fn open_dialog(&mut self) {
+        self.dialog_open = true;
+        self.draft_content.clear();
+        self.draft_code.clear();
+    }
+
+    pub fn cancel_dialog(&mut self) {
+        self.dialog_open = false;
+        self.draft_content.clear();
+        self.draft_code.clear();
+    }
+
+    /// 确认添加（内容为空时忽略并保持弹窗打开）；成功后关闭弹窗并刷新列表。
+    pub fn add_draft(&mut self) -> bool {
+        let content = self.draft_content.trim().to_string();
+        if content.is_empty() {
+            return false;
+        }
+        let code = self.draft_code.trim().to_string();
+        let db = xime_config::clipboard_store::default_db_path();
+        if xime_config::clipboard_store::add_quick_send(&db, &content, &code).is_err() {
+            return false;
+        }
+        self.cancel_dialog();
+        self.reload();
+        true
+    }
+
+    pub fn remove(&mut self, id: i64) {
+        let db = xime_config::clipboard_store::default_db_path();
+        let _ = xime_config::clipboard_store::remove_quick_send(&db, id);
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        self.reload();
+    }
+
+    /// 从剪贴板历史文本直接添加为快捷发送（无触发编码）。
+    pub fn add_from_text(&mut self, text: &str) -> bool {
+        let content = text.trim();
+        if content.is_empty() {
+            return false;
+        }
+        let db = xime_config::clipboard_store::default_db_path();
+        if xime_config::clipboard_store::add_quick_send(&db, content, "").is_err() {
+            return false;
+        }
+        self.reload();
+        true
+    }
+}
+
+// ------------------------------------------------------------------
+// rime 用户资料同步（sync_user_data：用户词典快照导出/合并，多端互通基础）
+// ------------------------------------------------------------------
+
+/// rime 用户资料同步状态：本机标识 + sync 快照目录概况（对齐 weasel
+/// 「用户资料同步」语义；快照目录可整体上云实现多端词库合并）。
+#[cfg(feature = "backup-page")]
+#[derive(Clone)]
+pub struct RimeSyncState {
+    /// installation.yaml 的 installation_id（各端快照目录的隔离键）。
+    pub installation_id: String,
+    /// 同步快照目录（<rime>/sync）。
+    pub sync_dir: std::path::PathBuf,
+    /// sync 目录下的设备 installation 列表（含本机；从未同步为空）。
+    pub devices: Vec<String>,
+    /// 上次同步（sync 目录修改时间的相对描述；从未同步为 None）。
+    pub last_sync: Option<String>,
+}
+
+#[cfg(feature = "backup-page")]
+impl RimeSyncState {
+    pub fn load() -> Self {
+        let (_, rime_dir) = get_data_dirs();
+        let sync_dir = rime_dir.join("sync");
+        // installation.yaml 形如 `installation_id: "uuid"`（引号可有可无）。
+        let installation_id = std::fs::read_to_string(rime_dir.join("installation.yaml"))
+            .ok()
+            .and_then(|content| {
+                content.lines().find_map(|line| {
+                    let rest = line.trim().strip_prefix("installation_id:")?;
+                    let v = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    (!v.is_empty()).then_some(v)
+                })
+            })
+            .unwrap_or_default();
+        let mut devices: Vec<String> = std::fs::read_dir(&sync_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        devices.sort();
+        let last_sync = std::fs::metadata(&sync_dir)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map(relative_time_ago);
+        Self {
+            installation_id,
+            sync_dir,
+            devices,
+            last_sync,
+        }
+    }
+
+    pub fn reload(&mut self) {
+        *self = Self::load();
+    }
+}
+
+/// 距今时长 → 人话（刚刚 / N 分钟前 / N 小时前 / N 天前）。
+#[cfg(feature = "backup-page")]
+fn relative_time_ago(elapsed: std::time::Duration) -> String {
+    let mins = elapsed.as_secs() / 60;
+    if mins < 1 {
+        "刚刚".to_string()
+    } else if mins < 60 {
+        format!("{mins} 分钟前")
+    } else if mins < 60 * 24 {
+        format!("{} 小时前", mins / 60)
+    } else {
+        format!("{} 天前", mins / (60 * 24))
+    }
+}
+
+// ------------------------------------------------------------------
+// 语音转文本（Windows WinRT 听写；speech.rs worker 的 UI 侧镜像）
+// ------------------------------------------------------------------
+
+/// 语音转文本页面状态：worker 句柄 + 结果槽镜像（250ms 轮询刷新）。
+#[cfg(all(feature = "voice-page", windows))]
+#[derive(Clone, Default)]
+pub struct SpeechState {
+    /// 语音 worker 句柄（首次开始时创建；None = 从未启动）。
+    handle: Option<crate::speech::VoiceHandle>,
+    /// 正在听写（Listening）。
+    pub listening: bool,
+    /// 引擎处理中（启动/约束编译）。
+    pub processing: bool,
+    /// 累计识别文本（镜像 sink.text）。
+    pub text: String,
+    /// 最近一次错误。
+    pub error: Option<String>,
+}
+
+#[cfg(all(feature = "voice-page", windows))]
+impl SpeechState {
+    /// BackgroundPoll 节拍：把 worker 结果槽镜像到 UI 状态。
+    pub fn poll(&mut self) {
+        let Some(h) = &self.handle else {
+            return;
+        };
+        let sink = h.sink.lock().unwrap_or_else(|e| e.into_inner());
+        self.text = sink.text.clone();
+        self.listening = sink.state == crate::speech::RecognitionState::Listening;
+        self.processing = sink.state == crate::speech::RecognitionState::Processing;
+        if sink.state == crate::speech::RecognitionState::Error {
+            self.error = sink.error.clone();
+        }
+    }
+
+    /// 开始/停止听写（worker 首次使用时创建）。
+    pub fn toggle(&mut self) {
+        let h = self.handle.get_or_insert_with(crate::speech::VoiceHandle::spawn);
+        if self.listening || self.processing {
+            h.stop();
+        } else {
+            self.error = None;
+            h.start();
+        }
+    }
+
+    /// 清空累计文本（连同 worker 槽）。
+    pub fn clear(&mut self) {
+        if let Some(h) = &self.handle {
+            let mut sink = h.sink.lock().unwrap_or_else(|e| e.into_inner());
+            sink.text.clear();
+        }
+        self.text.clear();
+    }
+
+    /// 复制识别文本到系统剪贴板。
+    pub fn copy_text(&self) -> bool {
+        if self.text.is_empty() {
+            return false;
+        }
+        match arboard::Clipboard::new() {
+            Ok(mut clip) => clip.set_text(self.text.clone()).is_ok(),
+            Err(_) => false,
+        }
+    }
+}
+
+// ------------------------------------------------------------------
+// 词典管理（用户词典列表 + 备份/恢复/导出/导入，对齐 weasel DictManagementDialog）
+// ------------------------------------------------------------------
+
+/// 词典后台任务结果（后台线程 → UI 轮询）。
+#[cfg(windows)]
+enum DictTaskResult {
+    List(DictListResult),
+    Message(String),
+}
+
+#[cfg(windows)]
+static DICT_TASK_OUTCOME: std::sync::Mutex<Option<DictTaskResult>> = std::sync::Mutex::new(None);
+
+/// 词典管理页面状态。
+#[cfg(windows)]
+#[derive(Clone, Default)]
+pub struct DictManageState {
+    /// 用户词典名列表。
+    pub dicts: Vec<String>,
+    /// 快照目录（同步目录）。
+    pub sync_dir: String,
+    /// 进行中的操作标识（refresh/backup/restore/export/import）。
+    pub busy: Option<&'static str>,
+    /// 最近一次操作的结果消息。
+    pub message: Option<String>,
+}
+
+#[cfg(windows)]
+impl DictManageState {
+    fn submit(message: DictTaskResult) {
+        *DICT_TASK_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
+    }
+
+    /// 刷新用户词典列表。
+    pub fn start_refresh(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("refresh");
+        std::thread::spawn(|| {
+            let result = match notify_dict_list() {
+                Some(r) => DictTaskResult::List(r),
+                None => DictTaskResult::Message(
+                    "获取词典列表失败（输入法服务未运行？）".to_string(),
+                ),
+            };
+            Self::submit(result);
+        });
+    }
+
+    /// 备份词典快照到同步目录。
+    pub fn start_backup(&mut self, dict: String) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("backup");
+        std::thread::spawn(move || {
+            let ok = notify_dict_backup(&dict);
+            let msg = if ok {
+                format!("已备份 {dict} 快照到同步目录")
+            } else {
+                format!("备份 {dict} 失败（输入法服务未运行？）")
+            };
+            Self::submit(DictTaskResult::Message(msg));
+        });
+    }
+
+    /// 从快照文件恢复。
+    pub fn start_restore(&mut self, path: String) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("restore");
+        std::thread::spawn(move || {
+            let ok = notify_dict_restore(&path);
+            let msg = if ok {
+                "已从快照恢复用户词典".to_string()
+            } else {
+                "恢复用户词典失败（快照无效或服务未运行？）".to_string()
+            };
+            Self::submit(DictTaskResult::Message(msg));
+        });
+    }
+
+    /// 导出词典为文本。
+    pub fn start_export(&mut self, dict: String, path: String) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("export");
+        std::thread::spawn(move || {
+            let msg = match notify_dict_export(&dict, &path) {
+                Some(count) => format!("已导出 {dict}（{count} 条）"),
+                None => format!("导出 {dict} 失败（输入法服务未运行？）"),
+            };
+            Self::submit(DictTaskResult::Message(msg));
+        });
+    }
+
+    /// 从文本导入词典（合并去重）。
+    pub fn start_import(&mut self, dict: String, path: String) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("import");
+        std::thread::spawn(move || {
+            let msg = match notify_dict_import(&dict, &path) {
+                Some(count) => format!("已导入 {dict}（{count} 条）"),
+                None => format!("导入 {dict} 失败（文本格式无效或服务未运行？）"),
+            };
+            Self::submit(DictTaskResult::Message(msg));
+        });
+    }
+
+    /// BackgroundPoll 节拍：取后台任务结果。
+    pub fn poll(&mut self) {
+        let outcome = DICT_TASK_OUTCOME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match outcome {
+            Some(DictTaskResult::List(r)) => {
+                self.dicts = r.dicts;
+                self.sync_dir = r.sync_dir;
+                self.busy = None;
+            }
+            Some(DictTaskResult::Message(m)) => {
+                self.busy = None;
+                self.message = Some(m);
+            }
+            None => {}
+        }
+    }
+}
+
 /// 剪贴板同步插件的页面状态（开关 + 选择 + 配置表单）。
 #[cfg(feature = "clipboard-page")]
 #[derive(Clone)]
@@ -1569,8 +2279,20 @@ impl SyncPluginUiState {
                         .join(format!("{id}.yaml")),
                 )
                 .unwrap_or_default();
-                let config: std::collections::BTreeMap<String, String> =
+                let mut config: std::collections::BTreeMap<String, String> =
                     serde_yaml::from_str(&content).unwrap_or_default();
+                let key_path = xime_plugin::cipher::key_path_for_config(
+                    &config_base_dir()
+                        .join("plugins/config")
+                        .join(format!("{id}.yaml")),
+                );
+                for value in config.values_mut() {
+                    if let Some(plain) =
+                        xime_plugin::cipher::decrypt_with_key_path(&key_path, value)
+                    {
+                        *value = plain;
+                    }
+                }
                 let values = fields
                     .iter()
                     .map(|f| {
@@ -1649,6 +2371,11 @@ impl SyncPluginUiState {
         }
         if let Ok(yaml) = serde_yaml::to_string(&config) {
             let _ = std::fs::write(path, yaml);
+        }
+        // 配置保存 ≠ 启用同步：开关未开时明确提示，避免「配了但不推送」的困惑。
+        if !self.enabled {
+            self.message =
+                Some("配置已保存；当前同步未启用，请先打开「启用剪贴板同步」开关".to_string());
         }
     }
 
@@ -1849,10 +2576,25 @@ fn plugin_config_path(id: &str) -> std::path::PathBuf {
 
 #[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
 fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
-    let Ok(content) = std::fs::read_to_string(plugin_config_path(id)) else {
+    let path = plugin_config_path(id);
+    let Ok(content) = std::fs::read_to_string(&path) else {
         return Default::default();
     };
-    serde_yaml::from_str(&content).unwrap_or_default()
+    let mut map: std::collections::BTreeMap<String, String> =
+        serde_yaml::from_str(&content).unwrap_or_default();
+    // 值解密（host.config 同一密文格式；无前缀旧版明文原样）
+    let key_path = xime_plugin::cipher::key_path_for_config(&path);
+    map.retain(|k, v| match xime_plugin::cipher::decrypt_with_key_path(&key_path, v) {
+        Some(plain) => {
+            *v = plain;
+            true
+        }
+        None => {
+            tracing::warn!("[config] 值解密失败，条目按缺失处理: {k}");
+            false
+        }
+    });
+    map
 }
 
 #[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
@@ -1861,7 +2603,18 @@ fn write_plugin_config(id: &str, map: &std::collections::BTreeMap<String, String
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(yaml) = serde_yaml::to_string(map) {
+    // 值加密落盘（与 host.config 同一密文格式；明文旧值随全量写入自动升级）
+    let key_path = xime_plugin::cipher::key_path_for_config(&path);
+    let encrypted: std::collections::BTreeMap<String, String> = map
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                xime_plugin::cipher::encrypt_with_key_path(&key_path, v),
+            )
+        })
+        .collect();
+    if let Ok(yaml) = serde_yaml::to_string(&encrypted) {
         let _ = std::fs::write(path, yaml);
     }
 }
@@ -3034,5 +3787,43 @@ schemas:
         assert_eq!(crate::pages::store::format_size("1024"), "1024 B");
         assert_eq!(crate::pages::store::format_size("2048"), "2.0 KB");
         assert_eq!(crate::pages::store::format_size("500"), "500 B");
+    }
+
+    /// 列表翻页：总页数、末页不前进、越界夹回、条目缩减后夹回。
+    /// （不触库：直接构造状态，历史与快捷发送共用同一套页逻辑）
+    #[cfg(feature = "clipboard-page")]
+    #[test]
+    fn list_pagination_pages_and_clamps() {
+        let mk = |n: usize| ClipboardHistoryState {
+            items: (0..n)
+                .map(|i| xime_config::clipboard_store::ClipboardHistoryItem {
+                    id: i as i64,
+                    text: format!("t{i}"),
+                    timestamp: 0,
+                })
+                .collect(),
+            selected: None,
+            page: 0,
+        };
+
+        // 17 条 → 3 页
+        let mut h = mk(17);
+        assert_eq!(h.total_pages(), 3);
+        h.next_page();
+        h.next_page();
+        h.next_page(); // 已在末页，不再前进
+        assert_eq!(h.page, 2);
+        h.prev_page();
+        assert_eq!(h.page, 1);
+        // 空列表至少 1 页
+        assert_eq!(mk(0).total_pages(), 1);
+
+        // 条目缩减后页码夹回有效范围
+        h.page = 9;
+        h.clamp_page();
+        assert_eq!(h.page, 2);
+        h.items.truncate(8);
+        h.clamp_page();
+        assert_eq!(h.page, 0);
     }
 }
