@@ -14,5 +14,6 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 librime = { path = "../librime" }
+rusqlite.workspace = true
 once_cell.workspace = true
 thiserror.workspace = true

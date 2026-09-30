@@ -1,3 +1,4 @@
+pub mod clipboard_store;
 pub mod metadata;
 pub mod rime_deploy;
 pub mod schema_config;
