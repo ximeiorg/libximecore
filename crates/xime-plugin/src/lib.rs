@@ -9,6 +9,7 @@
 //! 契约调用带硬超时（15ms transform / 5s 回调 / 180s 业务），超时熔断降级。
 
 pub mod capabilities;
+pub mod cipher;
 mod manifest;
 mod runtime;
 

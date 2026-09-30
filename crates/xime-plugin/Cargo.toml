@@ -25,6 +25,9 @@ sha1.workspace = true
 hmac.workspace = true
 hex.workspace = true
 base64.workspace = true
+# 插件配置值加密（cipher：AES-256-GCM + DPAPI 密钥保护，对齐 Android SecureValueCipher）
+aes-gcm.workspace = true
+getrandom.workspace = true
 
 [features]
 default = []

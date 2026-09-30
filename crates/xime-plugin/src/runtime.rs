@@ -1377,15 +1377,39 @@ fn load_config(path: &Path) -> Result<HashMap<String, String>, RuntimeError> {
     }
     let content = std::fs::read_to_string(path)
         .map_err(|e| RuntimeError::Config(format!("读取失败: {e}")))?;
-    serde_yaml::from_str(&content).map_err(|e| RuntimeError::Config(format!("解析失败: {e}")))
+    let mut map: HashMap<String, String> =
+        serde_yaml::from_str(&content).map_err(|e| RuntimeError::Config(format!("解析失败: {e}")))?;
+    // 值解密（enc: 前缀 → 明文；无前缀旧版明文原样；认证失败条目按缺失处理，
+    // 对齐 Android SecureValueCipher 的 get 语义）
+    let key_path = crate::cipher::key_path_for_config(path);
+    map.retain(|k, v| {
+        match crate::cipher::decrypt_with_key_path(&key_path, v) {
+            Some(plain) => {
+                *v = plain;
+                true
+            }
+            None => {
+                tracing::warn!("[config] 值解密失败，条目按缺失处理: {k}");
+                false
+            }
+        }
+    });
+    Ok(map)
 }
 
 fn save_config(path: &Path, map: &HashMap<String, String>) -> Result<(), RuntimeError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let yaml =
-        serde_yaml::to_string(map).map_err(|e| RuntimeError::Config(format!("序列化失败: {e}")))?;
+    // 值加密落盘（对齐 Android：全部值经 SecureValueCipher；明文旧值在首次
+    // 保存时随全量写入自动升级为密文）
+    let key_path = crate::cipher::key_path_for_config(path);
+    let encrypted: HashMap<String, String> = map
+        .iter()
+        .map(|(k, v)| (k.clone(), crate::cipher::encrypt_with_key_path(&key_path, v)))
+        .collect();
+    let yaml = serde_yaml::to_string(&encrypted)
+        .map_err(|e| RuntimeError::Config(format!("序列化失败: {e}")))?;
     std::fs::write(path, yaml).map_err(|e| RuntimeError::Config(format!("写入失败: {e}")))
 }
 
