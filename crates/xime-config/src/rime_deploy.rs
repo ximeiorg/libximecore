@@ -1,9 +1,8 @@
 use crate::metadata::app_metadata;
 pub use librime::levers::SchemaInfo;
 use librime::{
-    create_session, get_api, initialize, join_maintenance_thread, setup, start_maintenance, Traits,
+    create_session, initialize, setup, Traits,
 };
-use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::{Once, OnceLock};
 
@@ -83,6 +82,11 @@ fn ensure_user_config_files(_shared_data_dir: &std::path::Path, user_data_dir: &
 }
 
 pub fn init_rime_deployer() -> Result<(), String> {
+    // 注意：这里只做 setup + initialize（毫秒级），不做任何部署。
+    // 全量维护（start_maintenance）在首次调用时可能耗时数秒（编译全部
+    // 方案词典），本函数被 SchemaManager::new() 在设置启动的 UI 线程上
+    // 调用——内置部署会卡死窗口；部署一律走显式 deploy_all()（调用方
+    // 已在后台线程执行）。
     RIME_INIT.call_once(|| {
         let (shared_data_dir, user_data_dir) = get_data_dirs();
         ensure_user_config_files(&shared_data_dir, &user_data_dir);
@@ -104,34 +108,44 @@ pub fn init_rime_deployer() -> Result<(), String> {
             return;
         }
 
-        if start_maintenance(true).is_ok() {
-            join_maintenance_thread();
-        }
-
         if let Ok(session) = create_session() {
             drop(session);
-        }
-
-        unsafe {
-            let api = get_api();
-            if !api.is_null() {
-                if let Some(deploy_config) = (*api).deploy_config_file {
-                    let config_file =
-                        CString::new(format!("{}.yaml", meta.config_file_base)).unwrap_or_default();
-                    let version_key = CString::new("config_version").unwrap_or_default();
-                    deploy_config(config_file.as_ptr(), version_key.as_ptr());
-                }
-            }
         }
     });
 
     Ok(())
 }
 
-/// 部署全部方案。配置文件名使用 [`AppMetadata::config_file_base`]（如 `xime.yaml`）。
+/// 部署全部方案（显式全量维护，对齐 weasel「重新部署」：start_maintenance(full) + join）。
+///
+/// 不用 `api->deploy`：它是 OnWorkspaceChange 语义——`installation_update` /
+/// `detect_modifications` 判定无变化时返回 0（librime rime_api_impl.h），
+/// 是「无需维护」不是失败，不能当错误处理。
 pub fn deploy_all() -> Result<(), String> {
+    init_rime_deployer()?;
     let config_file = format!("{}.yaml", app_metadata().config_file_base);
-    librime::levers::deploy_all_with_config(&config_file).map_err(|e| e.to_string())
+    unsafe {
+        let api = librime::get_api();
+        if api.is_null() {
+            return Err("Rime API 未初始化".to_string());
+        }
+        let started = (*api)
+            .start_maintenance
+            .ok_or("start_maintenance 不可用")?(1);
+        if started != 0 {
+            if let Some(join) = (*api).join_maintenance_thread {
+                join();
+            }
+        }
+        // 全量维护后补跑 xime.yaml 配置部署（幂等）。
+        if let Some(deploy_config) = (*api).deploy_config_file {
+            let version_key = std::ffi::CString::new("config_version")
+                .map_err(|e| e.to_string())?;
+            let config_c = std::ffi::CString::new(config_file).map_err(|e| e.to_string())?;
+            deploy_config(config_c.as_ptr(), version_key.as_ptr());
+        }
+    }
+    Ok(())
 }
 
 pub fn deploy_all_schemas() -> Result<(), String> {

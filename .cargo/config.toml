@@ -8,3 +8,11 @@ registry = "sparse+https://rsproxy.cn/index/"
 index = "https://rsproxy.cn/crates.io-index"
 [net]
 git-fetch-with-cli = true
+
+# sherpa-onnx-sys 的 build.rs 会从 GitHub releases 下载预编译库；本机直连
+# GitHub 下载该归档时 TLS 握手失败（invalid peer certificate: UnknownIssuer，
+# 代理环境特征）。归档已用 PowerShell 预下载到下面目录（文件名须与上游期望
+# 完全一致），build.rs 检测到后直接采用、不再联网：
+#   sherpa-onnx-v1.13.8-win-x64-shared-MT-Release-lib.tar.bz2
+[env]
+SHERPA_ONNX_ARCHIVE_DIR = "C:/Users/kingz/.cargo/sherpa-archives"

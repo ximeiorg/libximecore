@@ -1,0 +1,25 @@
+[package]
+name = "xime-speech"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "本地语音转文本推理封装（sherpa-onnx 流式 zipformer，跨端核心）"
+
+[features]
+default = []
+# CUDA（NVIDIA GPU）分包：暴露 SpeechProvider::Cuda。sherpa-onnx-sys 上游只有
+# static/shared 两个 feature（无 cuda），CUDA 变体链接由构建方用
+# SHERPA_ONNX_LIB_DIR 指向 CUDA 预编译包（github releases 的
+# *-cuda-13.x-cudnn-9.x-*-win-x64-cuda.tar.bz2，解压后的 lib 目录）完成——
+# 导出符号与 CPU 包同 ABI，链接指令一致。
+# 最终程序按包型选择：CPU 包不启用；CUDA 包启用本 feature 并用**独立 target
+# 目录**构建（两 flavor 的 onnxruntime.dll 同名，混用同一 target 会互踩）。
+cuda = []
+
+[dependencies]
+thiserror = { workspace = true }
+# sherpa-onnx 官方 Rust crate（Apache-2.0，与 C 库同步发版）。
+# 选 shared 链接（DLL 随 exe 旁置）：CPU 包/CUDA 包同 ABI 可替换，
+# 是「GPU 可选加速包」成立的前提；静态会把 ~90MB onnxruntime 打进 exe。
+sherpa-onnx = { version = "1.13.8", default-features = false, features = ["shared"] }

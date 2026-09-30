@@ -328,6 +328,19 @@ pub fn button_danger<'a, Message: Clone>(
     .on_press(on_press)
 }
 
+/// 禁用态按钮：进行中的操作（「安装中…」「下载中…」「卸载中…」）占位用。
+/// 尺寸与次要按钮一致，只把文字压成弱化色，且不带 `on_press`（点不动）。
+pub fn button_disabled<'a, Message: 'a + Clone>(
+    label: impl Into<String>,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let colors = *colors;
+    button(text(label.into()).size(14).color(colors.foreground_muted))
+        .padding([6, 14])
+        .style(move |_theme, _status| secondary_button_style(&colors, button::Status::Disabled))
+        .into()
+}
+
 /// 纯文字按钮：主色文字 + 悬停浅底（用于「重试」等）。
 pub fn text_button<'a, Message: Clone>(
     label: impl Into<String>,
@@ -408,6 +421,54 @@ pub fn badge<'a, Message: 'a>(label: &'a str, fg: Color, bg: Color) -> Element<'
             ..container::Style::default()
         })
         .into()
+}
+
+// ---- progress ----
+
+/// 细进度条（下载进度等）：轨道用底色，条用主色，圆角。
+///
+/// iced 自带的 progress_bar 样式在深色主题下跟卡片底色糊在一起，这里显式
+/// 指定三段（轨道 / 条 / 圆角），粗细压到 6px——它是卡片里的**一行信息**，
+/// 不该抢标题的视觉权重。
+pub fn progress<'a, Message: 'a>(value: f32, colors: &ThemeColors) -> Element<'a, Message> {
+    let colors = *colors;
+    iced::widget::progress_bar(0.0..=1.0, value.clamp(0.0, 1.0))
+        // ProgressBar 的尺寸走 length（长度）/ girth（粗细），不是 width/height。
+        .length(Length::Fill)
+        .girth(Length::Fixed(6.0))
+        .style(move |_theme| iced::widget::progress_bar::Style {
+            background: Background::Color(colors.surface_variant),
+            bar: Background::Color(colors.primary),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: border::radius(999.0),
+            },
+        })
+        .into()
+}
+
+// ---- pick_list ----
+
+/// 下拉选择框样式：底色 + 边框 + 主色把手（与商店页版本选择器同款观感）。
+///
+/// iced 默认 pick_list 用它的主题色，和本应用的 `ThemeColors`（自定义深/浅色）
+/// 不同源，混在卡片里会显得"借来的控件"，所以统一到这里描一遍。
+pub fn pick_list_style(
+    colors: &ThemeColors,
+    _status: iced::widget::pick_list::Status,
+) -> iced::widget::pick_list::Style {
+    iced::widget::pick_list::Style {
+        text_color: colors.foreground,
+        background: Background::Color(colors.surface_variant),
+        border: Border {
+            color: colors.border,
+            width: 1.0,
+            radius: border::radius(RADIUS_MD),
+        },
+        handle_color: colors.primary,
+        placeholder_color: colors.foreground_muted,
+    }
 }
 
 // ---- switch ----

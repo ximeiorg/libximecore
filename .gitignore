@@ -1,3 +1,7 @@
 /target
+# CUDA 分包构建目录（onnxruntime.dll 同名，必须和 CPU 分包分开）
+/target-cuda*/
 **/*.rs.bk
 Cargo.lock
+# 本机 cargo 配置（sherpa 预编译库本地缓存路径等），CI 不适用
+/.cargo/config.toml

@@ -3,6 +3,7 @@ pub mod metadata;
 pub mod rime_deploy;
 pub mod schema_config;
 pub mod schema_manager;
+pub mod schema_manifest;
 pub mod style;
 pub mod wubi_radicals;
 
@@ -23,6 +24,11 @@ pub use schema_config::{
     TranslatorConfig,
 };
 pub use schema_manager::SchemaManager;
+pub use schema_manifest::{
+    is_protected_release_path, is_trackable_path, is_user_data_path, package_label,
+    FileConflict, PackageEntry, Registry, SchemaManifest, UninstallOutcome,
+    BUILTIN_PACKAGE_ID,
+};
 pub use style::ColorScheme;
 pub use style::ColorSchemeConfig;
 pub use style::DarkMode;
@@ -282,6 +288,21 @@ impl XimeConfig {
 // Logging support (cross-platform)
 static LOG_GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
 
+/// 默认日志过滤：
+/// - **三方库**（wgpu / winit / glyphon / fontdb / hyper…）只到 `info`。它们的
+///   debug 日志量极大（实测设置程序一次会话 12.9 MB / 22.5 万行，含每帧
+///   `relayout`、图集分配、字体回退探测），而 tracing 的**格式化发生在写日志
+///   的那个线程**——设置程序里就是 UI 线程，等于白送每帧开销，还会把真正
+///   有用的启动耗时埋掉；
+/// - **本项目自己的 crate** 仍保留 `debug`，排障信息不丢。
+///
+/// 需要全量日志时用环境变量覆盖：`RUST_LOG=debug`。
+const DEFAULT_LOG_FILTER: &str = concat!(
+    "info",
+    ",xime_config=debug,xime_setup_lib=debug,xime_plugin=debug,xime_rime=debug,xime_ipc=debug",
+    ",winxime_server=debug,winxime_setup=debug,winxime_tsf=debug,winxime_ipc=debug"
+);
+
 pub fn init_logging(component: &str) {
     let log_dir = get_log_dir();
     fs::create_dir_all(&log_dir).ok();
@@ -295,7 +316,7 @@ pub fn init_logging(component: &str) {
     }
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -320,7 +341,7 @@ pub fn init_logging_with_console(component: &str) {
     }
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -342,10 +363,17 @@ pub fn init_logging_with_console(component: &str) {
 
 fn get_log_dir() -> PathBuf {
     if cfg!(windows) {
-        std::env::var("TEMP")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(app_metadata().config_dir_name)
+        // 数据根 logs\（%APPDATA%\<name>\logs），与用户数据同处，不随 TEMP 清理丢失。
+        get_data_dirs()
+            .1
+            .parent()
+            .map(|p| p.join("logs"))
+            .unwrap_or_else(|| {
+                std::env::var("TEMP")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(app_metadata().config_dir_name)
+            })
     } else {
         dirs_or_home().join("log")
     }
@@ -358,5 +386,38 @@ fn dirs_or_home() -> PathBuf {
             .join(app_metadata().config_dir_name)
     } else {
         PathBuf::from("/tmp").join(app_metadata().config_dir_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 默认日志过滤必须能被 EnvFilter 解析：写错指令时 `EnvFilter::new` 只是
+    /// 静默丢掉那一条，会把我们自己的 debug 日志一起吞掉而无人察觉。
+    #[test]
+    fn default_log_filter_is_valid_and_keeps_own_crates_verbose() {
+        let filter = tracing_subscriber::EnvFilter::try_new(DEFAULT_LOG_FILTER);
+        assert!(filter.is_ok(), "默认日志过滤无法解析: {DEFAULT_LOG_FILTER}");
+
+        // 只断言「本项目 crate 有 debug 指令」这种能静态检查的部分：
+        // 三方库默认 info，本项目 crate 逐个列出 debug。
+        assert!(
+            DEFAULT_LOG_FILTER.starts_with("info"),
+            "三方库默认级别必须是 info（否则每帧日志会拖慢 UI 线程）"
+        );
+        for target in [
+            "xime_config",
+            "xime_setup_lib",
+            "xime_rime",
+            "winxime_server",
+            "winxime_setup",
+            "winxime_tsf",
+        ] {
+            assert!(
+                DEFAULT_LOG_FILTER.contains(&format!("{target}=debug")),
+                "缺少本项目 crate 的 debug 指令: {target}"
+            );
+        }
     }
 }

@@ -96,6 +96,17 @@ pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// 「语音转文本」页在侧栏里的扁平下标（没编进这个页面时 None）。
+///
+/// 用标题反查下标而不是写死数字：侧栏分组顺序是会变的（这页现在就在「输入」
+/// 分组里），写死迟早错位，而且错位是静默的（轮询挂到别的页上）。
+#[cfg(all(feature = "voice-page", windows))]
+pub fn voice_page_index() -> Option<usize> {
+    sidebar_items()
+        .iter()
+        .position(|(_, title)| *title == "语音转文本")
+}
+
 /// 侧栏导航：品牌区 + 分组标题 + 各组导航项（点击仍发扁平下标）。
 pub fn sidebar(current: usize, colors: &ThemeColors) -> Element<'static, Message> {
     let groups = sidebar_groups();

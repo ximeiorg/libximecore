@@ -4,6 +4,7 @@ use sha2::Digest;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Mutex, OnceLock};
+use xime_config::schema_manifest::{self, Registry, SchemaManifest, BUILTIN_PACKAGE_ID};
 use xime_config::{
     deploy_all, get_data_dirs, ColorSchemeConfig, DarkMode, SchemaConfig, SchemaConfigManager,
     SchemaInfo, SchemaManager, XimeConfig,
@@ -11,7 +12,7 @@ use xime_config::{
 
 static MARKET_TASK_RESULT: OnceLock<Mutex<Option<MarketTaskResult>>> = OnceLock::new();
 static MARKET_YAML_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
-static DEPLOY_RESULT: OnceLock<Mutex<Option<Result<(), String>>>> = OnceLock::new();
+static DEPLOY_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
 static MODEL_TASK_RESULT: OnceLock<Mutex<Option<ModelTaskResult>>> = OnceLock::new();
 static MODEL_YAML_RESULT: OnceLock<Mutex<Option<Result<String, String>>>> = OnceLock::new();
 static PLUGIN_TASK_RESULT: OnceLock<Mutex<Option<PluginTaskResult>>> = OnceLock::new();
@@ -26,7 +27,7 @@ fn market_yaml_result() -> &'static Mutex<Option<Result<String, String>>> {
     MARKET_YAML_RESULT.get_or_init(|| Mutex::new(None))
 }
 
-fn deploy_result() -> &'static Mutex<Option<Result<(), String>>> {
+fn deploy_result() -> &'static Mutex<Option<Result<String, String>>> {
     DEPLOY_RESULT.get_or_init(|| Mutex::new(None))
 }
 
@@ -53,9 +54,13 @@ fn download_progress() -> &'static Mutex<Option<(String, f32)>> {
 
 enum MarketTaskResult {
     DownloadDone(String),
-    InstallDone(String),
-    UninstallDone(String),
+    /// 安装完成（已安装包列表按注册表重建，无需回传 id）。
+    InstallDone,
+    /// 卸载完成（同上）。
+    UninstallDone,
     DeleteDone(String),
+    /// 内置方案包从 market/builtin/ 备份还原（文件数）。
+    BuiltinRestored(usize),
     Error(String),
 }
 
@@ -78,6 +83,61 @@ static NOTIFY_SELECT_SCHEMA: OnceLock<fn(&str) -> bool> = OnceLock::new();
 static NOTIFY_MESSAGE: OnceLock<fn(&str, &str)> = OnceLock::new();
 static NOTIFY_RELOAD_PLUGINS: OnceLock<fn()> = OnceLock::new();
 static NOTIFY_SYNC_USER_DATA: OnceLock<fn() -> bool> = OnceLock::new();
+/// 部署结果系统通知（平台通知由宿主实现；libximecore 保持平台无关）。
+static NOTIFY_DEPLOY_TOAST: OnceLock<fn(&str, &str)> = OnceLock::new();
+
+/// 设置宿主进程的「部署结果系统通知」回调（宿主实现 Windows toast 等平台通知）。
+pub fn set_notify_deploy_toast(f: fn(&str, &str)) {
+    let _ = NOTIFY_DEPLOY_TOAST.set(f);
+}
+
+fn notify_deploy_toast(title: &str, body: &str) {
+    if let Some(f) = NOTIFY_DEPLOY_TOAST.get() {
+        f(title, body);
+    }
+}
+
+/// 后台：部署 → 通知宿主重载（重建会话）→ 再显式选中目标方案。
+///
+/// 只在「目标方案还没有 build 产物」时走这条路：宿主的 `SelectSchema` 会拒绝
+/// 未部署的方案（选进未部署方案会得到死会话），所以必须先把产物部署出来，
+/// 再让宿主重新部署并补一次显式选中，切换才真正落到正在打字的引擎上。
+///
+/// 整段同步做要数秒（全量维护 + redeploy），绝不能进 UI 线程；结果写进
+/// `deploy_result`，由 `poll_deploy` 轮询后提示。
+///
+/// 返回是否真的排上了任务（已有部署在跑时返回 false，调用方据此换提示语）。
+fn start_deploy_then_select(schema_id: &str, schema_name: &str) -> bool {
+    // 占住部署槽位：既避免与「部署方案」按钮并发部署，也顺手给出即时反馈。
+    match deploy_result().lock() {
+        Ok(mut slot) if slot.is_none() => *slot = Some(Ok("正在部署…".to_string())),
+        _ => return false,
+    }
+
+    let id = schema_id.to_string();
+    let name = schema_name.to_string();
+    std::thread::spawn(move || {
+        let result = (|| -> Result<String, String> {
+            deploy_all().map_err(|e| format!("部署失败: {}", e))?;
+            if !notify_daemon_reload() {
+                return Ok(format!("已部署「{name}」；服务器未运行，下次启动时生效"));
+            }
+            if notify_select_schema(&id) {
+                Ok(format!("已切换到「{name}」"))
+            } else {
+                Err(format!("部署完成，但切换到「{name}」被服务器拒绝"))
+            }
+        })();
+        match &result {
+            Ok(msg) => notify_deploy_toast("方案切换完成", msg),
+            Err(e) => notify_deploy_toast("方案切换失败", e),
+        }
+        if let Ok(mut slot) = deploy_result().lock() {
+            *slot = Some(result);
+        }
+    });
+    true
+}
 
 /// 设置宿主进程的「部署后重载」回调（daemon 重载配置）。
 pub fn set_notify_deploy(f: fn()) {
@@ -127,6 +187,109 @@ pub struct DictListResult {
     pub sync_dir: String,
 }
 
+/// 用户词典中的一条词条（词 / 编码 / 频率）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DictEntryRow {
+    pub word: String,
+    pub code: String,
+    pub commits: i32,
+}
+
+/// 词条读取结果（词库总数 + 命中数 + 本次返回的词条）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct DictEntriesResult {
+    /// 词库词条总数（未受关键词过滤影响）。
+    pub total: i32,
+    /// 命中条数（**未**受回传上限影响，用来判断回传是否被截断）。
+    pub matched: i32,
+    /// 本次返回的词条（已按关键词过滤，最多 `DICT_ENTRIES_MAX` 条）。
+    pub entries: Vec<DictEntryRow>,
+}
+
+/// 单次读取最多返回的词条数。
+///
+/// 必须与 IPC 侧的 `winxime_ipc::MAX_DICT_ENTRIES` 保持一致：那边受命名管道
+/// 单帧上限约束会截断，这里用来提示"命中过多，请补充关键词"。
+#[cfg(windows)]
+pub const DICT_ENTRIES_MAX: usize = 500;
+
+/// 写入一条用户词条的结果（新增 / 删除标记都算写）。
+///
+/// 带词典名：在途期间切换词典下拉时，结果按词典名丢弃（但 `writing`
+/// 标志仍要清掉——见 poll 的处理）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct DictWriteResult {
+    /// 写入的目标词典。
+    pub dict: String,
+    /// 是否成功。
+    pub ok: bool,
+    /// 给用户看的结果文案。
+    pub message: String,
+}
+
+/// 方案词表读取结果（只读浏览）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct SchemaEntriesResult {
+    /// 方案主码表名（`dictionary:` 的值）。
+    pub dict_name: String,
+    /// 实际读入的码表名（主表 + import_tables + packs）。
+    pub tables: Vec<String>,
+    /// 声明了但文件不存在的码表名。
+    pub missing: Vec<String>,
+    /// 读入的词条总数。
+    pub total: i32,
+    /// 命中条数（未受回传上限影响）。
+    pub matched: i32,
+    /// 本次返回的词条（方案词表没有频率概念，`commits` 恒为 0）。
+    pub entries: Vec<DictEntryRow>,
+}
+
+/// 快捷短语的一条（词 / 编码 / 可选权重）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CustomPhraseRow {
+    /// 短语文本。
+    pub word: String,
+    /// 触发编码。
+    pub code: String,
+    /// 权重（正整数；`None` = 文件里省略这一列，走 rime 默认权重）。
+    pub weight: Option<i32>,
+}
+
+/// 快捷短语表读取结果。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct PhraseListResult {
+    /// 短语表名（`custom_phrase.user_dict`，通常就是 `custom_phrase`）。
+    pub dict_name: String,
+    /// 短语表文件名（`<表名>.txt`）。
+    pub file_name: String,
+    /// 短语表文件是否已存在。
+    pub file_exists: bool,
+    /// 方案 custom.yaml 里是否已注入翻译器。
+    pub patch_applied: bool,
+    /// 短语列表。
+    pub entries: Vec<CustomPhraseRow>,
+}
+
+/// 快捷短语整表保存结果。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct PhraseSaveResult {
+    pub dict_name: String,
+    pub file_name: String,
+    pub file_exists: bool,
+    pub patch_applied: bool,
+    /// 本次保存是否**新**注入了翻译器（需要重新部署才生效）。
+    pub patch_added: bool,
+    /// 保存后的整表。
+    pub entries: Vec<CustomPhraseRow>,
+}
+
 #[cfg(windows)]
 static NOTIFY_DICT_LIST: OnceLock<fn() -> Option<DictListResult>> = OnceLock::new();
 #[cfg(windows)]
@@ -137,6 +300,8 @@ static NOTIFY_DICT_RESTORE: OnceLock<fn(&str) -> bool> = OnceLock::new();
 static NOTIFY_DICT_EXPORT: OnceLock<fn(&str, &str) -> Option<i32>> = OnceLock::new();
 #[cfg(windows)]
 static NOTIFY_DICT_IMPORT: OnceLock<fn(&str, &str) -> Option<i32>> = OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_DICT_ENTRIES: OnceLock<fn(&str, &str) -> Option<DictEntriesResult>> = OnceLock::new();
 
 /// 设置宿主进程的「列出用户词典」回调（IPC ListUserDicts）。
 #[cfg(windows)]
@@ -168,6 +333,50 @@ pub fn set_notify_dict_import(f: fn(&str, &str) -> Option<i32>) {
     let _ = NOTIFY_DICT_IMPORT.set(f);
 }
 
+/// 设置宿主进程的「读取用户词典词条」回调（IPC ListDictEntries，参数为词典名 + 关键词）。
+#[cfg(windows)]
+pub fn set_notify_dict_entries(f: fn(&str, &str) -> Option<DictEntriesResult>) {
+    let _ = NOTIFY_DICT_ENTRIES.set(f);
+}
+
+#[cfg(windows)]
+static NOTIFY_DICT_ENTRY_WRITE: OnceLock<fn(&str, &str, &str, i32) -> Option<i32>> =
+    OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_SCHEMA_ENTRIES: OnceLock<fn(&str, &str) -> Option<SchemaEntriesResult>> =
+    OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_PHRASE_LIST: OnceLock<fn(&str) -> Option<PhraseListResult>> = OnceLock::new();
+#[cfg(windows)]
+static NOTIFY_PHRASE_SAVE: OnceLock<fn(&str, &[CustomPhraseRow]) -> Option<PhraseSaveResult>> =
+    OnceLock::new();
+
+/// 设置宿主进程的「写入一条用户词条」回调（IPC ImportDictEntry，
+/// 参数为词典名 / 词 / 编码 / 频率，频率 < 0 即删除标记，返回导入条数）。
+#[cfg(windows)]
+pub fn set_notify_dict_entry_write(f: fn(&str, &str, &str, i32) -> Option<i32>) {
+    let _ = NOTIFY_DICT_ENTRY_WRITE.set(f);
+}
+
+/// 设置宿主进程的「读取方案词表词条」回调（IPC ListSchemaEntries，参数为方案 id + 关键词）。
+#[cfg(windows)]
+pub fn set_notify_schema_entries(f: fn(&str, &str) -> Option<SchemaEntriesResult>) {
+    let _ = NOTIFY_SCHEMA_ENTRIES.set(f);
+}
+
+/// 设置宿主进程的「读取快捷短语表」回调（IPC ListCustomPhrases，参数为方案 id）。
+#[cfg(windows)]
+pub fn set_notify_phrase_list(f: fn(&str) -> Option<PhraseListResult>) {
+    let _ = NOTIFY_PHRASE_LIST.set(f);
+}
+
+/// 设置宿主进程的「整表保存快捷短语」回调（IPC SaveCustomPhrases，
+/// 参数为方案 id + 整张短语表，覆盖式写入）。
+#[cfg(windows)]
+pub fn set_notify_phrase_save(f: fn(&str, &[CustomPhraseRow]) -> Option<PhraseSaveResult>) {
+    let _ = NOTIFY_PHRASE_SAVE.set(f);
+}
+
 #[cfg(windows)]
 fn notify_dict_list() -> Option<DictListResult> {
     NOTIFY_DICT_LIST.get().and_then(|f| f())
@@ -194,6 +403,33 @@ fn notify_dict_export(dict: &str, path: &str) -> Option<i32> {
 #[cfg(windows)]
 fn notify_dict_import(dict: &str, path: &str) -> Option<i32> {
     NOTIFY_DICT_IMPORT.get().and_then(|f| f(dict, path))
+}
+
+#[cfg(windows)]
+fn notify_dict_entries(dict: &str, query: &str) -> Option<DictEntriesResult> {
+    NOTIFY_DICT_ENTRIES.get().and_then(|f| f(dict, query))
+}
+
+#[cfg(windows)]
+fn notify_dict_entry_write(dict: &str, word: &str, code: &str, commits: i32) -> Option<i32> {
+    NOTIFY_DICT_ENTRY_WRITE
+        .get()
+        .and_then(|f| f(dict, word, code, commits))
+}
+
+#[cfg(windows)]
+fn notify_schema_entries(schema_id: &str, query: &str) -> Option<SchemaEntriesResult> {
+    NOTIFY_SCHEMA_ENTRIES.get().and_then(|f| f(schema_id, query))
+}
+
+#[cfg(windows)]
+fn notify_phrase_list(schema_id: &str) -> Option<PhraseListResult> {
+    NOTIFY_PHRASE_LIST.get().and_then(|f| f(schema_id))
+}
+
+#[cfg(windows)]
+fn notify_phrase_save(schema_id: &str, entries: &[CustomPhraseRow]) -> Option<PhraseSaveResult> {
+    NOTIFY_PHRASE_SAVE.get().and_then(|f| f(schema_id, entries))
 }
 
 fn notify_daemon_reload_plugins() {
@@ -225,18 +461,19 @@ fn notify_select_schema(schema_id: &str) -> bool {
     }
 }
 
-/// 方案市场下载目录：~/.config/xime/markets/（与 Xime 的 market 约定对齐）。
-fn markets_dir() -> std::path::PathBuf {
+/// 方案市场包目录：数据根下 `market\`（对齐 DECISIONS「下载数据目录映射」
+/// 与 server 侧 SchemaManager 同一目录；注册表 .registry.yaml 在数据根）。
+pub(crate) fn market_dir() -> std::path::PathBuf {
     let (_, user_data_dir) = get_data_dirs();
     user_data_dir
         .parent()
-        .map(|p| p.join("markets"))
+        .map(|p| p.join("market"))
         .unwrap_or_else(|| {
             let base = std::env::var("LOCALAPPDATA")
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|_| std::env::temp_dir());
             base.join(xime_config::app_metadata().config_dir_name)
-                .join("markets")
+                .join("market")
         })
 }
 
@@ -255,6 +492,12 @@ pub enum Message {
     InstallSchema(String),
     /// 卸载方案。
     UninstallSchema(String),
+    /// 安装方案：确认「先卸载冲突方案包再安装」（对齐安卓 confirmInstallWithUninstall）。
+    ConfirmSchemaInstall,
+    /// 安装方案：取消冲突确认。
+    CancelSchemaInstall,
+    /// 已安装列表：从 market/builtin/ 备份还原内置方案包。
+    RestoreBuiltinSchema,
     /// 方案市场：下载方案。
     DownloadSchema(String),
     /// 扩展商店：下载模型。
@@ -424,7 +667,22 @@ pub enum Message {
     #[cfg(feature = "voice-page")]
     #[cfg(windows)]
     SpeechCopy,
-    /// 词典管理：刷新用户词典列表。
+    /// 本地模型：下载（模型 id）。
+    #[cfg(all(feature = "voice-page", windows))]
+    SpeechModelDownload(String),
+    /// 本地模型：删除目录（模型 id）。
+    #[cfg(all(feature = "voice-page", windows))]
+    SpeechModelDelete(String),
+    /// 本地模型：切换当前使用的模型（模型 id）。
+    #[cfg(all(feature = "voice-page", windows))]
+    SpeechModelSelect(String),
+    /// 本地模型：试听起停（结果只在本页显示，不上屏）。
+    #[cfg(all(feature = "voice-page", windows))]
+    SpeechPreviewToggle,
+    /// 本地模型：复制试听文本到剪贴板。
+    #[cfg(all(feature = "voice-page", windows))]
+    SpeechModelCopy,
+    /// 词典管理：刷新（重读词典列表，选中词典不变）。
     #[cfg(windows)]
     DictRefresh,
     /// 词典管理：备份词典快照（词典名）。
@@ -439,6 +697,87 @@ pub enum Message {
     /// 词典管理：从文本导入词典（词典名，弹文件对话框）。
     #[cfg(windows)]
     DictImport(String),
+    /// 词典管理：切换页内 Tab（0=用户词典 1=快捷短语）。
+    #[cfg(windows)]
+    DictTab(usize),
+    /// 词典管理：下拉切换当前浏览的词典（立即重读该词典词条）。
+    #[cfg(windows)]
+    DictSelect(String),
+    /// 词典管理：词条搜索关键词变化。
+    #[cfg(windows)]
+    DictQueryChanged(String),
+    /// 词典管理：词条列表翻页。
+    #[cfg(windows)]
+    DictEntriesPage(usize),
+    /// 词典管理：打开新增词条对话框。
+    #[cfg(windows)]
+    DictEntryAddOpen,
+    /// 词典管理：关闭新增词条对话框（放弃草稿）。
+    #[cfg(windows)]
+    DictEntryAddCancel,
+    /// 词典管理：新增词条对话框——词。
+    #[cfg(windows)]
+    DictEntryAddWordChanged(String),
+    /// 词典管理：新增词条对话框——编码。
+    #[cfg(windows)]
+    DictEntryAddCodeChanged(String),
+    /// 词典管理：新增词条对话框——频率（空串 = 1）。
+    #[cfg(windows)]
+    DictEntryAddCommitsChanged(String),
+    /// 词典管理：提交新增词条。
+    #[cfg(windows)]
+    DictEntryAddSubmit,
+    /// 词典管理：请求删除词条（进入两步确认，词 + 编码）。
+    #[cfg(windows)]
+    DictEntryDeleteRequest(String, String),
+    /// 词典管理：取消删除。
+    #[cfg(windows)]
+    DictEntryDeleteCancel,
+    /// 词典管理：确认删除词条（写删除标记）。
+    #[cfg(windows)]
+    DictEntryDeleteConfirm(String, String),
+    /// 快捷短语：切换方案（下拉选择，方案 id）。
+    #[cfg(windows)]
+    DictPhraseSchemaChanged(String),
+    /// 快捷短语：打开新增/编辑对话框。
+    #[cfg(windows)]
+    DictPhraseAddOpen,
+    /// 快捷短语：编辑第 i 条（打开对话框并预填）。
+    #[cfg(windows)]
+    DictPhraseEdit(usize),
+    /// 快捷短语：关闭对话框（放弃草稿）。
+    #[cfg(windows)]
+    DictPhraseDialogCancel,
+    /// 快捷短语：对话框——词。
+    #[cfg(windows)]
+    DictPhraseDialogWordChanged(String),
+    /// 快捷短语：对话框——编码。
+    #[cfg(windows)]
+    DictPhraseDialogCodeChanged(String),
+    /// 快捷短语：对话框——权重（空串 = 省略该列）。
+    #[cfg(windows)]
+    DictPhraseDialogWeightChanged(String),
+    /// 快捷短语：提交对话框（新增或保存编辑）。
+    #[cfg(windows)]
+    DictPhraseDialogSubmit,
+    /// 快捷短语：请求删除第 i 条（两步确认）。
+    #[cfg(windows)]
+    DictPhraseDeleteRequest(usize),
+    /// 快捷短语：取消删除。
+    #[cfg(windows)]
+    DictPhraseDeleteCancel,
+    /// 快捷短语：确认删除第 i 条（整表保存）。
+    #[cfg(windows)]
+    DictPhraseDeleteConfirm(usize),
+    /// 方案词表：搜索关键词变化。
+    #[cfg(windows)]
+    SchemaDictQueryChanged(String),
+    /// 方案词表：重新读取当前方案。
+    #[cfg(windows)]
+    SchemaDictRefresh,
+    /// 方案词表：词条列表翻页。
+    #[cfg(windows)]
+    SchemaDictPage(usize),
     #[cfg(feature = "pair-page")]
     StartPairing,
     /// 订阅轮询：后台任务结果。
@@ -482,9 +821,14 @@ pub struct SettingsState {
     #[cfg(feature = "voice-page")]
     #[cfg(windows)]
     pub speech: SpeechState,
+    /// 本地离线模型（server 侧引擎）的镜像：模型列表 / 下载进度 / 试听。
+    #[cfg(all(feature = "voice-page", windows))]
+    pub speech_server: crate::speech_models::SpeechModelState,
     /// 词典管理（用户词典列表 + 备份/恢复/导出/导入）。
     #[cfg(windows)]
     pub dict_manage: DictManageState,
+    /// 全局页内消息条（show_message 写入，5 秒自动过期）。
+    pub ui_message: Option<(String, std::time::Instant)>,
     #[cfg(target_os = "linux")]
     pub sync: SyncState,
 }
@@ -527,8 +871,11 @@ impl SettingsState {
             rime_sync: RimeSyncState::load(),
             #[cfg(all(feature = "voice-page", windows))]
             speech: SpeechState::default(),
+            #[cfg(all(feature = "voice-page", windows))]
+            speech_server: crate::speech_models::SpeechModelState::default(),
             #[cfg(windows)]
             dict_manage: DictManageState::default(),
+            ui_message: None,
             #[cfg(target_os = "linux")]
             sync: SyncState::default(),
         };
@@ -565,9 +912,44 @@ impl SettingsState {
         if self.schemas_loaded {
             return;
         }
+        self.reload_schemas();
+    }
+
+    /// 强制重载方案列表（安装/卸载方案后调用；load_schemas 有幂等挡板，
+    /// 不会刷新）。同时按方案包清单标注每个方案的来源（内置方案包 / 市场包 id），
+    /// 供「已安装」列表按包分组展示——第三方方案不再与内置方案混为一谈。
+    pub fn reload_schemas(&mut self) {
         if let Ok(manager) = SchemaManager::new() {
             let schemas = manager.get_schema_list();
+            let mut packages = vec![BUILTIN_PACKAGE_ID.to_string(); schemas.len()];
+            if let Ok(manifest) = schema_manifest() {
+                let mut registry = manifest.load_registry();
+                // 注册表里还没有内置方案包（首次运行 / 从未安装过市场包）：
+                // 把 rime 目录里的无主方案文件登记为内置方案包。
+                if !registry.contains_key(BUILTIN_PACKAGE_ID) {
+                    let _ = manifest.refresh_builtin_package();
+                    registry = manifest.load_registry();
+                }
+                for (i, schema) in schemas.iter().enumerate() {
+                    let rel = format!("{}.schema.yaml", schema.schema_id);
+                    if let Some(pkg) = SchemaManifest::package_of(&registry, &rel) {
+                        packages[i] = pkg;
+                    }
+                }
+                // 内置方案可一键还原的判定：market/builtin/ 备份存在，且当前
+                // builtin 条目里没有任何方案文件——包括被卸载（注册表无条目）和
+                // 只剩无主共享词典的残缺条目（卸载最后一个第三方包后未还原，
+                // 残条目不能挡住恢复默认的入口）。
+                let builtin_has_schema = registry
+                    .get(BUILTIN_PACKAGE_ID)
+                    .map(|entry| entry.files.iter().any(|f| f.ends_with(".schema.yaml")))
+                    .unwrap_or(false);
+                self.input_schema.builtin_restorable =
+                    !builtin_has_schema && !manifest.builtin_backup_files().is_empty();
+            }
             self.input_schema.available_schemas = schemas;
+            self.input_schema.schema_packages = packages;
+            self.input_schema.deployed_schema_ids = deployed_schema_ids();
             self.schemas_loaded = true;
         }
     }
@@ -624,37 +1006,57 @@ impl SettingsState {
         Ok(())
     }
 
-    pub fn save_schema(&self) -> Result<(), String> {
+    /// 切换当前输入方案，返回给 UI 的提示语。
+    ///
+    /// 顺序很关键：**先把「选中方案置顶」的启用列表落盘，再通知宿主**。
+    /// 宿主的 `SelectSchema` 只接受已有 build 产物的方案（避免死会话），而产物
+    /// 只可能来自启用列表——列表不落盘，兜底部署也编不出这个方案。
+    /// 目标没产物时不再同步部署（数秒，会冻住设置窗口），改成后台任务。
+    pub fn save_schema(&self) -> Result<String, String> {
         if self.input_schema.selected_schema >= self.input_schema.available_schemas.len() {
-            return Ok(());
+            return Ok(String::new());
         }
-        let selected_id =
-            &self.input_schema.available_schemas[self.input_schema.selected_schema].schema_id;
+        let selected = &self.input_schema.available_schemas[self.input_schema.selected_schema];
+        let selected_id = selected.schema_id.clone();
+        let selected_name = selected.name.clone();
 
-        // 优先通知运行中的宿主进程（若已注册 SelectSchema 回调）。
-        if notify_select_schema(selected_id) {
-            return Ok(());
-        }
-
-        // 宿主未运行/未注册：改为持久化方案列表（选中方案置顶），
-        // 等效于 RimeSwitcher 的 schema_list 设置，下次启动生效。
+        // 1) 启用列表：选中方案置顶，其余保持原顺序（只加不丢；指向已删除方案的
+        //    死项——比如卸载掉的第三方方案——顺手清掉，否则 rime 会报找不到方案）。
         let manager = SchemaManager::new()?;
+        let known: Vec<String> = self
+            .input_schema
+            .available_schemas
+            .iter()
+            .map(|s| s.schema_id.clone())
+            .collect();
         let mut ids: Vec<String> = manager.get_schema_list_ids();
         if ids.is_empty() {
-            ids = self
-                .input_schema
-                .available_schemas
-                .iter()
-                .map(|s| s.schema_id.clone())
-                .collect();
+            ids = known.clone();
         }
-        ids.retain(|id| id != selected_id);
+        ids.retain(|id| known.iter().any(|k| k == id));
+        ids.retain(|id| id != &selected_id);
         ids.insert(0, selected_id.clone());
         let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
         manager.set_schema_list(&refs)?;
         manager.save()?;
 
-        xime_config::rime_deploy::deploy_all_schemas().map_err(|e| format!("部署失败: {}", e))
+        // 2) 已部署 → 直接切（毫秒级）。
+        if notify_select_schema(&selected_id) {
+            return Ok(format!("已切换到「{}」", selected_name));
+        }
+
+        // 3) 未部署 → 后台部署 + 让宿主重建会话 + 补选中，结果由 poll_deploy 提示。
+        if start_deploy_then_select(&selected_id, &selected_name) {
+            Ok(format!(
+                "正在切换「{}」：该方案还没有部署产物，正在后台部署…",
+                selected_name
+            ))
+        } else {
+            Ok(format!(
+                "「{}」还没有部署产物，但已有部署任务在跑，请稍后再点一次",
+                selected_name
+            ))
+        }
     }
 
     pub fn save_schema_config(&self) -> Result<(), String> {
@@ -722,9 +1124,17 @@ impl SettingsState {
 
     /// 显示结果消息：触发系统通知回调（若宿主注册了 `set_notify_message`）。
     pub fn show_message(&mut self, msg: String) {
+        // 页内消息条（BackgroundPoll 5 秒后过期清理）。
+        self.ui_message = Some((msg.clone(), std::time::Instant::now()));
         if let Some(f) = NOTIFY_MESSAGE.get() {
             f(xime_config::app_metadata().display_name, &msg);
         }
+    }
+
+    /// 页内消息条是否仍有效。
+    pub fn ui_message(&self) -> Option<&str> {
+        let (msg, at) = self.ui_message.as_ref()?;
+        (at.elapsed() < std::time::Duration::from_secs(5)).then_some(msg.as_str())
     }
 
     pub fn start_deploy(&mut self) {
@@ -733,7 +1143,20 @@ impl SettingsState {
         }
         self.show_message("正在部署…".to_string());
         std::thread::spawn(|| {
-            let result = deploy_all().map_err(|e| e.to_string());
+            // 部署 + daemon 重载都在后台线程：server 的 redeploy 可能数秒，
+            // IPC 同步等待绝不能进 UI 线程（否则设置窗口整个冻结）。
+            let result = (|| -> Result<String, String> {
+                deploy_all().map_err(|e| e.to_string())?;
+                if notify_daemon_reload() {
+                    Ok("部署成功！配置已重载。".to_string())
+                } else {
+                    Ok("部署成功！(服务器未运行，配置将在下次启动时生效)".to_string())
+                }
+            })();
+            match &result {
+                Ok(msg) => notify_deploy_toast("方案部署完成", msg),
+                Err(e) => notify_deploy_toast("方案部署失败", e),
+            }
             *deploy_result().lock().unwrap() = Some(result);
         });
     }
@@ -742,16 +1165,8 @@ impl SettingsState {
         let result = deploy_result().lock().unwrap().take();
         if let Some(result) = result {
             match result {
-                Ok(()) => {
-                    self.show_message(if notify_daemon_reload() {
-                        "部署成功！配置已重载。".to_string()
-                    } else {
-                        "部署成功！(服务器未运行，配置将在下次启动时生效)".to_string()
-                    });
-                }
-                Err(e) => {
-                    self.show_message(format!("部署失败: {}", e));
-                }
+                Ok(msg) => self.show_message(msg),
+                Err(e) => self.show_message(format!("部署失败: {}", e)),
             }
         }
     }
@@ -790,7 +1205,7 @@ impl SettingsState {
         match result {
             Ok(text) => match serde_yaml::from_str::<SchemaIndex>(&text) {
                 Ok(index) => {
-                    self.market_schema.installed_ids = self.get_installed_schema_ids();
+                    self.market_schema.installed_ids = self.get_installed_package_ids();
                     self.market_schema.downloaded_ids = self.get_cached_schema_ids();
                     self.market_schema.schemas = index.schemas;
                     self.market_schema.updated_at = index.updated_at;
@@ -823,16 +1238,25 @@ impl SettingsState {
                     self.market_schema.downloaded_ids.push(id);
                 }
             }
-            MarketTaskResult::InstallDone(id) => {
-                if !self.market_schema.installed_ids.contains(&id) {
-                    self.market_schema.installed_ids.push(id);
-                }
+            MarketTaskResult::InstallDone => {
+                // 已安装包列表按注册表重建（安装/卸载后的归属即事实源），
+                // 已安装方案列表立即刷新（此前只在启动时加载一次，装完不变）。
+                self.market_schema.installed_ids = self.get_installed_package_ids();
+                self.reload_schemas();
             }
-            MarketTaskResult::UninstallDone(id) => {
-                self.market_schema.installed_ids.retain(|i| i != &id);
+            MarketTaskResult::UninstallDone => {
+                self.market_schema.installed_ids = self.get_installed_package_ids();
+                self.reload_schemas();
             }
             MarketTaskResult::DeleteDone(id) => {
                 self.market_schema.downloaded_ids.retain(|i| i != &id);
+            }
+            MarketTaskResult::BuiltinRestored(n) => {
+                self.market_schema.installed_ids = self.get_installed_package_ids();
+                self.reload_schemas();
+                self.market_schema.install_message =
+                    Some(format!("已还原 {n} 个内置方案文件，默认方案已启用"));
+                self.market_schema.install_message_since = Some(std::time::Instant::now());
             }
             MarketTaskResult::Error(e) => {
                 self.market_schema.install_message = Some(e);
@@ -957,8 +1381,140 @@ impl SettingsState {
         self.backup.poll();
         #[cfg(windows)]
         self.dict_manage.poll();
+        #[cfg(windows)]
+        self.poll_schema_dict();
         #[cfg(all(feature = "voice-page", windows))]
         self.speech.poll();
+        // 本地模型状态：只在本页可见时真的发 IPC（见 SpeechModelState::poll）。
+        #[cfg(all(feature = "voice-page", windows))]
+        self.speech_server.poll();
+    }
+
+    // ---- 方案词表（输入方案页「方案词表」tab，只读浏览） ----
+
+    /// 当前选中的方案（id + 显示名，取输入方案页选中行）。
+    pub fn selected_schema_info(&self) -> Option<(String, String)> {
+        let index = self.input_schema.selected_schema;
+        let info = self.input_schema.available_schemas.get(index)?;
+        Some((info.schema_id.clone(), info.name.clone()))
+    }
+
+    /// 进入「方案词表」tab 或切换选中方案时调用：确保为当前方案读过一次。
+    ///
+    /// 同一方案且已读过/在途 → 不重读；换方案 → 清状态重读（在途的旧结果会
+    /// 被 `poll_schema_dict` 按 schema_id 丢弃）。
+    pub fn schema_dict_ensure(&mut self) {
+        let Some((schema_id, _)) = self.selected_schema_info() else {
+            return;
+        };
+        let dict = &mut self.input_schema.dict;
+        if dict.schema_id == schema_id && (dict.loaded || dict.loading) {
+            return;
+        }
+        dict.schema_id = schema_id;
+        dict.entries.clear();
+        dict.page = 0;
+        dict.loaded = false;
+        dict.loading = false;
+        dict.error = None;
+        self.start_schema_fetch();
+    }
+
+    /// 方案词表搜索关键词变化：重置页码，防抖后重读。
+    pub fn schema_dict_set_query(&mut self, query: String) {
+        let dict = &mut self.input_schema.dict;
+        if dict.query == query {
+            return;
+        }
+        dict.query = query;
+        dict.page = 0;
+        dict.pending = Some(std::time::Instant::now());
+    }
+
+    /// 重新读取当前方案的词表。
+    pub fn schema_dict_refresh(&mut self) {
+        self.start_schema_fetch();
+    }
+
+    /// 方案词表翻页（夹取到范围内）。
+    pub fn schema_dict_page(&mut self, page: usize) {
+        let dict = &mut self.input_schema.dict;
+        let pages = dict.page_count();
+        dict.page = if pages == 0 {
+            0
+        } else {
+            page.min(pages - 1)
+        };
+    }
+
+    /// 发起一次方案词表读取（单飞 + 防抖，与用户词典词条读取同款）。
+    fn start_schema_fetch(&mut self) {
+        let dict = &mut self.input_schema.dict;
+        if dict.schema_id.is_empty() {
+            return;
+        }
+        if dict.loading {
+            dict.pending = Some(std::time::Instant::now());
+            return;
+        }
+        dict.loading = true;
+        dict.pending = None;
+        dict.error = None;
+        let schema_id = dict.schema_id.clone();
+        let query = dict.query.clone();
+        std::thread::spawn(move || {
+            let outcome = match notify_schema_entries(&schema_id, &query) {
+                Some(result) => SchemaDictTaskResult::Entries { schema_id, result },
+                None => SchemaDictTaskResult::Failed {
+                    schema_id,
+                    reason: "读取方案词表失败（输入法服务未运行？）".to_string(),
+                },
+            };
+            *SCHEMA_DICT_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+        });
+    }
+
+    /// BackgroundPoll 节拍：方案词表结果回收 + 关键词防抖。
+    pub fn poll_schema_dict(&mut self) {
+        let outcome = SCHEMA_DICT_OUTCOME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match outcome {
+            Some(SchemaDictTaskResult::Entries { schema_id, result }) => {
+                let dict = &mut self.input_schema.dict;
+                if dict.schema_id == schema_id {
+                    dict.loading = false;
+                    dict.loaded = true;
+                    dict.total = result.total;
+                    dict.matched = result.matched;
+                    dict.entries = result.entries;
+                    dict.dict_name = result.dict_name;
+                    dict.tables = result.tables;
+                    dict.missing = result.missing;
+                    dict.page = 0;
+                }
+            }
+            Some(SchemaDictTaskResult::Failed { schema_id, reason }) => {
+                let dict = &mut self.input_schema.dict;
+                if dict.schema_id == schema_id {
+                    dict.loading = false;
+                    dict.loaded = true;
+                    dict.error = Some(reason);
+                }
+            }
+            None => {}
+        }
+        // 关键词改动过了防抖就补一次读取。
+        let due = self
+            .input_schema
+            .dict
+            .pending
+            .map(|since| since.elapsed() >= DICT_QUERY_DEBOUNCE)
+            .unwrap_or(false);
+        if due {
+            self.start_schema_fetch();
+        }
     }
 
     /// 扩展商店安装/卸载消息 4 秒后自动消失。
@@ -1215,11 +1771,162 @@ impl SettingsState {
         });
     }
 
+    /// 安装已下载 / 市场里的方案包。
+    ///
+    /// 对齐安卓 `SchemaLocalViewModel.installPackage`：rime 目录里已有其他方案包
+    /// （含内置方案包）时**不能直接装**，先弹确认「需要先卸载冲突方案包」——
+    /// 这就是方案隔离：一次只存在一个方案包，第三方方案不会与内置方案混装。
     pub fn install_market_schema(&mut self, schema_id: &str) {
         if self.market_schema.installing.is_some() || self.market_schema.downloading.is_some() {
             return;
         }
 
+        match schema_install_conflict(schema_id) {
+            Ok(conflict) if conflict.packages.is_empty() => self.start_schema_install(schema_id),
+            Ok(conflict) => {
+                self.market_schema.install_message = None;
+                self.market_schema.conflict_install = Some(conflict);
+            }
+            Err(e) => {
+                self.market_schema.install_message = Some(e);
+                self.market_schema.install_message_since = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    /// 确认「先卸载冲突方案包再安装」（对齐安卓 `confirmInstallWithUninstall`）：
+    /// 逐个精确卸载冲突包（不单独部署）→ 安装目标包（安装流程内统一部署一次）。
+    pub fn confirm_schema_install(&mut self) {
+        let Some(conflict) = self.market_schema.conflict_install.take() else {
+            return;
+        };
+        if self.market_schema.installing.is_some() || self.market_schema.downloading.is_some() {
+            return;
+        }
+
+        self.market_schema.installing = Some(conflict.schema_id.clone());
+        self.market_schema.install_message = None;
+
+        std::thread::spawn(move || {
+            let sid = conflict.schema_id.clone();
+            if conflict.is_restore_builtin() {
+                // 方案来源互斥：还原内置方案前先卸载第三方方案包，
+                // 否则又会变成内置 + 第三方混装。
+                let result = (|| -> anyhow::Result<usize> {
+                    for pkg in &conflict.packages {
+                        do_uninstall(pkg, false)?;
+                    }
+                    let manifest = schema_manifest().map_err(|e| anyhow::anyhow!(e))?;
+                    let restored = manifest
+                        .restore_builtin_package()
+                        .map_err(|e| anyhow::anyhow!(e))?;
+                    apply_restored_builtin_schema_list(&manifest)?;
+                    deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
+                    notify_daemon_reload();
+                    Ok(restored)
+                })();
+                let task = match result {
+                    Ok(n) => {
+                        notify_deploy_toast(
+                            "内置方案已还原",
+                            &format!("已卸载第三方方案包，{n} 个内置方案文件已回到数据目录"),
+                        );
+                        MarketTaskResult::BuiltinRestored(n)
+                    }
+                    Err(e) => {
+                        notify_deploy_toast("内置方案还原失败", &e.to_string());
+                        MarketTaskResult::Error(e.to_string())
+                    }
+                };
+                *market_task_result().lock().unwrap() = Some(task);
+                return;
+            }
+            let result = (|| -> anyhow::Result<()> {
+                for pkg in &conflict.packages {
+                    do_uninstall(pkg, false)?;
+                }
+                do_install(&sid)
+            })();
+            let task = match result {
+                Ok(()) => {
+                    notify_deploy_toast(
+                        "方案部署完成",
+                        &format!("{} 已启用（已先卸载冲突方案包，避免混装）", sid),
+                    );
+                    MarketTaskResult::InstallDone
+                }
+                Err(e) => {
+                    notify_deploy_toast("方案部署失败", &format!("{sid}：{e}"));
+                    MarketTaskResult::Error(e.to_string())
+                }
+            };
+            *market_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
+    /// 取消安装冲突确认（不改动任何文件）。
+    pub fn cancel_schema_install(&mut self) {
+        self.market_schema.conflict_install = None;
+    }
+
+    /// 从 `market/builtin/` 备份还原内置方案包（隔离安装第三方方案后恢复内置方案）。
+    /// 方案来源互斥：若 rime 目录里还有第三方方案包，先确认卸载它们再还原，
+    /// 不允许还原成「内置 + 第三方」混装状态。
+    pub fn restore_builtin_schema(&mut self) {
+        if self.market_schema.installing.is_some() || self.market_schema.downloading.is_some() {
+            return;
+        }
+        match schema_restore_conflict() {
+            Ok(packages) if packages.is_empty() => self.start_builtin_restore(),
+            Ok(packages) => {
+                self.market_schema.install_message = None;
+                self.market_schema.conflict_install = Some(SchemaInstallConflict {
+                    schema_id: BUILTIN_PACKAGE_ID.to_string(),
+                    packages,
+                });
+            }
+            Err(e) => {
+                self.market_schema.install_message = Some(e);
+                self.market_schema.install_message_since = Some(std::time::Instant::now());
+            }
+        }
+    }
+
+    /// 后台线程执行内置方案还原（无冲突或已确认卸载第三方包后）。
+    fn start_builtin_restore(&mut self) {
+        self.market_schema.installing = Some(BUILTIN_PACKAGE_ID.to_string());
+        self.market_schema.install_message = None;
+
+        std::thread::spawn(|| {
+            let result = (|| -> anyhow::Result<usize> {
+                let manifest = schema_manifest().map_err(|e| anyhow::anyhow!(e))?;
+                let restored = manifest
+                    .restore_builtin_package()
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                apply_restored_builtin_schema_list(&manifest)?;
+                deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
+                notify_daemon_reload();
+                Ok(restored)
+            })();
+            let task = match result {
+                Ok(n) => {
+                    notify_deploy_toast(
+                        "内置方案已还原",
+                        &format!("{n} 个内置方案文件已回到数据目录"),
+                    );
+                    MarketTaskResult::BuiltinRestored(n)
+                }
+                Err(e) => {
+                    notify_deploy_toast("内置方案还原失败", &e.to_string());
+                    MarketTaskResult::Error(e.to_string())
+                }
+            };
+            *market_task_result().lock().unwrap() = Some(task);
+        });
+    }
+
+    /// 后台线程执行安装（无冲突或已确认卸载后）。
+    fn start_schema_install(&mut self, schema_id: &str) {
         self.market_schema.installing = Some(schema_id.to_string());
         self.market_schema.install_message = None;
 
@@ -1227,8 +1934,14 @@ impl SettingsState {
         std::thread::spawn(move || {
             let result = do_install(&sid);
             let task = match result {
-                Ok(()) => MarketTaskResult::InstallDone(sid),
-                Err(e) => MarketTaskResult::Error(e.to_string()),
+                Ok(()) => {
+                    notify_deploy_toast("方案部署完成", &format!("{sid} 已启用，可直接输入使用"));
+                    MarketTaskResult::InstallDone
+                }
+                Err(e) => {
+                    notify_deploy_toast("方案部署失败", &format!("{sid}：{e}"));
+                    MarketTaskResult::Error(e.to_string())
+                }
             };
             *market_task_result().lock().unwrap() = Some(task);
         });
@@ -1237,7 +1950,7 @@ impl SettingsState {
     pub fn delete_market_package(&mut self, schema_id: &str) {
         let sid = schema_id.to_string();
         std::thread::spawn(move || {
-            let pkg_dir = markets_dir().join(&sid);
+            let pkg_dir = market_dir().join(&sid);
             let _ = std::fs::remove_dir_all(&pkg_dir);
             let task = MarketTaskResult::DeleteDone(sid);
             *market_task_result().lock().unwrap() = Some(task);
@@ -1254,10 +1967,16 @@ impl SettingsState {
 
         let sid = schema_id.to_string();
         std::thread::spawn(move || {
-            let result = do_uninstall(&sid);
+            let result = do_uninstall(&sid, true);
             let task = match result {
-                Ok(()) => MarketTaskResult::UninstallDone(sid),
-                Err(e) => MarketTaskResult::Error(e.to_string()),
+                Ok(()) => {
+                    notify_deploy_toast("方案已卸载", &format!("{sid} 已移除并重新部署"));
+                    MarketTaskResult::UninstallDone
+                }
+                Err(e) => {
+                    notify_deploy_toast("方案卸载失败", &format!("{sid}：{e}"));
+                    MarketTaskResult::Error(e.to_string())
+                }
             };
             *market_task_result().lock().unwrap() = Some(task);
         });
@@ -1302,20 +2021,20 @@ impl SettingsState {
 
     // ---- 私有辅助 ----
 
-    fn get_installed_schema_ids(&self) -> Vec<String> {
-        if let Ok(manager) = SchemaManager::new() {
-            manager
-                .get_schema_list()
-                .into_iter()
-                .map(|s| s.schema_id)
-                .collect()
-        } else {
-            Vec::new()
-        }
+    /// 已安装的方案包 id（注册表为准；内置方案包不计入市场包列表）。
+    fn get_installed_package_ids(&self) -> Vec<String> {
+        schema_manifest()
+            .map(|m| {
+                m.installed_packages()
+                    .into_iter()
+                    .filter(|pkg| pkg != BUILTIN_PACKAGE_ID)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn get_cached_schema_ids(&self) -> Vec<String> {
-        scan_dir_ids(&markets_dir())
+        scan_dir_ids(&market_dir())
     }
 
     fn get_cached_model_ids(&self) -> Vec<String> {
@@ -1342,6 +2061,33 @@ fn scan_dir_ids(dir: &std::path::Path) -> Vec<String> {
         }
     }
     ids
+}
+
+/// 扫 `build/` 目录得到「已部署方案 id」：有 `<id>.schema.yaml` 编译产物才算已部署。
+///
+/// 判据与引擎一致（`RimeEngine::schema_deployed`），也是服务端拒绝切换的依据，
+/// 所以设置页用它区分「能用」与「只是文件在、未启用」。
+fn deployed_schema_ids_in(build_dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(build_dir) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".schema.yaml"))
+                .map(String::from)
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn deployed_schema_ids() -> Vec<String> {
+    let (_, user_data_dir) = get_data_dirs();
+    deployed_schema_ids_in(&user_data_dir.join("build"))
 }
 
 /// 模型下载目录：~/.config/xime/models/<id>/。
@@ -2079,14 +2825,306 @@ impl SpeechState {
 enum DictTaskResult {
     List(DictListResult),
     Message(String),
+    /// 词条读取成功（附带总数 + 已过滤词条；带词典名——在途期间切换
+    /// 词典下拉的旧结果按词典名丢弃）。
+    Entries {
+        dict: String,
+        result: DictEntriesResult,
+    },
+    /// 词条读取失败（原因；带词典名，同上）。
+    EntriesFailed {
+        dict: String,
+        reason: String,
+    },
 }
 
 #[cfg(windows)]
 static DICT_TASK_OUTCOME: std::sync::Mutex<Option<DictTaskResult>> = std::sync::Mutex::new(None);
 
-/// 词典管理页面状态。
+/// 词条列表每页条数。
+///
+/// 页面外层已经是滚动容器（`pages::scrollable_content`），整页铺几百行会让
+/// 每帧构建变慢，所以这里沿用剪贴板页的分页做法。
 #[cfg(windows)]
-#[derive(Clone, Default)]
+pub const DICT_ENTRIES_PAGE_SIZE: usize = 50;
+
+/// 关键词输入的防抖时长：打字停下后才真正去扫一遍词库。
+#[cfg(windows)]
+const DICT_QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// 写词条 / 短语保存的后台结果信箱（与读取信箱分开：同一时间可能有
+/// 一个在途读取 + 一个在途写入，共用一个槽会互相覆盖结果）。
+#[cfg(windows)]
+static DICT_WRITE_OUTCOME: std::sync::Mutex<Option<DictWriteResult>> =
+    std::sync::Mutex::new(None);
+/// 方案词表读取的结果信箱（输入方案页）。
+#[cfg(windows)]
+static SCHEMA_DICT_OUTCOME: std::sync::Mutex<Option<SchemaDictTaskResult>> =
+    std::sync::Mutex::new(None);
+/// 快捷短语读取/保存的结果信箱（词典页短语子视图）。
+#[cfg(windows)]
+static PHRASE_OUTCOME: std::sync::Mutex<Option<PhraseTaskResult>> =
+    std::sync::Mutex::new(None);
+
+/// 新增词条对话框的草稿。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct DictEntryDraft {
+    /// 词。
+    pub word: String,
+    /// 编码。
+    pub code: String,
+    /// 频率（文本框；空串 = 1）。
+    pub commits: String,
+}
+
+/// 用户词典「浏览词条」子视图状态。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct DictBrowseState {
+    /// 正在浏览的词典名。
+    pub dict: String,
+    /// 搜索关键词（匹配词或编码，大小写不敏感）。
+    pub query: String,
+    /// 词库词条总数（未过滤）。
+    pub total: i32,
+    /// 命中条数（未截断；`entries` 被截断时用它提示用户）。
+    pub matched: i32,
+    /// 当前展示的词条（已按关键词过滤）。
+    pub entries: Vec<DictEntryRow>,
+    /// 当前页（0 起）。
+    pub page: usize,
+    /// 是否已经读过一次（区分"空词库"与"还没读"）。
+    pub loaded: bool,
+    /// 正在读取。
+    pub loading: bool,
+    /// 读取失败原因。
+    pub error: Option<String>,
+    /// 待发起的读取（关键词变化后等防抖到点）。
+    pending: Option<std::time::Instant>,
+    /// 正在写入（新增/删除在途；写按钮全部禁用，避免并发改词库）。
+    pub writing: bool,
+    /// 写入结果提示（成功后给用户看的一句）。
+    pub notice: Option<String>,
+    /// 待删除的词条（词, 编码)——两步确认。
+    pub delete_confirm: Option<(String, String)>,
+    /// 新增词条对话框（None = 关闭）。
+    pub add_dialog: Option<DictEntryDraft>,
+}
+
+#[cfg(windows)]
+impl DictBrowseState {
+    /// 过滤后词条占多少页（0 表示没有词条）。
+    pub fn page_count(&self) -> usize {
+        self.entries.len().div_ceil(DICT_ENTRIES_PAGE_SIZE)
+    }
+
+    /// 当前页要显示的词条。
+    pub fn page_entries(&self) -> &[DictEntryRow] {
+        let start = self.page * DICT_ENTRIES_PAGE_SIZE;
+        if start >= self.entries.len() {
+            return &[];
+        }
+        let end = (start + DICT_ENTRIES_PAGE_SIZE).min(self.entries.len());
+        &self.entries[start..end]
+    }
+
+    /// 命中数是否已被截断（提示用户补充关键词）。
+    pub fn truncated(&self) -> bool {
+        (self.entries.len() as i32) < self.matched
+    }
+
+    /// 浏览态的状态文案（加载中 / 失败 / 统计）。
+    pub fn status_text(&self) -> String {
+        if self.loading {
+            return "正在读取词条…".to_string();
+        }
+        if let Some(error) = &self.error {
+            return error.clone();
+        }
+        if !self.loaded {
+            return "尚未读取".to_string();
+        }
+        let mut summary = if self.query.trim().is_empty() {
+            format!("共 {} 条词条，显示前 {} 条", self.total, self.entries.len())
+        } else {
+            format!("共 {} 条词条，匹配 {} 条", self.total, self.matched)
+        };
+        if self.truncated() {
+            summary.push_str(&format!(
+                "（命中超过 {DICT_ENTRIES_MAX} 条，只列出前 {DICT_ENTRIES_MAX} 条，请补充关键词）"
+            ));
+        }
+        summary
+    }
+}
+
+/// 快捷短语编辑对话框的草稿（新增与编辑共用）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct PhraseDialogState {
+    /// 编辑第几条（None = 新增）。
+    pub editing: Option<usize>,
+    /// 词。
+    pub word: String,
+    /// 编码。
+    pub code: String,
+    /// 权重（文本框；空串 = 省略该列）。
+    pub weight: String,
+}
+
+/// 快捷短语子视图状态（词典页内：按方案编辑 `custom_phrase.txt`）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct CustomPhraseState {
+    /// 正在编辑的方案 id。
+    pub schema_id: String,
+    /// 方案显示名（只展示）。
+    pub schema_name: String,
+    /// 短语表名（server 解析，回显用）。
+    pub dict_name: String,
+    /// 短语表文件名。
+    pub file_name: String,
+    /// 短语表文件是否已存在。
+    pub file_exists: bool,
+    /// 方案 custom.yaml 里是否已注入翻译器。
+    pub patch_applied: bool,
+    /// 本次会话里是否新注入过翻译器（提示"重新部署后生效"）。
+    pub patch_added: bool,
+    /// 短语列表（本地权威副本：每次改动整表保存到 server）。
+    pub entries: Vec<CustomPhraseRow>,
+    /// 是否已经读过一次。
+    pub loaded: bool,
+    /// 正在读取。
+    pub loading: bool,
+    /// 正在保存。
+    pub saving: bool,
+    /// 读取/保存失败原因。
+    pub error: Option<String>,
+    /// 操作结果提示。
+    pub notice: Option<String>,
+    /// 待删除的条目下标（两步确认）。
+    pub delete_confirm: Option<usize>,
+    /// 新增/编辑对话框（None = 关闭）。
+    pub dialog: Option<PhraseDialogState>,
+}
+
+/// 方案词表浏览状态（输入方案页「方案词表」tab，只读）。
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+pub struct SchemaDictState {
+    /// 正在浏览的方案 id（跟输入方案页选中行同步）。
+    pub schema_id: String,
+    /// 搜索关键词。
+    pub query: String,
+    /// 读入的词条总数。
+    pub total: i32,
+    /// 命中条数（未截断）。
+    pub matched: i32,
+    /// 当前展示的词条。
+    pub entries: Vec<DictEntryRow>,
+    /// 方案主码表名。
+    pub dict_name: String,
+    /// 实际读入的码表名。
+    pub tables: Vec<String>,
+    /// 声明了但文件不存在的码表名。
+    pub missing: Vec<String>,
+    /// 当前页（0 起）。
+    pub page: usize,
+    /// 是否已经读过一次。
+    pub loaded: bool,
+    /// 正在读取。
+    pub loading: bool,
+    /// 读取失败原因。
+    pub error: Option<String>,
+    /// 待发起的读取（关键词变化后等防抖到点）。
+    pending: Option<std::time::Instant>,
+}
+
+#[cfg(windows)]
+impl SchemaDictState {
+    /// 过滤后词条占多少页（0 表示没有词条）。
+    pub fn page_count(&self) -> usize {
+        self.entries.len().div_ceil(DICT_ENTRIES_PAGE_SIZE)
+    }
+
+    /// 当前页要显示的词条。
+    pub fn page_entries(&self) -> &[DictEntryRow] {
+        let start = self.page * DICT_ENTRIES_PAGE_SIZE;
+        if start >= self.entries.len() {
+            return &[];
+        }
+        let end = (start + DICT_ENTRIES_PAGE_SIZE).min(self.entries.len());
+        &self.entries[start..end]
+    }
+
+    /// 命中数是否已被截断。
+    pub fn truncated(&self) -> bool {
+        (self.entries.len() as i32) < self.matched
+    }
+
+    /// 状态文案（加载中 / 失败 / 统计）。
+    pub fn status_text(&self) -> String {
+        if self.loading {
+            return "正在读取词表…".to_string();
+        }
+        if let Some(error) = &self.error {
+            return error.clone();
+        }
+        if !self.loaded {
+            return "尚未读取".to_string();
+        }
+        let mut summary = if self.query.trim().is_empty() {
+            format!("共 {} 条词条，显示前 {} 条", self.total, self.entries.len())
+        } else {
+            format!("共 {} 条词条，匹配 {} 条", self.total, self.matched)
+        };
+        if self.truncated() {
+            summary.push_str(&format!(
+                "（命中超过 {DICT_ENTRIES_MAX} 条，只列出前 {DICT_ENTRIES_MAX} 条，请补充关键词）"
+            ));
+        }
+        summary
+    }
+}
+
+/// 方案词表后台任务结果（带 schema_id：在途期间换方案/换页时丢弃旧结果）。
+#[cfg(windows)]
+enum SchemaDictTaskResult {
+    Entries {
+        schema_id: String,
+        result: SchemaEntriesResult,
+    },
+    Failed {
+        schema_id: String,
+        reason: String,
+    },
+}
+
+/// 快捷短语后台任务结果（带 schema_id：在途期间换方案时丢弃旧结果）。
+#[cfg(windows)]
+enum PhraseTaskResult {
+    Loaded {
+        schema_id: String,
+        result: PhraseListResult,
+    },
+    Saved {
+        schema_id: String,
+        result: PhraseSaveResult,
+    },
+    Failed {
+        schema_id: String,
+        reason: String,
+    },
+}
+
+/// 词典管理页面状态。
+///
+/// 版式为「页内 Tab + 表格」（对齐剪贴板页 / 小狼毫词典管理对话框）：
+/// Tab 0 用户词典（词典下拉 + 搜索 + 词条表格 + 整本操作），
+/// Tab 1 快捷短语（方案下拉 + 短语表格 + 部署）。
+#[cfg(windows)]
+#[derive(Clone)]
 pub struct DictManageState {
     /// 用户词典名列表。
     pub dicts: Vec<String>,
@@ -2096,6 +3134,33 @@ pub struct DictManageState {
     pub busy: Option<&'static str>,
     /// 最近一次操作的结果消息。
     pub message: Option<String>,
+    /// 页内当前 Tab（0=用户词典 1=快捷短语）。
+    pub tab: usize,
+    /// 用户词典 Tab 的词条浏览状态（常驻；`dict` = 当前选中词典，
+    /// 空 = 尚未选中——列表到达时自动选第一本）。
+    pub browse: DictBrowseState,
+    /// 快捷短语 Tab 的状态（None = 还没进过该 Tab；进入时自动为当前
+    /// 方案载入）。
+    pub phrase: Option<CustomPhraseState>,
+}
+
+#[cfg(windows)]
+impl Default for DictManageState {
+    /// 启动即拉一次词典列表：列表为空时页面上连词典下拉都是空的，
+    /// 不该让用户先点一次「刷新」才能看到功能。
+    fn default() -> Self {
+        let mut state = Self {
+            dicts: Vec::new(),
+            sync_dir: String::new(),
+            busy: None,
+            message: None,
+            tab: 0,
+            browse: DictBrowseState::default(),
+            phrase: None,
+        };
+        state.start_refresh();
+        state
+    }
 }
 
 #[cfg(windows)]
@@ -2185,7 +3250,429 @@ impl DictManageState {
         });
     }
 
-    /// BackgroundPoll 节拍：取后台任务结果。
+    /// 下拉切换当前词典：清掉旧词典的浏览状态并立刻读新词典。
+    ///
+    /// 词典名回显在读取结果里（`DictTaskResult::Entries { dict, .. }`），
+    /// 切换时在途的旧结果会被 `poll` 丢弃；`loading` 复位让新读取立即出发。
+    pub fn browse_select(&mut self, dict: String) {
+        if self.browse.dict == dict {
+            return;
+        }
+        self.message = None;
+        self.browse.dict = dict;
+        self.browse.query.clear();
+        self.browse.entries.clear();
+        self.browse.total = 0;
+        self.browse.matched = 0;
+        self.browse.page = 0;
+        self.browse.loaded = false;
+        self.browse.loading = false;
+        self.browse.writing = false;
+        self.browse.error = None;
+        self.browse.notice = None;
+        self.browse.add_dialog = None;
+        self.browse.delete_confirm = None;
+        self.start_entries_fetch();
+    }
+
+    /// 关键词变化：只记下来，等防抖到点由 `poll` 发起读取。
+    pub fn browse_set_query(&mut self, query: String) {
+        if self.browse.query == query {
+            return;
+        }
+        self.browse.query = query;
+        self.browse.page = 0;
+        self.browse.pending = Some(std::time::Instant::now());
+    }
+
+    /// 翻页（越界自动夹到范围内）。
+    pub fn browse_page(&mut self, page: usize) {
+        let pages = self.browse.page_count();
+        self.browse.page = if pages == 0 {
+            0
+        } else {
+            page.min(pages - 1)
+        };
+    }
+
+    /// 发起一次词条读取（单飞：已有读取在途时只记 pending，等结果回来再补）。
+    fn start_entries_fetch(&mut self) {
+        if self.browse.dict.is_empty() {
+            return;
+        }
+        if self.browse.loading {
+            self.browse.pending = Some(std::time::Instant::now());
+            return;
+        }
+        self.browse.loading = true;
+        self.browse.pending = None;
+        self.browse.error = None;
+        let dict = self.browse.dict.clone();
+        let query = self.browse.query.clone();
+        std::thread::spawn(move || {
+            let result = match notify_dict_entries(&dict, &query) {
+                Some(r) => DictTaskResult::Entries {
+                    dict: dict.clone(),
+                    result: r,
+                },
+                None => DictTaskResult::EntriesFailed {
+                    dict: dict.clone(),
+                    reason: "读取词条失败（输入法服务未运行？）".to_string(),
+                },
+            };
+            Self::submit(result);
+        });
+    }
+
+    // ---- 词条写入（新增 / 删除标记，走 ImportDictEntry） ----
+
+    /// 打开新增词条对话框。
+    pub fn browse_add_open(&mut self) {
+        self.browse.notice = None;
+        self.browse.error = None;
+        self.browse.add_dialog = Some(DictEntryDraft::default());
+    }
+
+    /// 关闭新增词条对话框（放弃草稿）。
+    pub fn browse_add_cancel(&mut self) {
+        self.browse.add_dialog = None;
+    }
+
+    /// 新增对话框：词。
+    pub fn browse_add_word(&mut self, value: String) {
+        if let Some(draft) = self.browse.add_dialog.as_mut() {
+            draft.word = value;
+        }
+    }
+
+    /// 新增对话框：编码。
+    pub fn browse_add_code(&mut self, value: String) {
+        if let Some(draft) = self.browse.add_dialog.as_mut() {
+            draft.code = value;
+        }
+    }
+
+    /// 新增对话框：频率。
+    pub fn browse_add_commits(&mut self, value: String) {
+        if let Some(draft) = self.browse.add_dialog.as_mut() {
+            draft.commits = value;
+        }
+    }
+
+    /// 提交新增词条：本地校验（服务端还会再校验一遍）→ 写入线程。
+    ///
+    /// 写入在服务端是"销毁会话 → 导入一行 → 重建会话"，会打断正在输入的句子
+    /// ——提示文案里说清楚。
+    pub fn browse_add_submit(&mut self) {
+        if self.browse.writing {
+            return;
+        }
+        let Some(draft) = self.browse.add_dialog.clone() else {
+            return;
+        };
+        let word = draft.word.trim().to_string();
+        let code = draft.code.trim().to_string();
+        if word.is_empty() || code.is_empty() {
+            self.browse.error = Some("词和编码都要填".to_string());
+            return;
+        }
+        for (label, value) in [("词", &word), ("编码", &code)] {
+            if value.contains('\t') || value.contains('\n') || value.contains('\r') {
+                self.browse.error = Some(format!("{label}不能含制表符或换行"));
+                return;
+            }
+        }
+        let commits = match parse_commits_input(&draft.commits) {
+            Ok(v) => v,
+            Err(reason) => {
+                self.browse.error = Some(reason);
+                return;
+            }
+        };
+        self.browse.add_dialog = None;
+        self.browse.error = None;
+        self.start_entry_write(word, code, commits);
+    }
+
+    /// 请求删除词条（两步确认第一步）。
+    pub fn browse_delete_request(&mut self, word: String, code: String) {
+        if !self.browse.writing {
+            self.browse.delete_confirm = Some((word, code));
+        }
+    }
+
+    /// 取消删除。
+    pub fn browse_delete_cancel(&mut self) {
+        self.browse.delete_confirm = None;
+    }
+
+    /// 确认删除：写一行频率 -1 的删除标记。
+    ///
+    /// tombstone 不是物理删除——被删的词之后再次被输入并选中会"复活"；
+    /// 频率也调不低（librime 的导入合并语义取较大频率）。
+    pub fn browse_delete_confirm(&mut self, word: String, code: String) {
+        self.browse.delete_confirm = None;
+        self.start_entry_write(word, code, -1);
+    }
+
+    /// 发起一次词条写入（新增 commits>0 / 删除 commits<0），结果走
+    /// `DICT_WRITE_OUTCOME`（与读取信箱分开，避免互相覆盖）。
+    fn start_entry_write(&mut self, word: String, code: String, commits: i32) {
+        if self.browse.writing {
+            return;
+        }
+        self.browse.writing = true;
+        self.browse.notice = None;
+        self.browse.error = None;
+        let dict = self.browse.dict.clone();
+        std::thread::spawn(move || {
+            let result = match notify_dict_entry_write(&dict, &word, &code, commits) {
+                Some(n) if n > 0 => DictWriteResult {
+                    dict: dict.clone(),
+                    ok: true,
+                    message: if commits > 0 {
+                        "已添加词条（写入会打断正在输入的句子）".to_string()
+                    } else {
+                        "已标记删除（该词之后再次被输入并选中会复活）".to_string()
+                    },
+                },
+                Some(_) => DictWriteResult {
+                    dict: dict.clone(),
+                    ok: false,
+                    message: "写入词条失败（librime 写入 0 条，词库可能正被占用）".to_string(),
+                },
+                None => DictWriteResult {
+                    dict: dict.clone(),
+                    ok: false,
+                    message: "写入词条失败（输入法服务未运行？）".to_string(),
+                },
+            };
+            *DICT_WRITE_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+        });
+    }
+
+    // ---- 快捷短语（词典页 Tab 1：按方案编辑 custom_phrase.txt） ----
+
+    /// 进入快捷短语 Tab 时打开（schema_id + 方案显示名），立刻读一次。
+    ///
+    /// Tab 离开后状态保留（Tab 间切换不丢已编辑的本地表）；换方案走
+    /// `phrase_schema_changed`。
+    pub fn phrase_open(&mut self, schema_id: String, schema_name: String) {
+        self.message = None;
+        self.phrase = Some(CustomPhraseState {
+            schema_id,
+            schema_name,
+            ..CustomPhraseState::default()
+        });
+        self.start_phrase_fetch();
+    }
+
+    /// 切换目标方案（下拉）：清状态重读。
+    pub fn phrase_schema_changed(&mut self, schema_id: String, schema_name: String) {
+        let Some(phrase) = self.phrase.as_mut() else {
+            return;
+        };
+        if phrase.schema_id == schema_id {
+            return;
+        }
+        phrase.schema_id = schema_id;
+        phrase.schema_name = schema_name;
+        phrase.entries.clear();
+        phrase.loaded = false;
+        phrase.loading = false;
+        phrase.saving = false;
+        phrase.error = None;
+        phrase.notice = None;
+        phrase.delete_confirm = None;
+        phrase.dialog = None;
+        self.start_phrase_fetch();
+    }
+
+    /// 打开新增短语对话框。
+    pub fn phrase_add_open(&mut self) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            if !phrase.saving {
+                phrase.notice = None;
+                phrase.error = None;
+                phrase.dialog = Some(PhraseDialogState::default());
+            }
+        }
+    }
+
+    /// 编辑第 i 条（打开对话框并预填）。
+    pub fn phrase_edit(&mut self, index: usize) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            if phrase.saving {
+                return;
+            }
+            if let Some(entry) = phrase.entries.get(index) {
+                phrase.notice = None;
+                phrase.error = None;
+                phrase.dialog = Some(PhraseDialogState {
+                    editing: Some(index),
+                    word: entry.word.clone(),
+                    code: entry.code.clone(),
+                    weight: entry.weight.map(|w| w.to_string()).unwrap_or_default(),
+                });
+            }
+        }
+    }
+
+    /// 关闭短语对话框（放弃草稿）。
+    pub fn phrase_dialog_cancel(&mut self) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            phrase.dialog = None;
+        }
+    }
+
+    /// 对话框：词。
+    pub fn phrase_dialog_word(&mut self, value: String) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            if let Some(dialog) = phrase.dialog.as_mut() {
+                dialog.word = value;
+            }
+        }
+    }
+
+    /// 对话框：编码。
+    pub fn phrase_dialog_code(&mut self, value: String) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            if let Some(dialog) = phrase.dialog.as_mut() {
+                dialog.code = value;
+            }
+        }
+    }
+
+    /// 对话框：权重。
+    pub fn phrase_dialog_weight(&mut self, value: String) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            if let Some(dialog) = phrase.dialog.as_mut() {
+                dialog.weight = value;
+            }
+        }
+    }
+
+    /// 提交对话框（新增或编辑）：改本地整表 → 整表保存到 server。
+    pub fn phrase_dialog_submit(&mut self) {
+        let Some(phrase) = self.phrase.as_mut() else {
+            return;
+        };
+        if phrase.saving {
+            return;
+        }
+        let Some(dialog) = phrase.dialog.clone() else {
+            return;
+        };
+        let word = dialog.word.trim().to_string();
+        let code = dialog.code.trim().to_string();
+        if word.is_empty() || code.is_empty() {
+            phrase.error = Some("词和编码都要填".to_string());
+            return;
+        }
+        for (label, value) in [("词", &word), ("编码", &code)] {
+            if value.contains('\t') || value.contains('\n') || value.contains('\r') {
+                phrase.error = Some(format!("{label}不能含制表符或换行"));
+                return;
+            }
+        }
+        let weight = match parse_weight_input(&dialog.weight) {
+            Ok(v) => v,
+            Err(reason) => {
+                phrase.error = Some(reason);
+                return;
+            }
+        };
+        let row = CustomPhraseRow { word, code, weight };
+        match dialog.editing {
+            Some(index) => {
+                if index < phrase.entries.len() {
+                    phrase.entries[index] = row;
+                }
+            }
+            None => phrase.entries.push(row),
+        }
+        phrase.dialog = None;
+        phrase.error = None;
+        self.start_phrase_save();
+    }
+
+    /// 请求删除第 i 条（两步确认第一步）。
+    pub fn phrase_delete_request(&mut self, index: usize) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            if !phrase.saving && index < phrase.entries.len() {
+                phrase.delete_confirm = Some(index);
+            }
+        }
+    }
+
+    /// 取消删除。
+    pub fn phrase_delete_cancel(&mut self) {
+        if let Some(phrase) = self.phrase.as_mut() {
+            phrase.delete_confirm = None;
+        }
+    }
+
+    /// 确认删除：从本地整表移除并整表保存。
+    pub fn phrase_delete_confirm(&mut self, index: usize) {
+        let Some(phrase) = self.phrase.as_mut() else {
+            return;
+        };
+        if index < phrase.entries.len() {
+            phrase.entries.remove(index);
+        }
+        phrase.delete_confirm = None;
+        self.start_phrase_save();
+    }
+
+    /// 发起短语表读取（在途时忽略——短语表小，重读快）。
+    fn start_phrase_fetch(&mut self) {
+        let Some(phrase) = self.phrase.as_mut() else {
+            return;
+        };
+        if phrase.loading {
+            return;
+        }
+        phrase.loading = true;
+        phrase.error = None;
+        let schema_id = phrase.schema_id.clone();
+        std::thread::spawn(move || {
+            let outcome = match notify_phrase_list(&schema_id) {
+                Some(result) => PhraseTaskResult::Loaded { schema_id, result },
+                None => PhraseTaskResult::Failed {
+                    schema_id,
+                    reason: "读取快捷短语失败（输入法服务未运行？）".to_string(),
+                },
+            };
+            *PHRASE_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+        });
+    }
+
+    /// 整表保存当前短语表（server 写文件 + 视需要注入方案 patch，不做部署）。
+    fn start_phrase_save(&mut self) {
+        let Some(phrase) = self.phrase.as_mut() else {
+            return;
+        };
+        if phrase.saving {
+            return;
+        }
+        phrase.saving = true;
+        phrase.notice = None;
+        phrase.error = None;
+        let schema_id = phrase.schema_id.clone();
+        let entries = phrase.entries.clone();
+        std::thread::spawn(move || {
+            let outcome = match notify_phrase_save(&schema_id, &entries) {
+                Some(result) => PhraseTaskResult::Saved { schema_id, result },
+                None => PhraseTaskResult::Failed {
+                    schema_id,
+                    reason: "保存快捷短语失败（输入法服务未运行？）".to_string(),
+                },
+            };
+            *PHRASE_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+        });
+    }
+
+    /// BackgroundPoll 节拍：取后台任务结果 + 处理关键词防抖。
     pub fn poll(&mut self) {
         let outcome = DICT_TASK_OUTCOME
             .lock()
@@ -2196,14 +3683,154 @@ impl DictManageState {
                 self.dicts = r.dicts;
                 self.sync_dir = r.sync_dir;
                 self.busy = None;
+                // 还没选中词典时自动选第一本（对齐小狼毫：打开就有内容可看，
+                // 不该让用户先在下拉里点一下）。browse_select 会触发首读。
+                if self.browse.dict.is_empty() {
+                    if let Some(first) = self.dicts.first().cloned() {
+                        self.browse_select(first);
+                    }
+                }
             }
             Some(DictTaskResult::Message(m)) => {
                 self.busy = None;
                 self.message = Some(m);
             }
+            Some(DictTaskResult::Entries { dict, result }) => {
+                // 词典名对不上 = 在途期间切换过下拉，旧结果丢弃。
+                if self.browse.dict == dict {
+                    self.browse.loading = false;
+                    self.browse.loaded = true;
+                    self.browse.total = result.total;
+                    self.browse.matched = result.matched;
+                    self.browse.entries = result.entries;
+                    self.browse.page = 0;
+                }
+            }
+            Some(DictTaskResult::EntriesFailed { dict, reason }) => {
+                if self.browse.dict == dict {
+                    self.browse.loading = false;
+                    self.browse.loaded = true;
+                    self.browse.error = Some(reason);
+                }
+            }
             None => {}
         }
+
+        // 词条写入结果：成功给提示 + 排一次防抖后重读（词库内容变了）。
+        // 词典名对不上（期间切过下拉）时只清 writing——结果留给旧词典，
+        // 不往新词典的视图上贴。
+        let write_outcome = DICT_WRITE_OUTCOME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(result) = write_outcome {
+            self.browse.writing = false;
+            if result.dict == self.browse.dict {
+                if result.ok {
+                    self.browse.notice = Some(result.message);
+                    self.browse.pending = Some(std::time::Instant::now());
+                } else {
+                    self.browse.error = Some(result.message);
+                }
+            }
+        }
+
+        // 快捷短语结果（读取/保存共用一个信箱；schema_id 对不上 = 期间换过方案，
+        // 丢弃；子视图已关则丢弃）。
+        let phrase_outcome = PHRASE_OUTCOME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        match phrase_outcome {
+            Some(PhraseTaskResult::Loaded { schema_id, result }) => {
+                if let Some(phrase) = self.phrase.as_mut() {
+                    if phrase.schema_id == schema_id {
+                        phrase.loading = false;
+                        phrase.loaded = true;
+                        phrase.dict_name = result.dict_name;
+                        phrase.file_name = result.file_name;
+                        phrase.file_exists = result.file_exists;
+                        phrase.patch_applied = result.patch_applied;
+                        phrase.entries = result.entries;
+                    }
+                }
+            }
+            Some(PhraseTaskResult::Saved { schema_id, result }) => {
+                if let Some(phrase) = self.phrase.as_mut() {
+                    if phrase.schema_id == schema_id {
+                        phrase.saving = false;
+                        phrase.loaded = true;
+                        phrase.dict_name = result.dict_name;
+                        phrase.file_name = result.file_name;
+                        phrase.file_exists = result.file_exists;
+                        phrase.patch_applied = result.patch_applied;
+                        if result.patch_added {
+                            phrase.patch_added = true;
+                        }
+                        phrase.entries = result.entries;
+                        phrase.notice = Some(if result.patch_added {
+                            "已保存；首次启用快捷短语要重新部署方案（输入方案页 → 部署方案）"
+                                .to_string()
+                        } else {
+                            "已保存（重新部署方案后生效）".to_string()
+                        });
+                    }
+                }
+            }
+            Some(PhraseTaskResult::Failed { schema_id, reason }) => {
+                if let Some(phrase) = self.phrase.as_mut() {
+                    if phrase.schema_id == schema_id {
+                        phrase.loading = false;
+                        phrase.saving = false;
+                        phrase.error = Some(reason);
+                    }
+                }
+            }
+            None => {}
+        }
+
+        // 关键词改动（或写词条后的补读）过了防抖就补一次读取。
+        let due = self
+            .browse
+            .pending
+            .map(|since| since.elapsed() >= DICT_QUERY_DEBOUNCE)
+            .unwrap_or(false);
+        if due {
+            self.start_entries_fetch();
+        }
     }
+}
+
+/// 新增词条的频率输入：空串 = 1；否则必须是正整数。
+#[cfg(windows)]
+fn parse_commits_input(raw: &str) -> Result<i32, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(1);
+    }
+    let value: i32 = trimmed
+        .parse()
+        .map_err(|_| "频率要填正整数（留空即 1）".to_string())?;
+    if value <= 0 {
+        return Err("频率要填正整数（留空即 1）".to_string());
+    }
+    Ok(value)
+}
+
+/// 短语权重输入：空串 = 省略该列（None）；否则必须是正整数。
+#[cfg(windows)]
+fn parse_weight_input(raw: &str) -> Result<Option<i32>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: i32 = trimmed
+        .parse()
+        .map_err(|_| "权重要是正整数（留空走默认）".to_string())?;
+    if value <= 0 {
+        return Err("权重要是正整数（留空走默认）".to_string());
+    }
+    Ok(Some(value))
 }
 
 /// 剪贴板同步插件的页面状态（开关 + 选择 + 配置表单）。
@@ -3005,9 +4632,39 @@ impl Default for AppearanceState {
 pub struct InputSchemaState {
     pub selected_schema: usize,
     pub available_schemas: Vec<SchemaInfo>,
+    /// 与 `available_schemas` 一一对应的归属方案包 id（`builtin` = 内置方案包）。
+    pub schema_packages: Vec<String>,
     pub schema_config: SchemaConfig,
     pub config_loaded: bool,
     pub current_tab: usize,
+    /// 内置方案包已卸载但 `market/builtin/` 备份仍在 → 可一键还原。
+    pub builtin_restorable: bool,
+    /// `build/` 里有编译产物的方案 id（= 真正「已部署」的方案）。
+    ///
+    /// 目录里有 `*.schema.yaml` 不等于能用：librime 只编译启用列表里的方案，
+    /// 没产物的方案切换时会被服务端按「未部署」拒绝（见 `RimeEngine::schema_deployed`）。
+    /// 设置页据此把没产物的方案标成「未启用」。
+    pub deployed_schema_ids: Vec<String>,
+    /// 「方案词表」tab 的浏览状态（只读；schema_id 跟本页选中行同步）。
+    #[cfg(windows)]
+    pub dict: SchemaDictState,
+}
+
+/// 安装/还原前的冲突确认（对齐安卓 `SchemaLocalUiState.conflictPackageId` /
+/// `conflictingSchemeIds`）：rime 目录已有其他方案包时先确认卸载。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SchemaInstallConflict {
+    /// 目标方案包 id；`builtin` 表示「还原内置方案包」（不是安装）。
+    pub schema_id: String,
+    /// 需要先卸载的方案包（含内置方案包 `builtin`）。
+    pub packages: Vec<String>,
+}
+
+impl SchemaInstallConflict {
+    /// 目标是否为「还原内置方案包」（而非安装市场包）。
+    pub fn is_restore_builtin(&self) -> bool {
+        self.schema_id == BUILTIN_PACKAGE_ID
+    }
 }
 
 #[derive(Clone, Default)]
@@ -3023,6 +4680,8 @@ pub struct MarketSchemaState {
     pub installing: Option<String>,
     pub install_message: Option<String>,
     pub install_message_since: Option<std::time::Instant>,
+    /// 待确认的安装冲突（None = 无冲突确认弹窗）。
+    pub conflict_install: Option<SchemaInstallConflict>,
     /// 扩展商店当前 Tab（0=方案, 1=模型）。
     pub store_tab: usize,
     /// 分类筛选（None=全部）。
@@ -3262,58 +4921,186 @@ fn get_download_info(schema: &MarketSchema) -> Option<(&MarketDownloadUrl, Strin
     Some((download, format!("{}{}", version, ext)))
 }
 
-fn do_uninstall(schema_id: &str) -> anyhow::Result<()> {
+/// 方案包清单管理器（rime 目录 = 用户数据目录；注册表在数据根 `.registry.yaml`）。
+fn schema_manifest() -> Result<SchemaManifest, String> {
     let (_, user_data_dir) = get_data_dirs();
-    let market_dir = markets_dir();
-    let registry_path = market_dir.join(".registry.yaml");
+    let data_root = user_data_dir
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| user_data_dir.clone());
+    Ok(SchemaManifest::new(user_data_dir, data_root))
+}
 
-    // Read registry to find installed files
-    let files_to_remove: Vec<String> = if registry_path.exists() {
-        let content = std::fs::read_to_string(&registry_path)?;
-        #[derive(serde::Deserialize)]
-        struct Entry {
-            files: Vec<String>,
+/// 注册表里非空的方案包 id（排序稳定，便于展示与比较）。
+fn nonempty_packages(registry: &Registry) -> Vec<String> {
+    let mut packages: Vec<String> = registry
+        .iter()
+        .filter(|(_, entry)| !entry.is_empty())
+        .map(|(pkg, _)| pkg.clone())
+        .collect();
+    packages.sort();
+    packages
+}
+
+/// 安装前冲突预检（对齐安卓 `installPackage` 的「rime 目录已有其他方案」判定）：
+/// 先把无主方案文件登记为内置方案包，再取注册表里除自身外的全部方案包。
+fn schema_install_conflict(schema_id: &str) -> Result<SchemaInstallConflict, String> {
+    let manifest = schema_manifest()?;
+    manifest.refresh_builtin_package()?;
+    let registry = manifest.load_registry();
+    let packages: Vec<String> = nonempty_packages(&registry)
+        .into_iter()
+        .filter(|pkg| pkg != schema_id)
+        .collect();
+    Ok(SchemaInstallConflict {
+        schema_id: schema_id.to_string(),
+        packages,
+    })
+}
+
+/// 还原内置方案前冲突预检：注册表里除内置方案包以外的全部方案包都要先卸载，
+/// 否则还原后又会变成「内置 + 第三方」混装。
+fn schema_restore_conflict() -> Result<Vec<String>, String> {
+    let manifest = schema_manifest()?;
+    manifest.refresh_builtin_package()?;
+    let registry = manifest.load_registry();
+    Ok(nonempty_packages(&registry)
+        .into_iter()
+        .filter(|pkg| pkg != BUILTIN_PACKAGE_ID)
+        .collect())
+}
+
+/// 从某方案包的文件清单（相对路径）里取出它**全部**的顶层方案 id：默认方案置顶，
+/// 其余按字典序。子目录里的 `.schema.yaml` 不算（rime 的 schema_list 只认顶层 id）。
+///
+/// 安装/还原方案包时必须整包写进启用列表，而不是只写默认那一个：librime 只编译
+/// `schema_list` 里的方案，只启用一个的话包内其余方案没有 build 产物，用户切过去
+/// 会被服务端按「未部署」拒绝（见 xime-rime 的 `schema_deployed`）。
+fn package_schema_ids<'a>(
+    files: impl IntoIterator<Item = &'a str>,
+    default_id: Option<&str>,
+) -> Vec<String> {
+    let mut ids: Vec<String> = files
+        .into_iter()
+        .filter_map(|file| file.strip_suffix(".schema.yaml"))
+        .filter(|id| !id.contains('/'))
+        .map(String::from)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if let Some(default) = default_id {
+        if let Some(pos) = ids.iter().position(|id| id == default) {
+            let default = ids.remove(pos);
+            ids.insert(0, default);
         }
-        let registry: std::collections::HashMap<String, Entry> = serde_yaml::from_str(&content)?;
-        registry
-            .get(schema_id)
-            .map(|e| e.files.clone())
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    for file in &files_to_remove {
-        let path = user_data_dir.join(file);
-        let _ = std::fs::remove_file(&path);
     }
+    ids
+}
+
+/// 从还原出的内置方案文件里挑默认启用的方案：wubi86 优先（曜的默认方案），
+/// 否则取字典序最靠前的顶层方案（子目录里的不算）。
+fn restored_default_schema_id(files: &[String]) -> Option<String> {
+    if files.iter().any(|f| f == "wubi86.schema.yaml") {
+        return Some("wubi86".to_string());
+    }
+    files
+        .iter()
+        .filter_map(|f| f.strip_suffix(".schema.yaml"))
+        .find(|id| !id.contains('/'))
+        .map(String::from)
+}
+
+/// 还原内置方案后重写启用列表：先按默认方案置顶把内置包**全部**方案写进去
+/// （只写默认那一个的话，包内其余方案没有 build 产物，切过去会被判「未部署」），
+/// 顺带清掉可能残留的陈旧启用项（如第三方包卸载后仍指向 rime_ice 的条目）。
+fn apply_restored_builtin_schema_list(manifest: &SchemaManifest) -> anyhow::Result<()> {
+    let registry = manifest.load_registry();
+    let Some(entry) = registry.get(BUILTIN_PACKAGE_ID) else {
+        return Ok(());
+    };
+    let default_id = restored_default_schema_id(&entry.files);
+    let ids = package_schema_ids(entry.files.iter().map(String::as_str), default_id.as_deref());
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let manager = SchemaManager::new().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    manager
+        .set_schema_list(&refs)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    manager.save().map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(())
+}
+
+/// 卸载方案包（对齐安卓 `uninstallWithManifest`）：无主文件先归内置方案包 →
+/// 逐文件按 claimedBy 判断（共享文件保留，不误删内置/他人文件）→ 清理衍生产物 →
+/// 启用列表移除该包名下全部方案 → 可选重新部署并通知宿主热载。
+/// 用户主动卸载（`deploy = true`）且这是最后一个方案来源时，从备份自动还原
+/// 内置方案包——「卸载第三方方案」即恢复默认方案。
+///
+/// `deploy = false` 供「先卸载冲突方案包再安装/还原」流程使用（安装流程统一部署一次，
+/// 避免多次数秒级部署）。
+fn do_uninstall(schema_id: &str, deploy: bool) -> anyhow::Result<()> {
+    let manifest = schema_manifest().map_err(|e| anyhow::anyhow!(e))?;
+    // 无主文件先归入内置方案包，避免卸载时漏删/误删
+    // （对齐安卓 confirmInstallWithUninstall 里的 refreshBuiltinManifest）。
+    manifest
+        .refresh_builtin_package()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let outcome = manifest
+        .uninstall_package(schema_id)
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let manager = SchemaManager::new().map_err(|e| anyhow::anyhow!("{}", e))?;
-    let current_list: Vec<String> = manager
-        .get_schema_list()
+    // 包 id ≠ 方案 id（rime-ice → rime_ice）：注册表知道该包名下的全部方案 id。
+    let mut removed: Vec<String> = outcome.removed_schema_ids.clone();
+    removed.push(schema_id.to_string());
+    let mut remaining: Vec<String> = manager
+        .get_schema_list_ids()
         .into_iter()
-        .map(|s| s.schema_id)
-        .filter(|id| id != schema_id)
+        .filter(|id| !removed.iter().any(|r| r == id))
         .collect();
-    if let Some(first) = current_list.first() {
+    if remaining.is_empty() && deploy {
+        // 启用列表清空 = 卸掉了最后一个方案来源：从备份还原内置方案包。
+        // 注册表里还有其他市场包时不还原（避免混装——它们的方案只是未启用）；
+        // 没有备份时走下方回退。
+        let other_market_packages = nonempty_packages(&manifest.load_registry())
+            .into_iter()
+            .any(|pkg| pkg != BUILTIN_PACKAGE_ID);
+        if !other_market_packages && manifest.restore_builtin_package().is_ok() {
+            let files = manifest
+                .load_registry()
+                .get(BUILTIN_PACKAGE_ID)
+                .map(|e| e.files.clone())
+                .unwrap_or_default();
+            // 整包启用（默认方案置顶），与安装/还原语义一致：只启用一个的话
+            // 内置包内其余方案没有 build 产物，切换时会被判「未部署」。
+            let default_id = restored_default_schema_id(&files);
+            remaining =
+                package_schema_ids(files.iter().map(String::as_str), default_id.as_deref());
+        }
+    }
+    if remaining.is_empty() {
+        // 启用列表清空：回退到仍存在的方案，避免 rime 因 schema_list 为空异常。
+        remaining = manager
+            .get_schema_list()
+            .into_iter()
+            .map(|s| s.schema_id)
+            .filter(|id| !removed.iter().any(|r| r == id))
+            .collect();
+    }
+    if !remaining.is_empty() {
+        let refs: Vec<&str> = remaining.iter().map(String::as_str).collect();
         manager
-            .set_schema_list(&[first.as_str()])
+            .set_schema_list(&refs)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
     }
     manager.save().map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    if registry_path.exists() {
-        let content = std::fs::read_to_string(&registry_path)?;
-        let mut registry: std::collections::HashMap<String, serde_yaml::Value> =
-            serde_yaml::from_str(&content)?;
-        registry.remove(schema_id);
-        if let Ok(yaml) = serde_yaml::to_string(&registry) {
-            let _ = std::fs::write(&registry_path, yaml);
-        }
+    if deploy {
+        deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
+        notify_daemon_reload();
     }
-
-    deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
-    notify_daemon_reload();
     Ok(())
 }
 
@@ -3321,7 +5108,7 @@ fn do_download(schema: &MarketSchema) -> anyhow::Result<()> {
     let (download, filename) =
         get_download_info(schema).ok_or_else(|| anyhow::anyhow!("无可用下载地址或不支持的格式"))?;
 
-    let dest_dir = markets_dir().join(&schema.id);
+    let dest_dir = market_dir().join(&schema.id);
     std::fs::create_dir_all(&dest_dir)?;
 
     let dest = dest_dir.join(&filename);
@@ -3466,8 +5253,33 @@ fn download_file(
     Ok(())
 }
 
+/// 递归收集解压目录下全部文件（相对路径统一 `/` 分隔，对齐归档条目路径）。
+fn collect_release_files(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_release_files(root, &path, out)?;
+        } else {
+            let rel = path
+                .strip_prefix(root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push((rel, path));
+        }
+    }
+    Ok(())
+}
+
+/// 从 market 包安装方案（对齐 Android installPackageFromMarketDir）：
+/// 全量释放（不只 .schema.yaml，含词典/lua 等依赖文件）→ 冲突检测
+/// （目标文件已被其他包/内置方案包占用且内容不同则拒绝）→ 写包清单
+/// （按包隔离，含内容哈希，卸载据此精确删文件、按 claimedBy 保护共享文件）。
 fn do_install(schema_id: &str) -> anyhow::Result<()> {
-    let cache_schema_dir = markets_dir().join(schema_id);
+    let cache_schema_dir = market_dir().join(schema_id);
     anyhow::ensure!(cache_schema_dir.exists(), "未找到缓存的下载文件");
 
     let archive = std::fs::read_dir(&cache_schema_dir)?
@@ -3491,34 +5303,114 @@ fn do_install(schema_id: &str) -> anyhow::Result<()> {
         .unwrap()
         .to_string_lossy()
         .to_string();
-    if filename.ends_with(".zip") {
-        extract_zip(&archive_path, &temp_dir)?;
+    let extract_result = if filename.ends_with(".zip") {
+        extract_zip(&archive_path, &temp_dir)
     } else {
-        extract_tar_gz(&archive_path, &temp_dir)?;
+        extract_tar_gz(&archive_path, &temp_dir)
+    };
+    if let Err(e) = extract_result {
+        // 损坏的包直接丢弃（对齐 Android validateArchive 失败删除）。
+        std::fs::remove_dir_all(&temp_dir).ok();
+        return Err(e);
     }
 
     let (_, user_data_dir) = get_data_dirs();
-    let schema_files = find_schema_files(&temp_dir);
+    let manifest = schema_manifest().map_err(|e| anyhow::anyhow!(e))?;
+    // 无主方案文件先登记为内置方案包（对齐安卓「每次安装前 refreshBuiltinManifest」）：
+    // 第三方包不得悄悄把内置方案文件收进自己的清单。
+    manifest
+        .refresh_builtin_package()
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 1) 全量释放清单：归档内容进 rime 目录，但过滤宿主/引擎自有文件
+    //    （default.yaml / xime.yaml / custom_phrase.txt 等）、部署产物（build/）、
+    //    用户词典目录（*.userdb/）与其他平台前端配置。
+    let mut release_files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    if let Err(e) = collect_release_files(&temp_dir, &temp_dir, &mut release_files) {
+        std::fs::remove_dir_all(&temp_dir).ok();
+        return Err(e);
+    }
+    release_files.retain(|(rel, _)| !schema_manifest::is_protected_release_path(rel));
     anyhow::ensure!(
-        !schema_files.is_empty(),
-        "未在下载包中找到 .schema.yaml 文件"
+        !release_files.is_empty(),
+        "下载包中没有可安装的文件"
     );
 
-    for path in &schema_files {
-        let name = path.file_name().unwrap();
-        std::fs::copy(path, user_data_dir.join(name))?;
+    // 发现真实方案 id（包 id ≠ 方案 id，如 rime-ice → rime_ice；从顶层
+    // *.schema.yaml 提取），并优先取与包 id 规范化后同名的为启用目标。
+    let mut new_schema_ids: Vec<String> = release_files
+        .iter()
+        .filter_map(|(rel, _)| rel.strip_suffix(".schema.yaml"))
+        .filter(|rel| !rel.contains('/'))
+        .map(|rel| rel.to_string())
+        .collect();
+    new_schema_ids.sort();
+    new_schema_ids.dedup();
+    anyhow::ensure!(
+        !new_schema_ids.is_empty(),
+        "包内没有 .schema.yaml，不是可安装的方案包"
+    );
+    let normalized = schema_id.replace('-', "_");
+    let enabled_id = new_schema_ids
+        .iter()
+        .find(|id| *id == &normalized)
+        .or_else(|| new_schema_ids.first())
+        .cloned()
+        .unwrap_or_else(|| schema_id.to_string());
+
+    // 2) 冲突检测（对齐安卓 detectConflicts）：目标文件已被其他包（含内置方案包）
+    //    声明且内容不同 → 拒绝安装；同内容视为共享依赖放行；同包重装/升级放行。
+    let mut targets: Vec<(String, String)> = Vec::with_capacity(release_files.len());
+    for (rel, src) in &release_files {
+        let hash = schema_manifest::sha256_file(src)
+            .ok_or_else(|| anyhow::anyhow!("读取待安装文件失败：{}", rel))?;
+        targets.push((rel.clone(), hash));
+    }
+    let conflicts = manifest.detect_conflicts(schema_id, &targets);
+    if !conflicts.is_empty() {
+        std::fs::remove_dir_all(&temp_dir).ok();
+        let detail = conflicts
+            .iter()
+            .map(|c| c.describe())
+            .collect::<Vec<_>>()
+            .join("；");
+        anyhow::bail!(
+            "文件冲突：{detail}。本机同一时刻只保留一个方案包，\
+             请先在「已安装」里卸载占用方（或直接用安装确认弹窗卸载后安装）"
+        );
     }
 
-    let manager = SchemaManager::new().map_err(|e| anyhow::anyhow!("{}", e))?;
-    if let Some(current) = manager.get_selected_schema() {
-        manager
-            .set_schema_list(&[current.as_str(), schema_id])
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-    } else {
-        manager
-            .set_schema_list(&[schema_id])
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // 3) 释放到 rime 目录（保留相对路径结构）。
+    for (rel, src) in &release_files {
+        let dest = user_data_dir.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(src, &dest)?;
     }
+    std::fs::remove_dir_all(&temp_dir).ok();
+
+    // 4) 写安装清单（按包隔离，含内容哈希：卸载据此精确删文件、按 claimedBy
+    //    保护共享文件）。
+    manifest
+        .register_package(schema_id, &targets)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 5) 启用该包的全部方案（默认方案置顶；列表替换而非追加，避免包 id ≠
+    //    方案 id 时塞入 rime 不认识的条目）。
+    //
+    //    必须整包启用：librime 只编译 schema_list 里的方案，只启用一个的话
+    //    包内其余方案没有 build 产物，用户切过去会被判「未部署」而拒绝。
+    let enabled_ids = package_schema_ids(
+        release_files.iter().map(|(rel, _)| rel.as_str()),
+        Some(&enabled_id),
+    );
+    anyhow::ensure!(!enabled_ids.is_empty(), "包内没有可启用的方案");
+    let refs: Vec<&str> = enabled_ids.iter().map(String::as_str).collect();
+    let manager = SchemaManager::new().map_err(|e| anyhow::anyhow!("{}", e))?;
+    manager
+        .set_schema_list(&refs)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     manager.save().map_err(|e| anyhow::anyhow!("{}", e))?;
 
     deploy_all().map_err(|e| anyhow::anyhow!("部署失败: {}", e))?;
@@ -3568,23 +5460,6 @@ fn extract_tar_gz(archive_path: &std::path::Path, dest: &std::path::Path) -> any
         }
     }
     Ok(())
-}
-
-fn find_schema_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut results = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                results.extend(find_schema_files(&path));
-            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.ends_with(".schema.yaml") {
-                    results.push(path);
-                }
-            }
-        }
-    }
-    results
 }
 
 #[cfg(test)]
@@ -3764,6 +5639,60 @@ schemas:
         assert_eq!(filename, "1.0.4.zip");
     }
 
+    /// 整包启用：包内**全部**顶层方案都要进启用列表，默认方案置顶。
+    /// 只写一个的话包内其余方案没有 build 产物，切换会被服务端判「未部署」。
+    #[test]
+    fn package_schema_ids_keeps_whole_package_with_default_first() {
+        let files = vec![
+            "wubi86.dict.yaml".to_string(),
+            "wubi86.schema.yaml".to_string(),
+            "wubi86_pinyin.schema.yaml".to_string(),
+            "wubi86_trad.schema.yaml".to_string(),
+            "pinyin_simp.schema.yaml".to_string(),
+            "symbols.yaml".to_string(),
+        ];
+        let ids = package_schema_ids(files.iter().map(String::as_str), Some("wubi86"));
+        assert_eq!(
+            ids,
+            vec![
+                "wubi86".to_string(),
+                "pinyin_simp".to_string(),
+                "wubi86_pinyin".to_string(),
+                "wubi86_trad".to_string(),
+            ]
+        );
+    }
+
+    /// 默认方案不在包里（或没给）时按字典序，不塞入不存在的方案。
+    #[test]
+    fn package_schema_ids_default_missing_falls_back_to_sorted() {
+        let files = vec!["b.schema.yaml".to_string(), "a.schema.yaml".to_string()];
+        let ids = package_schema_ids(files.iter().map(String::as_str), Some("nope"));
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+        let ids = package_schema_ids(files.iter().map(String::as_str), None);
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// 子目录里的 `.schema.yaml` 不算（rime 的 schema_list 只认顶层 id），重复项去重。
+    #[test]
+    fn package_schema_ids_ignores_nested_and_dedups() {
+        let files = vec![
+            "nested/inner.schema.yaml".to_string(),
+            "top.schema.yaml".to_string(),
+            "top.schema.yaml".to_string(),
+            "lua/uuid.lua".to_string(),
+        ];
+        let ids = package_schema_ids(files.iter().map(String::as_str), Some("top"));
+        assert_eq!(ids, vec!["top".to_string()]);
+    }
+
+    /// `build/` 不存在时视为「没有任何方案已部署」，不 panic。
+    #[test]
+    fn deployed_schema_ids_in_missing_dir_is_empty() {
+        let dir = std::env::temp_dir().join("xime_no_such_build_dir_4242");
+        assert!(deployed_schema_ids_in(&dir).is_empty());
+    }
+
     #[test]
     fn scan_dir_ids_skips_hidden_and_files() {
         let dir = std::env::temp_dir().join(format!("xime_scan_test_{}", std::process::id()));
@@ -3825,5 +5754,409 @@ schemas:
         h.items.truncate(8);
         h.clamp_page();
         assert_eq!(h.page, 0);
+    }
+
+    #[test]
+    fn restored_default_schema_prefers_wubi86() {
+        let files = vec![
+            "build/wubi98.table.bin".to_string(),
+            "pinyin_simp.schema.yaml".to_string(),
+            "symbols.yaml".to_string(),
+            "wubi86.schema.yaml".to_string(),
+        ];
+        assert_eq!(restored_default_schema_id(&files).as_deref(), Some("wubi86"));
+
+        // 没有 wubi86 时取字典序最靠前的顶层方案；子目录里的不算、非方案文件不算。
+        let files = vec![
+            "sub/nested.schema.yaml".to_string(),
+            "symbols.yaml".to_string(),
+            "wubi98.schema.yaml".to_string(),
+        ];
+        assert_eq!(restored_default_schema_id(&files).as_deref(), Some("wubi98"));
+        assert_eq!(
+            restored_default_schema_id(&["symbols.yaml".to_string()]),
+            None
+        );
+    }
+}
+
+/// 用户词典「浏览词条」子视图的纯逻辑（分页/防抖/截断提示）。
+#[cfg(all(test, windows))]
+mod dict_browse_tests {
+    use super::*;
+
+    fn rows(count: usize) -> Vec<DictEntryRow> {
+        (0..count)
+            .map(|i| DictEntryRow {
+                word: format!("词{i}"),
+                code: format!("code{i}"),
+                commits: 1,
+            })
+            .collect()
+    }
+
+    fn browse_with(entries: Vec<DictEntryRow>, page: usize) -> DictBrowseState {
+        let matched = entries.len() as i32;
+        DictBrowseState {
+            dict: "wubi86".to_string(),
+            entries,
+            matched,
+            page,
+            loaded: true,
+            ..DictBrowseState::default()
+        }
+    }
+
+    #[test]
+    fn pages_split_into_full_and_partial_slices() {
+        let browse = browse_with(rows(DICT_ENTRIES_PAGE_SIZE * 2 + 20), 0);
+        assert_eq!(browse.page_count(), 3);
+
+        assert_eq!(browse.page_entries().len(), DICT_ENTRIES_PAGE_SIZE);
+        assert_eq!(browse.page_entries()[0].word, "词0");
+
+        let last = browse_with(rows(DICT_ENTRIES_PAGE_SIZE * 2 + 20), 2);
+        assert_eq!(last.page_entries().len(), 20);
+        assert_eq!(
+            last.page_entries()[0].word,
+            format!("词{}", DICT_ENTRIES_PAGE_SIZE * 2)
+        );
+
+        // 越界页给空切片，不 panic（view 层不会崩）。
+        let beyond = browse_with(rows(10), 5);
+        assert!(beyond.page_entries().is_empty());
+    }
+
+    #[test]
+    fn empty_and_exact_page_counts() {
+        assert_eq!(browse_with(Vec::new(), 0).page_count(), 0);
+        assert_eq!(browse_with(rows(1), 0).page_count(), 1);
+        assert_eq!(
+            browse_with(rows(DICT_ENTRIES_PAGE_SIZE), 0).page_count(),
+            1
+        );
+        assert_eq!(
+            browse_with(rows(DICT_ENTRIES_PAGE_SIZE + 1), 0).page_count(),
+            2
+        );
+    }
+
+    #[test]
+    fn truncated_only_when_returned_entries_fall_short_of_hits() {
+        let mut browse = browse_with(rows(DICT_ENTRIES_MAX), 0);
+        assert!(!browse.truncated(), "回传条数与命中数相同就不算截断");
+
+        browse.matched = DICT_ENTRIES_MAX as i32 + 40;
+        assert!(browse.truncated(), "命中多于回传条数才算截断");
+    }
+
+    #[test]
+    fn query_change_resets_page_and_arms_debounce() {
+        let mut dict = DictManageState {
+            browse: browse_with(rows(120), 2),
+            ..DictManageState::default()
+        };
+
+        dict.browse_set_query("gou".to_string());
+        assert_eq!(dict.browse.query, "gou");
+        assert_eq!(dict.browse.page, 0, "换了关键词要回到第一页");
+        assert!(dict.browse.pending.is_some(), "关键词变化应触发防抖读取");
+
+        // 同样的关键词（iced 每帧都会回报当前值）不重复排队。
+        dict.browse.pending = None;
+        dict.browse_set_query("gou".to_string());
+        assert!(dict.browse.pending.is_none());
+    }
+
+    #[test]
+    fn page_navigation_clamps_to_range() {
+        let mut dict = DictManageState {
+            browse: browse_with(rows(120), 0),
+            ..DictManageState::default()
+        };
+        dict.browse_page(2);
+        assert_eq!(dict.browse.page, 2);
+        dict.browse_page(99);
+        assert_eq!(dict.browse.page, 2, "越界夹到末页");
+
+        // 没有词条时永远停在第 0 页。
+        dict.browse = browse_with(Vec::new(), 3);
+        dict.browse_page(1);
+        assert_eq!(dict.browse.page, 0);
+    }
+
+    /// 下拉切换词典：清关键词/翻页/对话框/确认态并立刻发首读。
+    #[test]
+    fn browse_select_resets_state_and_fetches_new_dict() {
+        let mut dict = DictManageState {
+            browse: DictBrowseState {
+                dict: "wubi86".to_string(),
+                query: "gou".to_string(),
+                entries: rows(5),
+                page: 2,
+                loaded: true,
+                ..DictBrowseState::default()
+            },
+            ..DictManageState::default()
+        };
+
+        dict.browse_select("rime_ice".to_string());
+        assert_eq!(dict.browse.dict, "rime_ice");
+        assert_eq!(dict.browse.query, "", "换词典清掉旧关键词");
+        assert_eq!(dict.browse.page, 0);
+        assert!(dict.browse.entries.is_empty(), "旧词典词条不该残留");
+        assert!(!dict.browse.loaded, "新词典还没读过");
+        assert!(dict.browse.loading, "切换应立刻发起首读");
+        assert!(dict.browse.error.is_none());
+
+        // 选同一本（pick_list 不会重发同名，防御性早退）。
+        let before = dict.browse.loading;
+        dict.browse_select("rime_ice".to_string());
+        assert_eq!(dict.browse.loading, before, "同词典重复选择是空操作");
+    }
+
+    #[test]
+    fn status_text_covers_loading_error_and_counts() {
+        let mut browse = browse_with(rows(3), 0);
+        browse.total = 42;
+        browse.query = "gou".to_string();
+        assert_eq!(browse.status_text(), "共 42 条词条，匹配 3 条");
+
+        browse.query = String::new();
+        assert_eq!(browse.status_text(), "共 42 条词条，显示前 3 条");
+
+        browse.loading = true;
+        assert_eq!(browse.status_text(), "正在读取词条…");
+
+        browse.loading = false;
+        browse.error = Some("读取词条失败（输入法服务未运行？）".to_string());
+        assert_eq!(browse.status_text(), "读取词条失败（输入法服务未运行？）");
+
+        let unread = DictBrowseState::default();
+        assert_eq!(unread.status_text(), "尚未读取");
+    }
+
+    #[test]
+    fn status_text_warns_when_hits_are_capped() {
+        let mut browse = browse_with(rows(DICT_ENTRIES_MAX), 0);
+        browse.matched = DICT_ENTRIES_MAX as i32 + 7;
+        browse.query = "de".to_string();
+        let text = browse.status_text();
+        assert!(
+            text.contains(&format!("匹配 {} 条", DICT_ENTRIES_MAX + 7)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("只列出前 {DICT_ENTRIES_MAX} 条")),
+            "{text}"
+        );
+    }
+}
+
+/// 词条写入 / 方案词表 / 快捷短语的纯逻辑（校验、两步确认、翻页）。
+#[cfg(all(test, windows))]
+mod dict_edit_tests {
+    use super::*;
+
+    /// 新增对话框的校验与提交（服务端回调未注册时线程返回失败结果，
+    /// 只断言提交前的同步状态：对话框关没关、writing 置位与否）。
+    #[test]
+    fn browse_add_submit_validates_input_locally() {
+        let mut dict = DictManageState {
+            browse: DictBrowseState {
+                dict: "wubi86".to_string(),
+                ..DictBrowseState::default()
+            },
+            ..DictManageState::default()
+        };
+
+        // 词/编码为空 → 报错并保留对话框。
+        dict.browse_add_open();
+        dict.browse_add_submit();
+        assert!(dict.browse.add_dialog.is_some());
+        assert_eq!(dict.browse.error.as_deref(), Some("词和编码都要填"));
+
+        // 填上词和编码、频率留空（= 1）→ 提交成功：关对话框、置 writing。
+        if let Some(draft) = dict.browse.add_dialog.as_mut() {
+            draft.word = "曦码".to_string();
+            draft.code = "jhdm".to_string();
+        }
+        dict.browse_add_submit();
+        assert!(dict.browse.add_dialog.is_none());
+        assert!(dict.browse.writing);
+        assert!(dict.browse.error.is_none());
+    }
+
+    /// 频率输入的解析：空串 = 1；非正整数/非数字报错。
+    #[test]
+    fn parse_commits_input_blank_is_one_and_rejects_junk() {
+        assert_eq!(parse_commits_input(""), Ok(1));
+        assert_eq!(parse_commits_input("  7 "), Ok(7));
+        assert!(parse_commits_input("0").is_err());
+        assert!(parse_commits_input("-3").is_err());
+        assert!(parse_commits_input("abc").is_err());
+        assert!(parse_commits_input("1.5").is_err());
+    }
+
+    /// 权重输入的解析：空串 = None（省略该列）；非正整数报错。
+    #[test]
+    fn parse_weight_input_blank_is_none_and_rejects_junk() {
+        assert_eq!(parse_weight_input(""), Ok(None));
+        assert_eq!(parse_weight_input(" 99 "), Ok(Some(99)));
+        assert!(parse_weight_input("0").is_err());
+        assert!(parse_weight_input("-2").is_err());
+        assert!(parse_weight_input("x").is_err());
+    }
+
+    /// 删除两步确认：请求 → 确认态；确认 → 清确认态并进入写入。
+    #[test]
+    fn browse_delete_two_step_confirmation() {
+        let mut dict = DictManageState {
+            browse: DictBrowseState {
+                dict: "wubi86".to_string(),
+                entries: vec![DictEntryRow {
+                    word: "词".to_string(),
+                    code: "code".to_string(),
+                    commits: 3,
+                }],
+                ..DictBrowseState::default()
+            },
+            ..DictManageState::default()
+        };
+
+        dict.browse_delete_request("词".to_string(), "code".to_string());
+        assert_eq!(
+            dict.browse.delete_confirm.clone(),
+            Some(("词".to_string(), "code".to_string()))
+        );
+
+        dict.browse_delete_cancel();
+        assert!(dict.browse.delete_confirm.is_none());
+
+        dict.browse_delete_request("词".to_string(), "code".to_string());
+        dict.browse_delete_confirm("词".to_string(), "code".to_string());
+        assert!(dict.browse.delete_confirm.is_none(), "确认后退出确认态");
+        assert!(dict.browse.writing, "确认后进入写入");
+    }
+
+    /// 快捷短语对话框：校验失败保留对话框；成功关对话框并排队整表保存。
+    #[test]
+    fn phrase_dialog_submit_validates_and_enqueues_save() {
+        let mut dict = DictManageState::default();
+        dict.phrase_open("wubi86".to_string(), "五笔86".to_string());
+
+        // 编码为空 → 报错保留对话框。
+        dict.phrase_add_open();
+        if let Some(phrase) = dict.phrase.as_mut() {
+            if let Some(dialog) = phrase.dialog.as_mut() {
+                dialog.word = "你好".to_string();
+            }
+        }
+        dict.phrase_dialog_submit();
+        assert!(dict.phrase.as_ref().and_then(|p| p.dialog.clone()).is_some());
+        assert_eq!(
+            dict.phrase.as_ref().and_then(|p| p.error.clone()),
+            Some("词和编码都要填".to_string())
+        );
+
+        // 补上编码 → 提交成功：关对话框、本地表多一条、进入保存。
+        dict.phrase_dialog_word("你好".to_string());
+        dict.phrase_dialog_code("lh".to_string());
+        dict.phrase_dialog_weight("99".to_string());
+        dict.phrase_dialog_submit();
+        let Some(phrase) = dict.phrase.as_ref() else {
+            panic!();
+        };
+        assert!(phrase.dialog.is_none());
+        assert!(phrase.saving);
+        assert_eq!(phrase.entries.len(), 1);
+        assert_eq!(phrase.entries[0].word, "你好");
+        assert_eq!(phrase.entries[0].code, "lh");
+        assert_eq!(phrase.entries[0].weight, Some(99));
+    }
+
+    /// 快捷短语删除两步确认：确认后本地表少一条并排队保存。
+    #[test]
+    fn phrase_delete_two_step_confirmation() {
+        let mut dict = DictManageState::default();
+        dict.phrase_open("wubi86".to_string(), "五笔86".to_string());
+        if let Some(phrase) = dict.phrase.as_mut() {
+            phrase.entries = vec![
+                CustomPhraseRow {
+                    word: "甲".to_string(),
+                    code: "a".to_string(),
+                    weight: None,
+                },
+                CustomPhraseRow {
+                    word: "乙".to_string(),
+                    code: "b".to_string(),
+                    weight: None,
+                },
+            ];
+        }
+
+        dict.phrase_delete_request(1);
+        assert_eq!(dict.phrase.as_ref().and_then(|p| p.delete_confirm), Some(1));
+
+        dict.phrase_delete_cancel();
+        assert_eq!(dict.phrase.as_ref().and_then(|p| p.delete_confirm), None);
+
+        dict.phrase_delete_request(1);
+        dict.phrase_delete_confirm(1);
+        let Some(phrase) = dict.phrase.as_ref() else {
+            panic!();
+        };
+        assert_eq!(phrase.entries.len(), 1);
+        assert_eq!(phrase.entries[0].word, "甲");
+        assert!(phrase.saving);
+    }
+
+    /// 方案词表分页/状态（与用户词典词条浏览同款数学）。
+    #[test]
+    fn schema_dict_pagination_and_status() {
+        let mut dict = SchemaDictState {
+            schema_id: "wubi86".to_string(),
+            entries: (0..120)
+                .map(|i| DictEntryRow {
+                    word: format!("词{i}"),
+                    code: format!("code{i}"),
+                    commits: 0,
+                })
+                .collect(),
+            loaded: true,
+            ..SchemaDictState::default()
+        };
+        assert_eq!(dict.page_count(), 3);
+        assert_eq!(dict.page_entries().len(), DICT_ENTRIES_PAGE_SIZE);
+        dict.page = 2;
+        assert_eq!(dict.page_entries().len(), 20);
+
+        // 状态文案：无关键词显示总数，有关键词显示命中数。
+        dict.total = 42;
+        assert!(dict.status_text().contains("共 42 条词条"));
+        dict.query = "de".to_string();
+        dict.matched = 9;
+        assert!(dict.status_text().contains("匹配 9 条"));
+    }
+
+    /// 方案词表：命中超出回传上限时提示补充关键词。
+    #[test]
+    fn schema_dict_truncation_warning() {
+        let dict = SchemaDictState {
+            schema_id: "wubi86".to_string(),
+            query: "de".to_string(),
+            entries: vec![DictEntryRow {
+                word: "词".to_string(),
+                code: "code".to_string(),
+                commits: 0,
+            }],
+            matched: DICT_ENTRIES_MAX as i32 + 3,
+            loaded: true,
+            ..SchemaDictState::default()
+        };
+        assert!(dict.truncated());
+        assert!(dict
+            .status_text()
+            .contains(&format!("只列出前 {DICT_ENTRIES_MAX} 条")));
     }
 }

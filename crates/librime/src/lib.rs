@@ -27,7 +27,6 @@ pub use traits::Traits;
 
 use once_cell::sync::Lazy;
 use std::ffi::CStr;
-use std::ffi::CString;
 use std::sync::Mutex;
 
 use librime_sys2::rime_get_api;

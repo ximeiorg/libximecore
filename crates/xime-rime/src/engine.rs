@@ -10,6 +10,9 @@ pub struct RimeEngine {
     shared_data_dir: PathBuf,
     user_data_dir: PathBuf,
     distribution_name: String,
+    /// 用户当前选中的方案：redeploy/deploy 重建会话后必须重新选择，
+    /// 否则 librime 新会话回落到 schema_list 第一个（打字时"自动换方案"）。
+    selected_schema: Option<String>,
 }
 
 unsafe impl Send for RimeEngine {}
@@ -48,6 +51,7 @@ impl RimeEngine {
             shared_data_dir: shared_data_dir.to_path_buf(),
             user_data_dir: user_data_dir.to_path_buf(),
             distribution_name: distribution_name.to_string(),
+            selected_schema: None,
         })
     }
 
@@ -240,8 +244,26 @@ impl RimeEngine {
         }
     }
 
+    /// 方案是否已部署（build/ 里有部署产物）。只存在 `.schema.yaml` 而未部署的
+    /// 方案没有编译词典，select 进会话会得到一个「所有按键不组词」的死会话
+    /// （librime 加载 Schema 配置成功，但翻译器无词典可用）。
+    fn schema_deployed(&self, schema_id: &str) -> bool {
+        self.user_data_dir
+            .join("build")
+            .join(format!("{schema_id}.schema.yaml"))
+            .is_file()
+    }
+
     pub fn select_schema(&mut self, schema_id: &str) -> bool {
-        self.session.select_schema(schema_id).is_ok()
+        if !self.schema_deployed(schema_id) {
+            return false;
+        }
+        if self.session.select_schema(schema_id).is_ok() {
+            self.selected_schema = Some(schema_id.to_string());
+            true
+        } else {
+            false
+        }
     }
 
     pub fn get_current_schema(&self) -> Option<String> {
@@ -276,13 +298,11 @@ impl RimeEngine {
             join_maintenance_thread();
         }
 
-        match create_session() {
-            Ok(session) => {
-                self.session = session;
-                self.initialized = true;
-                result == DeployResult::Success
-            }
-            Err(_) => false,
+        if self.recreate_session() {
+            self.initialized = true;
+            result == DeployResult::Success
+        } else {
+            false
         }
     }
 
@@ -292,13 +312,58 @@ impl RimeEngine {
         }
         // Deployment finalizes and reinitializes the Rime engine,
         // which invalidates the existing session. Create a new one.
+        self.recreate_session()
+    }
+
+    /// 重建会话并恢复用户选中的方案（redeploy / deploy / with_user_dict_closed 共用）。
+    ///
+    /// 返回会话是否创建成功；方案恢复失败不算失败（只清掉记录走默认方案），
+    /// 语义与原先两处内联写法完全一致。
+    fn recreate_session(&mut self) -> bool {
         match create_session() {
             Ok(session) => {
                 self.session = session;
+                // 新会话默认回落 schema_list 第一个，必须恢复用户选中的方案。
+                // 选中的方案若已不在部署产物里（被移出方案列表后重新部署），
+                // 放弃恢复并清掉记录——重选一个未部署方案会固化死会话。
+                if let Some(id) = self.selected_schema.clone() {
+                    if self.schema_deployed(&id) {
+                        let _ = self.session.select_schema(&id);
+                    } else {
+                        self.selected_schema = None;
+                    }
+                }
                 true
             }
             Err(_) => false,
         }
+    }
+
+    /// 在「用户词典已关闭」的状态下执行一次操作。
+    ///
+    /// librime 的 `user_dict_manager.h` 有明确要求：Backup/Restore/Export/Import
+    /// 之前用户词典必须处于关闭状态。本引擎只有当前这一个会话持有它，
+    /// 所以「关闭」= 先销毁会话，操作完再重建（对齐安卓版 `withUserDictClosed`）。
+    ///
+    /// 代价：正在输入的句子（composition）会丢掉、`ascii_mode` 等会话级开关回落
+    /// 默认——调用方要在界面上说明「写入会打断正在进行的输入」。方案选择照常恢复。
+    /// 无论 op 成败都会重建会话；重建失败再退到完整的 [`Self::redeploy`] 自救，
+    /// 仍失败才报错（此时引擎不可用，重启输入法服务才能恢复）。
+    pub fn with_user_dict_closed<F, T>(&mut self, op: F) -> Result<T, String>
+    where
+        F: FnOnce() -> Result<T, String>,
+    {
+        // 先关掉当前会话（持有 user dict 的唯一入口）。失败也继续——
+        // 下一步反正要重建，重建成功与否才是真正的成败。
+        let _ = self.session.close();
+        let result = op();
+        if self.recreate_session() {
+            return result;
+        }
+        if self.redeploy() {
+            return result;
+        }
+        Err("重建 rime 会话失败，输入法服务需要重启".to_string())
     }
 
     pub fn get_version(&self) -> Option<String> {

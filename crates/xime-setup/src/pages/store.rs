@@ -1,5 +1,6 @@
 use crate::components::widgets::{
-    badge, button_danger, button_primary, card_style, semibold, switch, text_button, RADIUS_MD,
+    badge, button_danger, button_disabled, button_primary, card_style, semibold, switch,
+    text_button, RADIUS_MD,
 };
 use crate::state::{
     MarketModel, MarketModelState, MarketPlugin, MarketPluginState, MarketSchema,
@@ -410,13 +411,13 @@ fn schema_action<'a>(
 ) -> Element<'a, Message> {
     let colors = *colors;
     if installing {
-        disabled_button("安装中…", colors)
+        button_disabled("安装中…", &colors)
     } else if downloading {
         let label = match progress {
             Some(p) => format!("下载中 {:.0}%", p * 100.0),
             None => "下载中…".to_string(),
         };
-        disabled_button(label, colors)
+        button_disabled(label, &colors)
     } else if installed {
         text("已安装")
             .size(13)
@@ -632,7 +633,7 @@ fn model_action<'a>(
             Some(p) => format!("下载中 {:.0}%", p * 100.0),
             None => "下载中…".to_string(),
         };
-        disabled_button(label, colors)
+        button_disabled(label, &colors)
     } else if downloaded {
         row![
             text("已安装").size(13).color(colors.foreground_muted),
@@ -879,13 +880,13 @@ fn plugin_action<'a>(
 ) -> Element<'a, Message> {
     let colors = *colors;
     if installing {
-        disabled_button("安装中…", colors)
+        button_disabled("安装中…", &colors)
     } else if downloading {
         let label = match progress {
             Some(p) => format!("下载中 {:.0}%", p * 100.0),
             None => "下载中…".to_string(),
         };
-        disabled_button(label, colors)
+        button_disabled(label, &colors)
     } else if installed {
         button_danger("卸载", &colors, Message::UninstallPlugin(plugin_id)).into()
     } else if downloaded {
@@ -1046,15 +1047,6 @@ fn version_selector<'a>(
             },
             handle_color: colors.primary,
             placeholder_color: colors.foreground_muted,
-        })
-        .into()
-}
-
-fn disabled_button<'a>(label: impl Into<String>, colors: ThemeColors) -> Element<'a, Message> {
-    button(text(label.into()).size(14).color(colors.foreground_muted))
-        .padding([6, 14])
-        .style(move |_theme, _status| {
-            crate::components::widgets::secondary_button_style(&colors, button::Status::Disabled)
         })
         .into()
 }
