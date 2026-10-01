@@ -20,3 +20,6 @@ thiserror.workspace = true
 # 方案包清单：文件内容 sha256（冲突检测/共享判断）与十六进制编码
 sha2.workspace = true
 hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

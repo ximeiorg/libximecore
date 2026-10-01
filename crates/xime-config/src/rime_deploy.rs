@@ -194,3 +194,253 @@ mod tests {
         }
     }
 }
+
+// ------------------------------------------------------------------
+// 单目录模型：随包方案数据部署（对齐 XimeYao `ensure_rime_data`，见其
+// DECISIONS 2026-09-11——旧 shared/user 分离导致方案来源混乱）
+// ------------------------------------------------------------------
+
+/// 把随包方案数据源部署进 rime 用户目录（单目录模型；宿主在启动时、
+/// `set_rime_paths` 之前调用，随后 shared == user == rime_dir）。
+///
+/// - **首装**（rime 目录下无任何 `*.schema.yaml`）：把 `source_dirs` 依次
+///   全量复制进 rime 目录（递归，含 lua/ 子目录）；
+/// - **升级**：仅覆盖"内容有变化且文件名不含 custom"的文件（保护用户定制）；
+///   用户启用列表（default.custom.yaml 的 `- schema:` 行）非空时，未启用的
+///   builtin 方案文件（`<id>.schema.yaml` / `<id>.dict.yaml`）不强更——
+///   不覆盖用户已弃用的方案；
+/// - `source_dirs` 按序依次复制（后者同名覆盖前者；实际场景 dev 与系统
+///   rime-data 互斥存在，冲突仅理论）。
+pub fn ensure_bundled_rime_data(source_dirs: &[std::path::PathBuf], rime_dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(rime_dir);
+    let has_schema = std::fs::read_dir(rime_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().ends_with(".schema.yaml"))
+        })
+        .unwrap_or(false);
+
+    for source in source_dirs {
+        if !source.exists() {
+            continue;
+        }
+        if has_schema {
+            // 升级路径：用户已弃用的 builtin 方案文件不强更。
+            let enabled = read_enabled_schemas(rime_dir);
+            let skip_builtin = !enabled.is_empty();
+            copy_changed_files(source, rime_dir, skip_builtin.then_some(&enabled));
+        } else {
+            copy_dir_contents(source, rime_dir);
+        }
+    }
+}
+
+/// 读取用户启用的方案 id 列表（default.custom.yaml 里的 `- schema: xxx` 行）。
+pub fn read_enabled_schemas(rime_dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(rime_dir.join("default.custom.yaml"))
+        .map(|content| {
+            content
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    let rest = line.strip_prefix('-')?.trim();
+                    let rest = rest.strip_prefix("schema:")?.trim();
+                    let id = rest.trim_matches('"').trim_matches('\'');
+                    (!id.is_empty()).then(|| id.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 判断文件是否属于用户未启用的 builtin 方案（`<id>.schema.yaml` /
+/// `<id>.dict.yaml`，id 在 builtin 集合内但不在用户启用列表中）。
+fn is_unused_builtin_file(
+    name: &str,
+    builtin_ids: &std::collections::HashSet<String>,
+    enabled: &[String],
+) -> bool {
+    let stem = name
+        .strip_suffix(".schema.yaml")
+        .or_else(|| name.strip_suffix(".dict.yaml"));
+    let Some(id) = stem else {
+        return false;
+    };
+    builtin_ids.contains(id) && !enabled.iter().any(|e| e == id)
+}
+
+/// 升级复制：仅当目标缺失或内容不同，且文件名不含 "custom"（保护用户定制）。
+/// `skip` 传入用户启用列表时，未启用的 builtin 方案文件不再强更。
+fn copy_changed_files(src: &std::path::Path, dst: &std::path::Path, skip: Option<&[String]>) {
+    let builtin_ids: std::collections::HashSet<String> = match skip {
+        Some(_) => std::fs::read_dir(src)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().to_string();
+                        n.strip_suffix(".schema.yaml")
+                            .filter(|_| e.path().is_file())
+                            .map(String::from)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => Default::default(),
+    };
+    if let Ok(entries) = std::fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            let dest = dst.join(entry.file_name());
+            if ft.is_dir() {
+                let _ = std::fs::create_dir_all(&dest);
+                copy_changed_files(&entry.path(), &dest, skip);
+            } else {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.contains("custom") {
+                    continue;
+                }
+                if let Some(enabled) = skip {
+                    if is_unused_builtin_file(&name, &builtin_ids, enabled) {
+                        continue;
+                    }
+                }
+                let needs_copy = match std::fs::read(&dest) {
+                    Ok(existing) => existing != std::fs::read(entry.path()).unwrap_or_default(),
+                    Err(_) => true,
+                };
+                if needs_copy {
+                    let _ = std::fs::copy(entry.path(), &dest);
+                }
+            }
+        }
+    }
+}
+
+/// 首装全量复制（递归）。
+fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) {
+    if let Ok(entries) = std::fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            let dest = dst.join(entry.file_name());
+            if ft.is_dir() {
+                let _ = std::fs::create_dir_all(&dest);
+                copy_dir_contents(&entry.path(), &dest);
+            } else {
+                let _ = std::fs::copy(entry.path(), &dest);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bundled_deploy_tests {
+    use super::*;
+
+    /// 造一个 rime-wubi 风格的数据源目录（default.yaml + 方案 + lua/ 子目录）。
+    fn make_source(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("lua")).unwrap();
+        std::fs::write(dir.join("default.yaml"), "config:\n  version: \"1\"\n").unwrap();
+        std::fs::write(dir.join("wubi86.schema.yaml"), "name: 五笔\n").unwrap();
+        std::fs::write(dir.join("wubi86.dict.yaml"), "---\n...\n工\ta\n").unwrap();
+        std::fs::write(dir.join("lua").join("uuid.lua"), "return 1\n").unwrap();
+    }
+
+    #[test]
+    fn first_install_copies_everything_recursively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let rime = tmp.path().join("rime");
+        make_source(&src);
+
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+
+        for f in [
+            "default.yaml",
+            "wubi86.schema.yaml",
+            "wubi86.dict.yaml",
+            "lua/uuid.lua",
+        ] {
+            assert!(rime.join(f).exists(), "首装缺 {f}");
+        }
+        // 二次调用幂等（都存在 → 走升级路径 → 内容相同不复制）。
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+        assert!(rime.join("wubi86.schema.yaml").exists());
+    }
+
+    #[test]
+    fn upgrade_overwrites_changed_but_never_custom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let rime = tmp.path().join("rime");
+        make_source(&src);
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+
+        // 用户定制：改写 rime 目录里的 custom 文件 + 更新源的普通文件。
+        std::fs::write(rime.join("wubi86.custom.yaml"), "patch:\n  我的定制: 1\n").unwrap();
+        std::fs::write(src.join("wubi86.custom.yaml"), "patch:\n  源里的定制: 2\n").unwrap();
+        std::fs::write(src.join("wubi86.dict.yaml"), "---\n...\n工\ta\n新词\tbb\n").unwrap();
+
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+
+        assert_eq!(
+            std::fs::read_to_string(rime.join("wubi86.custom.yaml")).unwrap(),
+            "patch:\n  我的定制: 1\n",
+            "custom 文件绝不被覆盖"
+        );
+        assert!(
+            std::fs::read_to_string(rime.join("wubi86.dict.yaml"))
+                .unwrap()
+                .contains("新词"),
+            "内容变化的非 custom 文件应强更"
+        );
+    }
+
+    #[test]
+    fn upgrade_skips_unused_builtin_schemas() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let rime = tmp.path().join("rime");
+        make_source(&src);
+        std::fs::write(src.join("stroke.schema.yaml"), "name: 笔画\n").unwrap();
+        std::fs::write(src.join("stroke.dict.yaml"), "---\n...\n一\ta\n").unwrap();
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+
+        // 用户弃用 stroke（启用列表只有 wubi86）并删除了它的文件；
+        // 升级时不应把弃用方案强塞回来。
+        std::fs::write(
+            rime.join("default.custom.yaml"),
+            "patch:\n  schema_list:\n    - schema: wubi86\n",
+        )
+        .unwrap();
+        std::fs::remove_file(rime.join("stroke.schema.yaml")).unwrap();
+        std::fs::remove_file(rime.join("stroke.dict.yaml")).unwrap();
+
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+
+        assert!(!rime.join("stroke.schema.yaml").exists(), "弃用方案不强更");
+        // 仍启用的 wubi86 缺了文件则照常补回。
+        std::fs::remove_file(rime.join("wubi86.schema.yaml")).unwrap();
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+        assert!(rime.join("wubi86.schema.yaml").exists());
+    }
+
+    #[test]
+    fn later_source_overwrites_same_name_on_first_install() {
+        // source_dirs 按序依次复制（XimeYao 同款）：后一个 source 的同名文件
+        // 覆盖前一个。实际场景 dev 与系统 rime-data 互斥存在，冲突仅理论。
+        let tmp = tempfile::tempdir().unwrap();
+        let dev = tmp.path().join("dev");
+        let sys = tmp.path().join("sys");
+        let rime = tmp.path().join("rime");
+        make_source(&dev);
+        make_source(&sys);
+        std::fs::write(sys.join("wubi86.dict.yaml"), "---\n...\n系统版\ta\n").unwrap();
+
+        ensure_bundled_rime_data(&[dev, sys], &rime);
+        assert!(std::fs::read_to_string(rime.join("wubi86.dict.yaml"))
+            .unwrap()
+            .contains("系统版"));
+    }
+}

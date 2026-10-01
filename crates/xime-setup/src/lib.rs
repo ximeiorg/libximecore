@@ -33,7 +33,8 @@ pub use state::{
 };
 pub use theme::{SystemTheme, ThemeColors};
 pub use xime_config::{
-    default_rime_paths, set_app_metadata, set_rime_paths, AppMetadata, RimePaths,
+    default_rime_paths, ensure_bundled_rime_data, set_app_metadata, set_rime_paths, AppMetadata,
+    RimePaths,
 };
 
 use rust_embed::RustEmbed;

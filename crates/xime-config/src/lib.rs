@@ -16,8 +16,8 @@ use tracing_subscriber::prelude::*;
 
 pub use metadata::{app_metadata, set_app_metadata, AppMetadata};
 pub use rime_deploy::{
-    default_rime_paths, deploy_all, deploy_all_schemas, get_data_dirs, init_rime_deployer,
-    set_rime_paths, RimePaths, SchemaInfo,
+    default_rime_paths, deploy_all, deploy_all_schemas, ensure_bundled_rime_data, get_data_dirs,
+    init_rime_deployer, set_rime_paths, RimePaths, SchemaInfo,
 };
 pub use schema_config::{
     ReverseLookupConfig, SchemaConfig, SchemaConfigManager, SpellerConfig, TraditionConfig,
