@@ -181,7 +181,7 @@ pub fn notify_sync_user_data() -> bool {
 
 /// 用户词典列表结果（词典名 + 快照目录）。
 #[cfg(any(windows, feature = "dict-page"))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct DictListResult {
     pub dicts: Vec<String>,
     pub sync_dir: String,
@@ -189,7 +189,7 @@ pub struct DictListResult {
 
 /// 用户词典中的一条词条（词 / 编码 / 频率）。
 #[cfg(any(windows, feature = "dict-page"))]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DictEntryRow {
     pub word: String,
     pub code: String,
@@ -198,7 +198,7 @@ pub struct DictEntryRow {
 
 /// 词条读取结果（词库总数 + 命中数 + 本次返回的词条）。
 #[cfg(any(windows, feature = "dict-page"))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct DictEntriesResult {
     /// 词库词条总数（未受关键词过滤影响）。
     pub total: i32,
