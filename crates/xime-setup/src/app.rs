@@ -438,14 +438,10 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         }
         #[cfg(feature = "backup-page")]
         Message::RimeSyncNow => {
-            // IPC 同步等待（词典大时数秒）；完成后刷新快照目录概况。
-            if crate::state::notify_sync_user_data() {
-                state.settings.rime_sync.reload();
-                state.settings.show_message("用户资料同步完成".to_string());
-            } else {
-                state
-                    .settings
-                    .show_message("用户资料同步失败（输入法服务未运行？）".to_string());
+            // 同步在后台线程执行（DBus 往返 + librime 快照导出，词典大时
+            // 数秒——UI 线程同步等待会冻结整个窗口）；结果经 poll_sync 回收。
+            if state.settings.rime_sync.start_sync() {
+                state.settings.show_message("正在同步用户资料…".to_string());
             }
         }
         #[cfg(all(feature = "voice-page", windows))]
@@ -500,40 +496,63 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         }
         #[cfg(any(windows, feature = "dict-page"))]
         Message::DictRestore => {
-            // 原生文件对话框（模态；对齐 weasel 恢复流程）。
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("用户词典快照 (*.userdb.txt)", &["userdb.txt"])
-                .pick_file()
+            // Windows：原生模态对话框（冻结即模态，系统惯例）。
+            // Linux：xdg-portal 对话框是独立窗口，阻塞调用会冻结整个设置
+            // 窗口 → 后台线程选路径，结果经信箱在 BackgroundPoll 回收分发。
+            #[cfg(windows)]
             {
-                state
-                    .settings
-                    .dict_manage
-                    .start_restore(path.display().to_string());
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("用户词典快照 (*.userdb.txt)", &["userdb.txt"])
+                    .pick_file()
+                {
+                    state
+                        .settings
+                        .dict_manage
+                        .start_restore(path.display().to_string());
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                file_dialog::spawn(file_dialog::Kind::Restore);
             }
         }
         #[cfg(any(windows, feature = "dict-page"))]
         Message::DictExport(dict) => {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("文本文件 (*.txt)", &["txt"])
-                .set_file_name(format!("{dict}_export.txt"))
-                .save_file()
+            #[cfg(windows)]
             {
-                state
-                    .settings
-                    .dict_manage
-                    .start_export(dict, path.display().to_string());
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("文本文件 (*.txt)", &["txt"])
+                    .set_file_name(format!("{dict}_export.txt"))
+                    .save_file()
+                {
+                    state
+                        .settings
+                        .dict_manage
+                        .start_export(dict, path.display().to_string());
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                file_dialog::spawn(file_dialog::Kind::Export(dict));
             }
         }
         #[cfg(any(windows, feature = "dict-page"))]
         Message::DictImport(dict) => {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("文本文件 (*.txt)", &["txt"])
-                .pick_file()
+            #[cfg(windows)]
             {
-                state
-                    .settings
-                    .dict_manage
-                    .start_import(dict, path.display().to_string());
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("文本文件 (*.txt)", &["txt"])
+                    .pick_file()
+                {
+                    state
+                        .settings
+                        .dict_manage
+                        .start_import(dict, path.display().to_string());
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                file_dialog::spawn(file_dialog::Kind::Import(dict));
             }
         }
         #[cfg(any(windows, feature = "dict-page"))]
@@ -685,6 +704,8 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::BackgroundPoll => {
             let started = std::time::Instant::now();
             state.settings.poll_background();
+            #[cfg(all(not(windows), feature = "dict-page"))]
+            poll_file_dialog(state);
             let spent = started.elapsed();
             if spent > SLOW_TICK_WARN {
                 tracing::warn!(
@@ -777,5 +798,91 @@ fn container_style(colors: &ThemeColors) -> iced::widget::container::Style {
         background: Some(Background::Color(colors.background)),
         text_color: Some(colors.foreground),
         ..iced::widget::container::Style::default()
+    }
+}
+
+/// 文件对话框（Linux）：xdg-portal 对话框是独立窗口，阻塞 `pick_file`/
+/// `save_file` 会冻结 UI 线程 → 后台线程选路径，结果经信箱由
+/// BackgroundPoll（250ms 节拍）回收分发。对话框进行中防重入。
+/// Windows 走原生模态（上面的 `#[cfg(windows)]` 分支），不经此模块。
+#[cfg(all(not(windows), feature = "dict-page"))]
+mod file_dialog {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    /// 发起哪种对话框（决定后续分发到哪个词典操作）。
+    pub enum Kind {
+        /// 恢复：选 `.userdb.txt` 快照。
+        Restore,
+        /// 导出：选保存路径（携带词典名）。
+        Export(String),
+        /// 导入：选文本文件（携带词典名）。
+        Import(String),
+    }
+
+    /// 结果信箱：Some(path) = 用户选定；None = 取消。
+    static OUTCOME: Mutex<Option<(Kind, Option<String>)>> = Mutex::new(None);
+    /// 对话框进行中（防连点开出两个对话框）。
+    static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+    /// 后台线程弹对话框（rfd xdg-portal 走 DBus，不要求主线程；
+    /// 阻塞 API 自建 async-std runtime，见 Cargo 的 async-std feature）。
+    pub fn spawn(kind: Kind) {
+        if IN_FLIGHT.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(move || {
+            let picked = match &kind {
+                Kind::Restore => rfd::FileDialog::new()
+                    .add_filter("用户词典快照 (*.userdb.txt)", &["userdb.txt"])
+                    .pick_file()
+                    .map(|p| p.display().to_string()),
+                Kind::Export(dict) => rfd::FileDialog::new()
+                    .add_filter("文本文件 (*.txt)", &["txt"])
+                    .set_file_name(format!("{dict}_export.txt"))
+                    .save_file()
+                    .map(|p| p.display().to_string()),
+                Kind::Import(_) => rfd::FileDialog::new()
+                    .add_filter("文本文件 (*.txt)", &["txt"])
+                    .pick_file()
+                    .map(|p| p.display().to_string()),
+            };
+            *OUTCOME
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((kind, picked));
+        });
+    }
+
+    /// BackgroundPoll 节拍：取出结果（取消也取出，用于清 IN_FLIGHT）。
+    pub fn take() -> Option<(Kind, Option<String>)> {
+        let outcome = OUTCOME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if outcome.is_some() {
+            IN_FLIGHT.store(false, Ordering::SeqCst);
+        }
+        outcome
+    }
+}
+
+/// BackgroundPoll 节拍里分发文件对话框结果（Linux；取消 = 无动作）。
+#[cfg(all(not(windows), feature = "dict-page"))]
+fn poll_file_dialog(state: &mut SettingsApp) {
+    if let Some((kind, path)) = file_dialog::take() {
+        let settings = &mut state.settings;
+        match (kind, path) {
+            (file_dialog::Kind::Restore, Some(path)) => {
+                settings.dict_manage.start_restore(path);
+            }
+            (file_dialog::Kind::Export(dict), Some(path)) => {
+                settings.dict_manage.start_export(dict, path);
+            }
+            (file_dialog::Kind::Import(dict), Some(path)) => {
+                settings.dict_manage.start_import(dict, path);
+            }
+            // 用户取消：什么都不做（IN_FLIGHT 已清，可再次打开）。
+            (_, None) => {}
+        }
     }
 }

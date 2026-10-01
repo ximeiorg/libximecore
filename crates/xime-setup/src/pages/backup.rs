@@ -1,7 +1,7 @@
 #![cfg(feature = "backup-page")]
 use crate::components::settings::{settings_group, settings_item, settings_page};
 use crate::components::widgets::{
-    button_primary, button_secondary, label, text_button, text_input_style,
+    button_disabled, button_primary, button_secondary, label, text_button, text_input_style,
 };
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
@@ -297,9 +297,14 @@ fn rime_sync_group<'a>(
             ),
             settings_item(
                 "操作",
-                Some("建议输入法空闲时同步；词典大时可能需要数秒"),
+                Some("建议输入法空闲时同步；词典大时可能需要数秒（后台执行，不冻结界面）"),
                 colors,
-                text_button("立即同步", colors, Message::RimeSyncNow).into(),
+                // 同步进行中：置灰防重入（结果经 BackgroundPoll 回收提示）。
+                if s.syncing {
+                    button_disabled("同步中…", colors)
+                } else {
+                    text_button("立即同步", colors, Message::RimeSyncNow).into()
+                },
             ),
         ],
     )

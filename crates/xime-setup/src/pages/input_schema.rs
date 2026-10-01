@@ -1,10 +1,13 @@
+#[cfg(any(windows, feature = "dict-page"))]
+use crate::components::widgets::text_input_style;
 use crate::components::widgets::{
     badge, button_danger, button_disabled, button_primary, card_style, semibold, text_button,
-    text_input_style,
 };
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
-use iced::widget::{button, column, container, row, text, text_input, Space};
+#[cfg(any(windows, feature = "dict-page"))]
+use iced::widget::text_input;
+use iced::widget::{button, column, container, row, text, Space};
 use iced::{border, Alignment, Background, Border, Color, Element, Length};
 use xime_config::schema_manifest::{package_label, BUILTIN_PACKAGE_ID};
 use xime_config::SchemaInfo;

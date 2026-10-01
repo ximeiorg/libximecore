@@ -1381,6 +1381,13 @@ impl SettingsState {
         self.sync_plugin.poll();
         #[cfg(feature = "backup-page")]
         self.backup.poll();
+        #[cfg(feature = "backup-page")]
+        if let Some(result) = self.rime_sync.poll_sync() {
+            match result {
+                Ok(msg) => self.show_message(msg),
+                Err(e) => self.show_message(e),
+            }
+        }
         #[cfg(any(windows, feature = "dict-page"))]
         self.dict_manage.poll();
         #[cfg(any(windows, feature = "dict-page"))]
@@ -2702,7 +2709,13 @@ pub struct RimeSyncState {
     pub devices: Vec<String>,
     /// 上次同步（sync 目录修改时间的相对描述；从未同步为 None）。
     pub last_sync: Option<String>,
+    /// 同步进行中（后台线程持有；期间「立即同步」按钮置灰防重入）。
+    pub syncing: bool,
 }
+
+/// 同步结果信箱（后台线程 → UI 轮询；锁毒化视为空）。
+#[cfg(feature = "backup-page")]
+static RIME_SYNC_OUTCOME: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
 
 #[cfg(feature = "backup-page")]
 impl RimeSyncState {
@@ -2740,11 +2753,47 @@ impl RimeSyncState {
             sync_dir,
             devices,
             last_sync,
+            syncing: false,
         }
     }
 
     pub fn reload(&mut self) {
+        let syncing = self.syncing;
         *self = Self::load();
+        self.syncing = syncing;
+    }
+
+    /// 发起用户资料同步（后台线程执行；同步是 DBus 往返 + librime 快照导出，
+    /// 词典大时数秒——绝不能在 UI 线程同步等待，否则整个窗口冻结）。
+    pub fn start_sync(&mut self) -> bool {
+        if self.syncing {
+            return false;
+        }
+        self.syncing = true;
+        std::thread::spawn(|| {
+            let ok = notify_sync_user_data();
+            *RIME_SYNC_OUTCOME
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ok);
+        });
+        true
+    }
+
+    /// BackgroundPoll 节拍：回收同步结果。返回结果文案（有结果时），
+    /// 调用方经 `show_message` 呈现。
+    pub fn poll_sync(&mut self) -> Option<Result<String, String>> {
+        let outcome = RIME_SYNC_OUTCOME
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let ok = outcome?;
+        self.syncing = false;
+        if ok {
+            self.reload();
+            Some(Ok("用户资料同步完成".to_string()))
+        } else {
+            Some(Err("用户资料同步失败（输入法服务未运行？）".to_string()))
+        }
     }
 }
 
