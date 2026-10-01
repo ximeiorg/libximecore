@@ -1,31 +1,29 @@
 //! 插件配置值加密（对齐 Android `SecureValueCipher` 的设计与密文格式）：
 //! - 算法 AES-256-GCM；密文格式 `enc:` + base64(iv(12B) + 密文+tag(16B))
 //! - 解密：无 `enc:` 前缀 → 原样返回（旧版明文兼容）；GCM 认证失败 → None
-//! - 密钥：随机 32 字节，Windows 上经 DPAPI(CryptProtectData) 加密后存于
-//!   用户数据目录 `secret.key`（DPAPI 即 Windows 对应 Android Keystore 的
-//!   平台原语：按用户绑定、文件被拷到别的用户/机器无法解密）
-//! - 非 Windows：恒等实现（值原样存取，与旧版行为一致）
+//! - 密钥：随机 32 字节，平台原语保护——Windows 经 DPAPI(CryptProtectData)
+//!   加密后存 `secret.key`；Linux 存 Secret Service（org.freedesktop.se，
+//!   KDE Wallet / GNOME Keyring 均实现，跨进程共享），无 Secret Service 的
+//!   环境降级明文直通（与旧版行为一致，不阻塞配置读写）
+//! - 两端密文格式逐字节一致（与 Android 互换）
 //!
 //! 用法：[`encrypt_with_key_path`] 写入、[`decrypt_with_key_path`] 读取；
-//! `key_path` 由调用方从配置文件路径推导（配置文件在
-//! `<数据目录>/plugins/config/<id>.yaml` → 密钥在 `<数据目录>/secret.key`）。
+//! `key_path` 由调用方从配置文件路径推导（Windows 用；Linux 密钥在 keyring，
+//! 参数仅保留签名兼容）。
 
 use std::path::{Path, PathBuf};
 
 /// 密文前缀（与 Android `SecureValueCipher` 一致）。
-#[cfg(windows)]
 const ENC_PREFIX: &str = "enc:";
 
 /// GCM nonce 长度（字节）。
-#[cfg(windows)]
 const NONCE_LEN: usize = 12;
 
 /// AES-256 密钥长度（字节）。
-#[cfg(windows)]
 const KEY_LEN: usize = 32;
 
-/// 加密：`enc:` + base64(iv + ciphertext)。
-/// 非 Windows 为恒等实现（明文原样返回）。
+/// 加密：`enc:` + base64(iv + ciphertext)。密钥不可用时降级明文原样返回
+/// （不能让插件配置写入失败）。
 pub fn encrypt_with_key_path(key_path: &Path, plain: &str) -> String {
     #[cfg(windows)]
     {
@@ -34,13 +32,12 @@ pub fn encrypt_with_key_path(key_path: &Path, plain: &str) -> String {
     #[cfg(not(windows))]
     {
         let _ = key_path;
-        plain.to_string()
+        imp::encrypt(plain).unwrap_or_else(|_| plain.to_string())
     }
 }
 
 /// 解密：`enc:` 前缀 → base64 解码 + AES-GCM 认证解密（失败返回 None，
 /// 对齐 Android 认证失败视为无效）；无前缀 → 原样返回（旧版明文兼容）。
-/// 非 Windows 恒等实现。
 pub fn decrypt_with_key_path(key_path: &Path, stored: &str) -> Option<String> {
     #[cfg(windows)]
     {
@@ -49,7 +46,7 @@ pub fn decrypt_with_key_path(key_path: &Path, stored: &str) -> Option<String> {
     #[cfg(not(windows))]
     {
         let _ = key_path;
-        Some(stored.to_string())
+        imp::decrypt(stored)
     }
 }
 
@@ -235,6 +232,91 @@ mod imp {
     }
 }
 
+/// Linux：主密钥存 Secret Service（keyring，service=`xime` / user=`plugin-cipher`，
+/// KDE Wallet / GNOME Keyring 均实现，daemon 与设置进程跨进程共享）。
+/// AES-GCM 与密文格式同 Windows 一套常量。key_path 参数忽略（签名兼容）。
+#[cfg(not(windows))]
+mod imp {
+    use super::*;
+    use aes_gcm::aead::{Aead, KeyInit, Payload};
+    use aes_gcm::{Aes256Gcm, Nonce};
+
+    const KEYRING_SERVICE: &str = "xime";
+    const KEYRING_USER: &str = "plugin-cipher";
+
+    /// 从 Secret Service 加载（或首次生成并写入）AES-256 主密钥。
+    /// keyring 不可用（无 org.freedesktop.se 等）返回 None → 调用方降级明文。
+    fn load_or_create_key() -> Option<[u8; KEY_LEN]> {
+        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).ok()?;
+        match entry.get_password() {
+            Ok(stored) => {
+                let blob = base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    stored.trim(),
+                )
+                .ok()?;
+                if blob.len() != KEY_LEN {
+                    return None;
+                }
+                let mut key = [0u8; KEY_LEN];
+                key.copy_from_slice(&blob);
+                Some(key)
+            }
+            Err(keyring::Error::NoEntry) => {
+                let mut key = [0u8; KEY_LEN];
+                getrandom::fill(&mut key).ok()?;
+                let encoded =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key);
+                entry.set_password(&encoded).ok()?;
+                Some(key)
+            }
+            Err(_) => None,
+        }
+    }
+
+    pub fn encrypt(plain: &str) -> Result<String, &'static str> {
+        let key = load_or_create_key().ok_or("密钥不可用")?;
+        let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| "密钥长度错误")?;
+        let mut iv = [0u8; NONCE_LEN];
+        getrandom::fill(&mut iv).map_err(|_| "随机数不可用")?;
+        let ct = cipher
+            .encrypt(
+                Nonce::from_slice(&iv),
+                Payload {
+                    msg: plain.as_bytes(),
+                    aad: &[],
+                },
+            )
+            .map_err(|_| "加密失败")?;
+        let mut out = iv.to_vec();
+        out.extend_from_slice(&ct);
+        Ok(format!(
+            "{}{}",
+            ENC_PREFIX,
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, out)
+        ))
+    }
+
+    pub fn decrypt(stored: &str) -> Option<String> {
+        let Some(encoded) = stored.strip_prefix(ENC_PREFIX) else {
+            // 无前缀：旧版明文兼容
+            return Some(stored.to_string());
+        };
+        let blob =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+        if blob.len() <= NONCE_LEN {
+            return None;
+        }
+        let (iv, ct) = blob.split_at(NONCE_LEN);
+        let key = load_or_create_key()?;
+        let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+        let plain = cipher
+            .decrypt(Nonce::from_slice(iv), Payload { msg: ct, aad: &[] })
+            .ok()?;
+        String::from_utf8(plain).ok()
+    }
+}
+
 /// 由插件配置文件路径推导密钥文件路径：
 /// `<数据目录>/plugins/config/<id>.yaml` → `<数据目录>/secret.key`。
 pub fn key_path_for_config(config_file: &Path) -> PathBuf {
@@ -261,18 +343,22 @@ mod tests {
     fn roundtrip_and_plaintext_passthrough() {
         let key = temp_key("roundtrip");
         let stored = encrypt_with_key_path(&key, "应用密码 secret-123");
-        #[cfg(windows)]
-        {
-            assert!(stored.starts_with(ENC_PREFIX), "Windows 上应为 enc: 密文");
+        if stored.starts_with(ENC_PREFIX) {
+            // 密钥平台原语可用（Windows DPAPI / Linux Secret Service）：
+            // 应为 enc: 密文且可解回。
             assert_ne!(stored, "应用密码 secret-123", "密文不等于明文");
+            assert_eq!(
+                decrypt_with_key_path(&key, &stored),
+                Some("应用密码 secret-123".to_string())
+            );
+        } else {
+            // 无 Secret Service 的环境：明文降级（与旧版行为一致）。
+            assert_eq!(stored, "应用密码 secret-123");
+            assert_eq!(
+                decrypt_with_key_path(&key, &stored),
+                Some("应用密码 secret-123".to_string())
+            );
         }
-        // 非 Windows 当前为明文直通（Linux 密钥保护待接 keyring，见 P9）。
-        #[cfg(not(windows))]
-        assert_eq!(stored, "应用密码 secret-123");
-        assert_eq!(
-            decrypt_with_key_path(&key, &stored),
-            Some("应用密码 secret-123".to_string())
-        );
         // 无前缀 → 旧版明文兼容
         assert_eq!(
             decrypt_with_key_path(&key, "plain-value"),

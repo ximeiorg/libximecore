@@ -29,5 +29,9 @@ base64.workspace = true
 aes-gcm.workspace = true
 getrandom.workspace = true
 
+# Linux 插件配置密钥存 Secret Service（KDE Wallet / GNOME Keyring）
+[target.'cfg(not(windows))'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
+
 [features]
 default = []

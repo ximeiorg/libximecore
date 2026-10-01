@@ -232,7 +232,7 @@ pub struct DictWriteResult {
 
 /// 方案词表读取结果（只读浏览）。
 #[cfg(any(windows, feature = "dict-page"))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct SchemaEntriesResult {
     /// 方案主码表名（`dictionary:` 的值）。
     pub dict_name: String,
@@ -250,7 +250,7 @@ pub struct SchemaEntriesResult {
 
 /// 快捷短语的一条（词 / 编码 / 可选权重）。
 #[cfg(any(windows, feature = "dict-page"))]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct CustomPhraseRow {
     /// 短语文本。
     pub word: String,
@@ -262,7 +262,7 @@ pub struct CustomPhraseRow {
 
 /// 快捷短语表读取结果。
 #[cfg(any(windows, feature = "dict-page"))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct PhraseListResult {
     /// 短语表名（`custom_phrase.user_dict`，通常就是 `custom_phrase`）。
     pub dict_name: String,
@@ -278,7 +278,7 @@ pub struct PhraseListResult {
 
 /// 快捷短语整表保存结果。
 #[cfg(any(windows, feature = "dict-page"))]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct PhraseSaveResult {
     pub dict_name: String,
     pub file_name: String,
