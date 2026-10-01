@@ -54,6 +54,11 @@ windows-future = "0.3"
 arboard.workspace = true
 rfd.workspace = true
 
+# 词典管理（dict-page）：原生文件对话框。Linux 走 xdg-desktop-portal
+# （KDE/GNOME 标配），不引 GTK 构建依赖。
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+
 [features]
 default = []
 smart-suggestion-page = []
@@ -61,3 +66,4 @@ pair-page = []
 clipboard-page = []
 backup-page = []
 voice-page = []
+dict-page = []

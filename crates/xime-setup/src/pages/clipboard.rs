@@ -1,11 +1,11 @@
 #![cfg(feature = "clipboard-page")]
 use crate::components::settings::{settings_group, settings_item, settings_page};
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+use crate::components::widgets::{badge, button_primary, button_secondary};
 use crate::components::widgets::{
     label, medium, modal_dialog, semibold, switch, text_button, text_input_style,
 };
-#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
-use crate::components::widgets::{badge, button_primary, button_secondary};
-use crate::state::{CLIPBOARD_PAGE_SIZE, ClipboardState, Message, SettingsState};
+use crate::state::{ClipboardState, Message, SettingsState, CLIPBOARD_PAGE_SIZE};
 use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, pick_list, row, text, text_input};
 use iced::{border, Background, Border, Color, Element, Length};
@@ -276,40 +276,36 @@ fn card_button<'a>(
     on_press: Message,
 ) -> iced::widget::Button<'a, Message> {
     let colors_copy = *colors;
-    button(
-        container(content)
-            .width(Length::Fill)
-            .padding([10, 12]),
-    )
-    .width(Length::Fill)
-    .padding(0)
-    .style(move |_t, status| {
-        let hovered = matches!(status, button::Status::Hovered);
-        button::Style {
-            background: Some(Background::Color(Color {
-                a: if is_selected {
-                    0.10
-                } else if hovered {
-                    0.08
-                } else {
-                    0.06
+    button(container(content).width(Length::Fill).padding([10, 12]))
+        .width(Length::Fill)
+        .padding(0)
+        .style(move |_t, status| {
+            let hovered = matches!(status, button::Status::Hovered);
+            button::Style {
+                background: Some(Background::Color(Color {
+                    a: if is_selected {
+                        0.10
+                    } else if hovered {
+                        0.08
+                    } else {
+                        0.06
+                    },
+                    ..colors_copy.foreground
+                })),
+                text_color: colors_copy.foreground,
+                border: Border {
+                    color: if is_selected {
+                        colors_copy.primary
+                    } else {
+                        Color::TRANSPARENT
+                    },
+                    width: if is_selected { 1.5 } else { 0.0 },
+                    radius: border::radius(8.0),
                 },
-                ..colors_copy.foreground
-            })),
-            text_color: colors_copy.foreground,
-            border: Border {
-                color: if is_selected {
-                    colors_copy.primary
-                } else {
-                    Color::TRANSPARENT
-                },
-                width: if is_selected { 1.5 } else { 0.0 },
-                radius: border::radius(8.0),
-            },
-            ..button::Style::default()
-        }
-    })
-    .on_press(on_press)
+                ..button::Style::default()
+            }
+        })
+        .on_press(on_press)
 }
 
 /// 分页条：上一页 / 第 x / y 页 / 下一页（首页、末页对应按钮置灰禁用）。
@@ -324,35 +320,30 @@ fn page_bar<'a>(
     let muted = c.foreground_muted;
     let nav = |label: String, enabled: bool, msg: Message| -> iced::widget::Button<'a, Message> {
         let accent = if enabled { c.primary } else { muted };
-        button(
-            text(label)
-                .size(13)
-                .font(medium())
-                .color(accent),
-        )
-        .padding([6, 12])
-        .on_press_maybe(enabled.then_some(msg))
-        .style(move |_t, status| {
-            let hovered =
-                enabled && matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: if hovered {
-                    Some(Background::Color(Color {
-                        a: 0.08,
-                        ..c.foreground
-                    }))
-                } else {
-                    None
-                },
-                text_color: accent,
-                border: Border {
-                    color: Color::TRANSPARENT,
-                    width: 0.0,
-                    radius: border::radius(8.0),
-                },
-                ..button::Style::default()
-            }
-        })
+        button(text(label).size(13).font(medium()).color(accent))
+            .padding([6, 12])
+            .on_press_maybe(enabled.then_some(msg))
+            .style(move |_t, status| {
+                let hovered =
+                    enabled && matches!(status, button::Status::Hovered | button::Status::Pressed);
+                button::Style {
+                    background: if hovered {
+                        Some(Background::Color(Color {
+                            a: 0.08,
+                            ..c.foreground
+                        }))
+                    } else {
+                        None
+                    },
+                    text_color: accent,
+                    border: Border {
+                        color: Color::TRANSPARENT,
+                        width: 0.0,
+                        radius: border::radius(8.0),
+                    },
+                    ..button::Style::default()
+                }
+            })
     };
     row![
         nav("上一页".to_string(), page > 0, prev_msg),
@@ -373,11 +364,11 @@ fn quick_send_dialog<'a>(
 ) -> Element<'a, Message> {
     let q = &settings.quick_send;
     let content_input = text_input("要快速发送的内容", &q.draft_content)
-        .on_input(|v| Message::QuickSendContentChanged(v))
+        .on_input(Message::QuickSendContentChanged)
         .style(move |_t, s| text_input_style(colors, s))
         .width(Length::Fill);
     let code_input = text_input("如 dh", &q.draft_code)
-        .on_input(|v| Message::QuickSendCodeChanged(v))
+        .on_input(Message::QuickSendCodeChanged)
         .style(move |_t, s| text_input_style(colors, s))
         .width(Length::Fill);
     column![
@@ -512,11 +503,18 @@ fn history_groups<'a>(
     // 当前页切片（最新在前）
     let start = h.page.min(h.total_pages() - 1) * CLIPBOARD_PAGE_SIZE;
     let end = (start + CLIPBOARD_PAGE_SIZE).min(h.items.len());
-    let mut grid = iced::widget::Grid::new().columns(2).spacing(8).height(Length::Shrink);
+    let mut grid = iced::widget::Grid::new()
+        .columns(2)
+        .spacing(8)
+        .height(Length::Shrink);
     for entry in h.items[start..end].iter() {
         let mut display = entry.text.split_whitespace().collect::<Vec<_>>().join(" ");
         if display.chars().count() > HISTORY_TEXT_DISPLAY_MAX {
-            display = display.chars().take(HISTORY_TEXT_DISPLAY_MAX).collect::<String>() + "…";
+            display = display
+                .chars()
+                .take(HISTORY_TEXT_DISPLAY_MAX)
+                .collect::<String>()
+                + "…";
         }
         let is_selected = h.selected == Some(entry.id);
         // 卡片内容：文本 +（选中时）操作按钮
@@ -524,7 +522,11 @@ fn history_groups<'a>(
         if is_selected {
             card = card.push(
                 row![
-                    text_button("添加到快捷发送", colors, Message::QuickSendFromHistory(entry.id)),
+                    text_button(
+                        "添加到快捷发送",
+                        colors,
+                        Message::QuickSendFromHistory(entry.id)
+                    ),
                     text_button("删除", colors, Message::ClipboardHistoryRemove(entry.id)),
                 ]
                 .spacing(8),
@@ -569,7 +571,10 @@ fn quick_send_groups<'a>(
     // 当前页切片
     let start = q.page.min(q.total_pages() - 1) * CLIPBOARD_PAGE_SIZE;
     let end = (start + CLIPBOARD_PAGE_SIZE).min(q.items.len());
-    let mut grid = iced::widget::Grid::new().columns(2).spacing(8).height(Length::Shrink);
+    let mut grid = iced::widget::Grid::new()
+        .columns(2)
+        .spacing(8)
+        .height(Length::Shrink);
     for entry in q.items[start..end].iter() {
         let mut summary = entry.text.split_whitespace().collect::<Vec<_>>().join(" ");
         if summary.chars().count() > 60 {
@@ -591,7 +596,12 @@ fn quick_send_groups<'a>(
         .spacing(6);
         if is_selected {
             card = card.push(
-                row![text_button("删除", colors, Message::QuickSendRemove(entry.id))].spacing(8),
+                row![text_button(
+                    "删除",
+                    colors,
+                    Message::QuickSendRemove(entry.id)
+                )]
+                .spacing(8),
             );
         }
         grid = grid.push(card_button(
@@ -614,7 +624,9 @@ fn quick_send_groups<'a>(
     if q.items.is_empty() {
         items.push(settings_item(
             "暂无快捷发送内容",
-            Some("点击右上角「添加」录入常用短语；设置触发编码后，输入编码前缀即可让条目进入候选栏"),
+            Some(
+                "点击右上角「添加」录入常用短语；设置触发编码后，输入编码前缀即可让条目进入候选栏",
+            ),
             colors,
             label("", colors),
         ));

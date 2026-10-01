@@ -242,10 +242,8 @@ mod tests {
     use super::*;
 
     fn temp_db(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "xime_clip_store_{label}_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("xime_clip_store_{label}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap_or_default();
         dir.join("clipboard.db")

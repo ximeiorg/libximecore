@@ -16,6 +16,24 @@ members = [
     "crates/xime-sync-server",
 ]
 
+# xime-speech 的 sherpa-onnx-sys 需要预编译原生库（SHERPA_ONNX_LIB_DIR /
+# SHERPA_ONNX_ARCHIVE_DIR），未准备的机器上会构建失败。默认成员排除它：
+# 需要时显式 `cargo build -p xime-speech`；宿主 workspace（winxime-server 等）
+# 经 path 依赖引用时不受影响。
+default-members = [
+    "crates/librime-sys2",
+    "crates/librime",
+    "crates/xime-config",
+    "crates/xime-rime",
+    "crates/xime-ipc",
+    "crates/xime-plugin",
+    "crates/xime-setup",
+    "crates/xime-sync-domain",
+    "crates/xime-sync-store",
+    "crates/xime-sync-service",
+    "crates/xime-sync-server",
+]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

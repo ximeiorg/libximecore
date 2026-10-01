@@ -303,7 +303,6 @@ fn rime_sync_group<'a>(
             ),
         ],
     )
-    .into()
 }
 
 /// 字节 → 人类可读大小（KB / MB，与 Android 展示一致）。

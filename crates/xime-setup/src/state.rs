@@ -180,7 +180,7 @@ pub fn notify_sync_user_data() -> bool {
 // ---- 词典管理回调（host 注册，Windows；对齐 weasel DictManagementDialog）----
 
 /// 用户词典列表结果（词典名 + 快照目录）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct DictListResult {
     pub dicts: Vec<String>,
@@ -188,7 +188,7 @@ pub struct DictListResult {
 }
 
 /// 用户词典中的一条词条（词 / 编码 / 频率）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DictEntryRow {
     pub word: String,
@@ -197,7 +197,7 @@ pub struct DictEntryRow {
 }
 
 /// 词条读取结果（词库总数 + 命中数 + 本次返回的词条）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct DictEntriesResult {
     /// 词库词条总数（未受关键词过滤影响）。
@@ -212,14 +212,14 @@ pub struct DictEntriesResult {
 ///
 /// 必须与 IPC 侧的 `winxime_ipc::MAX_DICT_ENTRIES` 保持一致：那边受命名管道
 /// 单帧上限约束会截断，这里用来提示"命中过多，请补充关键词"。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub const DICT_ENTRIES_MAX: usize = 500;
 
 /// 写入一条用户词条的结果（新增 / 删除标记都算写）。
 ///
 /// 带词典名：在途期间切换词典下拉时，结果按词典名丢弃（但 `writing`
 /// 标志仍要清掉——见 poll 的处理）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct DictWriteResult {
     /// 写入的目标词典。
@@ -231,7 +231,7 @@ pub struct DictWriteResult {
 }
 
 /// 方案词表读取结果（只读浏览）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct SchemaEntriesResult {
     /// 方案主码表名（`dictionary:` 的值）。
@@ -249,7 +249,7 @@ pub struct SchemaEntriesResult {
 }
 
 /// 快捷短语的一条（词 / 编码 / 可选权重）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CustomPhraseRow {
     /// 短语文本。
@@ -261,7 +261,7 @@ pub struct CustomPhraseRow {
 }
 
 /// 快捷短语表读取结果。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct PhraseListResult {
     /// 短语表名（`custom_phrase.user_dict`，通常就是 `custom_phrase`）。
@@ -277,7 +277,7 @@ pub struct PhraseListResult {
 }
 
 /// 快捷短语整表保存结果。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct PhraseSaveResult {
     pub dict_name: String,
@@ -290,144 +290,146 @@ pub struct PhraseSaveResult {
     pub entries: Vec<CustomPhraseRow>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_LIST: OnceLock<fn() -> Option<DictListResult>> = OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_BACKUP: OnceLock<fn(&str) -> bool> = OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_RESTORE: OnceLock<fn(&str) -> bool> = OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_EXPORT: OnceLock<fn(&str, &str) -> Option<i32>> = OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_IMPORT: OnceLock<fn(&str, &str) -> Option<i32>> = OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_ENTRIES: OnceLock<fn(&str, &str) -> Option<DictEntriesResult>> = OnceLock::new();
 
 /// 设置宿主进程的「列出用户词典」回调（IPC ListUserDicts）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_dict_list(f: fn() -> Option<DictListResult>) {
     let _ = NOTIFY_DICT_LIST.set(f);
 }
 
 /// 设置宿主进程的「备份用户词典」回调（IPC BackupUserDict）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_dict_backup(f: fn(&str) -> bool) {
     let _ = NOTIFY_DICT_BACKUP.set(f);
 }
 
 /// 设置宿主进程的「恢复用户词典」回调（IPC RestoreUserDict）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_dict_restore(f: fn(&str) -> bool) {
     let _ = NOTIFY_DICT_RESTORE.set(f);
 }
 
 /// 设置宿主进程的「导出用户词典」回调（IPC ExportUserDict，返回条数）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_dict_export(f: fn(&str, &str) -> Option<i32>) {
     let _ = NOTIFY_DICT_EXPORT.set(f);
 }
 
 /// 设置宿主进程的「导入用户词典」回调（IPC ImportUserDict，返回条数）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_dict_import(f: fn(&str, &str) -> Option<i32>) {
     let _ = NOTIFY_DICT_IMPORT.set(f);
 }
 
 /// 设置宿主进程的「读取用户词典词条」回调（IPC ListDictEntries，参数为词典名 + 关键词）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_dict_entries(f: fn(&str, &str) -> Option<DictEntriesResult>) {
     let _ = NOTIFY_DICT_ENTRIES.set(f);
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
+#[allow(clippy::type_complexity)]
 static NOTIFY_DICT_ENTRY_WRITE: OnceLock<fn(&str, &str, &str, i32) -> Option<i32>> =
     OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
+#[allow(clippy::type_complexity)]
 static NOTIFY_SCHEMA_ENTRIES: OnceLock<fn(&str, &str) -> Option<SchemaEntriesResult>> =
     OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_PHRASE_LIST: OnceLock<fn(&str) -> Option<PhraseListResult>> = OnceLock::new();
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
+#[allow(clippy::type_complexity)]
 static NOTIFY_PHRASE_SAVE: OnceLock<fn(&str, &[CustomPhraseRow]) -> Option<PhraseSaveResult>> =
     OnceLock::new();
 
 /// 设置宿主进程的「写入一条用户词条」回调（IPC ImportDictEntry，
 /// 参数为词典名 / 词 / 编码 / 频率，频率 < 0 即删除标记，返回导入条数）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_dict_entry_write(f: fn(&str, &str, &str, i32) -> Option<i32>) {
     let _ = NOTIFY_DICT_ENTRY_WRITE.set(f);
 }
 
 /// 设置宿主进程的「读取方案词表词条」回调（IPC ListSchemaEntries，参数为方案 id + 关键词）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_schema_entries(f: fn(&str, &str) -> Option<SchemaEntriesResult>) {
     let _ = NOTIFY_SCHEMA_ENTRIES.set(f);
 }
 
 /// 设置宿主进程的「读取快捷短语表」回调（IPC ListCustomPhrases，参数为方案 id）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_phrase_list(f: fn(&str) -> Option<PhraseListResult>) {
     let _ = NOTIFY_PHRASE_LIST.set(f);
 }
 
 /// 设置宿主进程的「整表保存快捷短语」回调（IPC SaveCustomPhrases，
 /// 参数为方案 id + 整张短语表，覆盖式写入）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn set_notify_phrase_save(f: fn(&str, &[CustomPhraseRow]) -> Option<PhraseSaveResult>) {
     let _ = NOTIFY_PHRASE_SAVE.set(f);
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_dict_list() -> Option<DictListResult> {
     NOTIFY_DICT_LIST.get().and_then(|f| f())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_dict_backup(dict: &str) -> bool {
     NOTIFY_DICT_BACKUP.get().map(|f| f(dict)).unwrap_or(false)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_dict_restore(path: &str) -> bool {
-    NOTIFY_DICT_RESTORE
-        .get()
-        .map(|f| f(path))
-        .unwrap_or(false)
+    NOTIFY_DICT_RESTORE.get().map(|f| f(path)).unwrap_or(false)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_dict_export(dict: &str, path: &str) -> Option<i32> {
     NOTIFY_DICT_EXPORT.get().and_then(|f| f(dict, path))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_dict_import(dict: &str, path: &str) -> Option<i32> {
     NOTIFY_DICT_IMPORT.get().and_then(|f| f(dict, path))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_dict_entries(dict: &str, query: &str) -> Option<DictEntriesResult> {
     NOTIFY_DICT_ENTRIES.get().and_then(|f| f(dict, query))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_dict_entry_write(dict: &str, word: &str, code: &str, commits: i32) -> Option<i32> {
     NOTIFY_DICT_ENTRY_WRITE
         .get()
         .and_then(|f| f(dict, word, code, commits))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_schema_entries(schema_id: &str, query: &str) -> Option<SchemaEntriesResult> {
-    NOTIFY_SCHEMA_ENTRIES.get().and_then(|f| f(schema_id, query))
+    NOTIFY_SCHEMA_ENTRIES
+        .get()
+        .and_then(|f| f(schema_id, query))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_phrase_list(schema_id: &str) -> Option<PhraseListResult> {
     NOTIFY_PHRASE_LIST.get().and_then(|f| f(schema_id))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn notify_phrase_save(schema_id: &str, entries: &[CustomPhraseRow]) -> Option<PhraseSaveResult> {
     NOTIFY_PHRASE_SAVE.get().and_then(|f| f(schema_id, entries))
 }
@@ -683,100 +685,100 @@ pub enum Message {
     #[cfg(all(feature = "voice-page", windows))]
     SpeechModelCopy,
     /// 词典管理：刷新（重读词典列表，选中词典不变）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictRefresh,
     /// 词典管理：备份词典快照（词典名）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictBackup(String),
     /// 词典管理：从快照文件恢复（弹文件对话框）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictRestore,
     /// 词典管理：导出词典为文本（词典名，弹保存对话框）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictExport(String),
     /// 词典管理：从文本导入词典（词典名，弹文件对话框）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictImport(String),
     /// 词典管理：切换页内 Tab（0=用户词典 1=快捷短语）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictTab(usize),
     /// 词典管理：下拉切换当前浏览的词典（立即重读该词典词条）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictSelect(String),
     /// 词典管理：词条搜索关键词变化。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictQueryChanged(String),
     /// 词典管理：词条列表翻页。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntriesPage(usize),
     /// 词典管理：打开新增词条对话框。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryAddOpen,
     /// 词典管理：关闭新增词条对话框（放弃草稿）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryAddCancel,
     /// 词典管理：新增词条对话框——词。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryAddWordChanged(String),
     /// 词典管理：新增词条对话框——编码。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryAddCodeChanged(String),
     /// 词典管理：新增词条对话框——频率（空串 = 1）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryAddCommitsChanged(String),
     /// 词典管理：提交新增词条。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryAddSubmit,
     /// 词典管理：请求删除词条（进入两步确认，词 + 编码）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryDeleteRequest(String, String),
     /// 词典管理：取消删除。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryDeleteCancel,
     /// 词典管理：确认删除词条（写删除标记）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictEntryDeleteConfirm(String, String),
     /// 快捷短语：切换方案（下拉选择，方案 id）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseSchemaChanged(String),
     /// 快捷短语：打开新增/编辑对话框。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseAddOpen,
     /// 快捷短语：编辑第 i 条（打开对话框并预填）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseEdit(usize),
     /// 快捷短语：关闭对话框（放弃草稿）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDialogCancel,
     /// 快捷短语：对话框——词。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDialogWordChanged(String),
     /// 快捷短语：对话框——编码。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDialogCodeChanged(String),
     /// 快捷短语：对话框——权重（空串 = 省略该列）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDialogWeightChanged(String),
     /// 快捷短语：提交对话框（新增或保存编辑）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDialogSubmit,
     /// 快捷短语：请求删除第 i 条（两步确认）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDeleteRequest(usize),
     /// 快捷短语：取消删除。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDeleteCancel,
     /// 快捷短语：确认删除第 i 条（整表保存）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     DictPhraseDeleteConfirm(usize),
     /// 方案词表：搜索关键词变化。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     SchemaDictQueryChanged(String),
     /// 方案词表：重新读取当前方案。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     SchemaDictRefresh,
     /// 方案词表：词条列表翻页。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     SchemaDictPage(usize),
     #[cfg(feature = "pair-page")]
     StartPairing,
@@ -825,7 +827,7 @@ pub struct SettingsState {
     #[cfg(all(feature = "voice-page", windows))]
     pub speech_server: crate::speech_models::SpeechModelState,
     /// 词典管理（用户词典列表 + 备份/恢复/导出/导入）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     pub dict_manage: DictManageState,
     /// 全局页内消息条（show_message 写入，5 秒自动过期）。
     pub ui_message: Option<(String, std::time::Instant)>,
@@ -873,7 +875,7 @@ impl SettingsState {
             speech: SpeechState::default(),
             #[cfg(all(feature = "voice-page", windows))]
             speech_server: crate::speech_models::SpeechModelState::default(),
-            #[cfg(windows)]
+            #[cfg(any(windows, feature = "dict-page"))]
             dict_manage: DictManageState::default(),
             ui_message: None,
             #[cfg(target_os = "linux")]
@@ -1379,9 +1381,9 @@ impl SettingsState {
         self.sync_plugin.poll();
         #[cfg(feature = "backup-page")]
         self.backup.poll();
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         self.dict_manage.poll();
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         self.poll_schema_dict();
         #[cfg(all(feature = "voice-page", windows))]
         self.speech.poll();
@@ -1393,6 +1395,7 @@ impl SettingsState {
     // ---- 方案词表（输入方案页「方案词表」tab，只读浏览） ----
 
     /// 当前选中的方案（id + 显示名，取输入方案页选中行）。
+    #[cfg(any(windows, feature = "dict-page"))]
     pub fn selected_schema_info(&self) -> Option<(String, String)> {
         let index = self.input_schema.selected_schema;
         let info = self.input_schema.available_schemas.get(index)?;
@@ -1400,6 +1403,7 @@ impl SettingsState {
     }
 
     /// 进入「方案词表」tab 或切换选中方案时调用：确保为当前方案读过一次。
+    #[cfg(any(windows, feature = "dict-page"))]
     ///
     /// 同一方案且已读过/在途 → 不重读；换方案 → 清状态重读（在途的旧结果会
     /// 被 `poll_schema_dict` 按 schema_id 丢弃）。
@@ -1421,6 +1425,7 @@ impl SettingsState {
     }
 
     /// 方案词表搜索关键词变化：重置页码，防抖后重读。
+    #[cfg(any(windows, feature = "dict-page"))]
     pub fn schema_dict_set_query(&mut self, query: String) {
         let dict = &mut self.input_schema.dict;
         if dict.query == query {
@@ -1432,22 +1437,21 @@ impl SettingsState {
     }
 
     /// 重新读取当前方案的词表。
+    #[cfg(any(windows, feature = "dict-page"))]
     pub fn schema_dict_refresh(&mut self) {
         self.start_schema_fetch();
     }
 
     /// 方案词表翻页（夹取到范围内）。
+    #[cfg(any(windows, feature = "dict-page"))]
     pub fn schema_dict_page(&mut self, page: usize) {
         let dict = &mut self.input_schema.dict;
         let pages = dict.page_count();
-        dict.page = if pages == 0 {
-            0
-        } else {
-            page.min(pages - 1)
-        };
+        dict.page = if pages == 0 { 0 } else { page.min(pages - 1) };
     }
 
     /// 发起一次方案词表读取（单飞 + 防抖，与用户词典词条读取同款）。
+    #[cfg(any(windows, feature = "dict-page"))]
     fn start_schema_fetch(&mut self) {
         let dict = &mut self.input_schema.dict;
         if dict.schema_id.is_empty() {
@@ -1470,11 +1474,14 @@ impl SettingsState {
                     reason: "读取方案词表失败（输入法服务未运行？）".to_string(),
                 },
             };
-            *SCHEMA_DICT_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
+            *SCHEMA_DICT_OUTCOME
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(outcome);
         });
     }
 
     /// BackgroundPoll 节拍：方案词表结果回收 + 关键词防抖。
+    #[cfg(any(windows, feature = "dict-page"))]
     pub fn poll_schema_dict(&mut self) {
         let outcome = SCHEMA_DICT_OUTCOME
             .lock()
@@ -2511,7 +2518,11 @@ impl ClipboardHistoryState {
 
     /// 点击卡片：选中 / 再点取消。
     pub fn select(&mut self, id: i64) {
-        self.selected = if self.selected == Some(id) { None } else { Some(id) };
+        self.selected = if self.selected == Some(id) {
+            None
+        } else {
+            Some(id)
+        };
     }
 
     /// 删除单条历史。
@@ -2606,7 +2617,11 @@ impl QuickSendState {
 
     /// 点击卡片：选中 / 再点取消。
     pub fn select(&mut self, id: i64) {
-        self.selected = if self.selected == Some(id) { None } else { Some(id) };
+        self.selected = if self.selected == Some(id) {
+            None
+        } else {
+            Some(id)
+        };
     }
 
     pub fn set_draft_code(&mut self, v: String) {
@@ -2786,7 +2801,9 @@ impl SpeechState {
 
     /// 开始/停止听写（worker 首次使用时创建）。
     pub fn toggle(&mut self) {
-        let h = self.handle.get_or_insert_with(crate::speech::VoiceHandle::spawn);
+        let h = self
+            .handle
+            .get_or_insert_with(crate::speech::VoiceHandle::spawn);
         if self.listening || self.processing {
             h.stop();
         } else {
@@ -2821,7 +2838,7 @@ impl SpeechState {
 // ------------------------------------------------------------------
 
 /// 词典后台任务结果（后台线程 → UI 轮询）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 enum DictTaskResult {
     List(DictListResult),
     Message(String),
@@ -2838,36 +2855,34 @@ enum DictTaskResult {
     },
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static DICT_TASK_OUTCOME: std::sync::Mutex<Option<DictTaskResult>> = std::sync::Mutex::new(None);
 
 /// 词条列表每页条数。
 ///
 /// 页面外层已经是滚动容器（`pages::scrollable_content`），整页铺几百行会让
 /// 每帧构建变慢，所以这里沿用剪贴板页的分页做法。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub const DICT_ENTRIES_PAGE_SIZE: usize = 50;
 
 /// 关键词输入的防抖时长：打字停下后才真正去扫一遍词库。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 const DICT_QUERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// 写词条 / 短语保存的后台结果信箱（与读取信箱分开：同一时间可能有
 /// 一个在途读取 + 一个在途写入，共用一个槽会互相覆盖结果）。
-#[cfg(windows)]
-static DICT_WRITE_OUTCOME: std::sync::Mutex<Option<DictWriteResult>> =
-    std::sync::Mutex::new(None);
+#[cfg(any(windows, feature = "dict-page"))]
+static DICT_WRITE_OUTCOME: std::sync::Mutex<Option<DictWriteResult>> = std::sync::Mutex::new(None);
 /// 方案词表读取的结果信箱（输入方案页）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 static SCHEMA_DICT_OUTCOME: std::sync::Mutex<Option<SchemaDictTaskResult>> =
     std::sync::Mutex::new(None);
 /// 快捷短语读取/保存的结果信箱（词典页短语子视图）。
-#[cfg(windows)]
-static PHRASE_OUTCOME: std::sync::Mutex<Option<PhraseTaskResult>> =
-    std::sync::Mutex::new(None);
+#[cfg(any(windows, feature = "dict-page"))]
+static PHRASE_OUTCOME: std::sync::Mutex<Option<PhraseTaskResult>> = std::sync::Mutex::new(None);
 
 /// 新增词条对话框的草稿。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct DictEntryDraft {
     /// 词。
@@ -2879,7 +2894,7 @@ pub struct DictEntryDraft {
 }
 
 /// 用户词典「浏览词条」子视图状态。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct DictBrowseState {
     /// 正在浏览的词典名。
@@ -2912,7 +2927,7 @@ pub struct DictBrowseState {
     pub add_dialog: Option<DictEntryDraft>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 impl DictBrowseState {
     /// 过滤后词条占多少页（0 表示没有词条）。
     pub fn page_count(&self) -> usize {
@@ -2960,7 +2975,7 @@ impl DictBrowseState {
 }
 
 /// 快捷短语编辑对话框的草稿（新增与编辑共用）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct PhraseDialogState {
     /// 编辑第几条（None = 新增）。
@@ -2974,7 +2989,7 @@ pub struct PhraseDialogState {
 }
 
 /// 快捷短语子视图状态（词典页内：按方案编辑 `custom_phrase.txt`）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct CustomPhraseState {
     /// 正在编辑的方案 id。
@@ -3010,7 +3025,7 @@ pub struct CustomPhraseState {
 }
 
 /// 方案词表浏览状态（输入方案页「方案词表」tab，只读）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, Debug, Default)]
 pub struct SchemaDictState {
     /// 正在浏览的方案 id（跟输入方案页选中行同步）。
@@ -3041,7 +3056,7 @@ pub struct SchemaDictState {
     pending: Option<std::time::Instant>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 impl SchemaDictState {
     /// 过滤后词条占多少页（0 表示没有词条）。
     pub fn page_count(&self) -> usize {
@@ -3089,7 +3104,7 @@ impl SchemaDictState {
 }
 
 /// 方案词表后台任务结果（带 schema_id：在途期间换方案/换页时丢弃旧结果）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 enum SchemaDictTaskResult {
     Entries {
         schema_id: String,
@@ -3102,7 +3117,7 @@ enum SchemaDictTaskResult {
 }
 
 /// 快捷短语后台任务结果（带 schema_id：在途期间换方案时丢弃旧结果）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 enum PhraseTaskResult {
     Loaded {
         schema_id: String,
@@ -3123,7 +3138,7 @@ enum PhraseTaskResult {
 /// 版式为「页内 Tab + 表格」（对齐剪贴板页 / 小狼毫词典管理对话框）：
 /// Tab 0 用户词典（词典下拉 + 搜索 + 词条表格 + 整本操作），
 /// Tab 1 快捷短语（方案下拉 + 短语表格 + 部署）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone)]
 pub struct DictManageState {
     /// 用户词典名列表。
@@ -3144,7 +3159,7 @@ pub struct DictManageState {
     pub phrase: Option<CustomPhraseState>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 impl Default for DictManageState {
     /// 启动即拉一次词典列表：列表为空时页面上连词典下拉都是空的，
     /// 不该让用户先点一次「刷新」才能看到功能。
@@ -3163,7 +3178,7 @@ impl Default for DictManageState {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 impl DictManageState {
     fn submit(message: DictTaskResult) {
         *DICT_TASK_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
@@ -3178,9 +3193,9 @@ impl DictManageState {
         std::thread::spawn(|| {
             let result = match notify_dict_list() {
                 Some(r) => DictTaskResult::List(r),
-                None => DictTaskResult::Message(
-                    "获取词典列表失败（输入法服务未运行？）".to_string(),
-                ),
+                None => {
+                    DictTaskResult::Message("获取词典列表失败（输入法服务未运行？）".to_string())
+                }
             };
             Self::submit(result);
         });
@@ -3288,11 +3303,7 @@ impl DictManageState {
     /// 翻页（越界自动夹到范围内）。
     pub fn browse_page(&mut self, page: usize) {
         let pages = self.browse.page_count();
-        self.browse.page = if pages == 0 {
-            0
-        } else {
-            page.min(pages - 1)
-        };
+        self.browse.page = if pages == 0 { 0 } else { page.min(pages - 1) };
     }
 
     /// 发起一次词条读取（单飞：已有读取在途时只记 pending，等结果回来再补）。
@@ -3695,25 +3706,21 @@ impl DictManageState {
                 self.busy = None;
                 self.message = Some(m);
             }
-            Some(DictTaskResult::Entries { dict, result }) => {
+            Some(DictTaskResult::Entries { dict, result }) if self.browse.dict == dict => {
                 // 词典名对不上 = 在途期间切换过下拉，旧结果丢弃。
-                if self.browse.dict == dict {
-                    self.browse.loading = false;
-                    self.browse.loaded = true;
-                    self.browse.total = result.total;
-                    self.browse.matched = result.matched;
-                    self.browse.entries = result.entries;
-                    self.browse.page = 0;
-                }
+                self.browse.loading = false;
+                self.browse.loaded = true;
+                self.browse.total = result.total;
+                self.browse.matched = result.matched;
+                self.browse.entries = result.entries;
+                self.browse.page = 0;
             }
-            Some(DictTaskResult::EntriesFailed { dict, reason }) => {
-                if self.browse.dict == dict {
-                    self.browse.loading = false;
-                    self.browse.loaded = true;
-                    self.browse.error = Some(reason);
-                }
+            Some(DictTaskResult::EntriesFailed { dict, reason }) if self.browse.dict == dict => {
+                self.browse.loading = false;
+                self.browse.loaded = true;
+                self.browse.error = Some(reason);
             }
-            None => {}
+            _ => {}
         }
 
         // 词条写入结果：成功给提示 + 排一次防抖后重读（词库内容变了）。
@@ -3802,7 +3809,7 @@ impl DictManageState {
 }
 
 /// 新增词条的频率输入：空串 = 1；否则必须是正整数。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn parse_commits_input(raw: &str) -> Result<i32, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -3818,7 +3825,7 @@ fn parse_commits_input(raw: &str) -> Result<i32, String> {
 }
 
 /// 短语权重输入：空串 = 省略该列（None）；否则必须是正整数。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn parse_weight_input(raw: &str) -> Result<Option<i32>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -4211,16 +4218,18 @@ fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
         serde_yaml::from_str(&content).unwrap_or_default();
     // 值解密（host.config 同一密文格式；无前缀旧版明文原样）
     let key_path = xime_plugin::cipher::key_path_for_config(&path);
-    map.retain(|k, v| match xime_plugin::cipher::decrypt_with_key_path(&key_path, v) {
-        Some(plain) => {
-            *v = plain;
-            true
-        }
-        None => {
-            tracing::warn!("[config] 值解密失败，条目按缺失处理: {k}");
-            false
-        }
-    });
+    map.retain(
+        |k, v| match xime_plugin::cipher::decrypt_with_key_path(&key_path, v) {
+            Some(plain) => {
+                *v = plain;
+                true
+            }
+            None => {
+                tracing::warn!("[config] 值解密失败，条目按缺失处理: {k}");
+                false
+            }
+        },
+    );
     map
 }
 
@@ -4646,7 +4655,7 @@ pub struct InputSchemaState {
     /// 设置页据此把没产物的方案标成「未启用」。
     pub deployed_schema_ids: Vec<String>,
     /// 「方案词表」tab 的浏览状态（只读；schema_id 跟本页选中行同步）。
-    #[cfg(windows)]
+    #[cfg(any(windows, feature = "dict-page"))]
     pub dict: SchemaDictState,
 }
 
@@ -5019,7 +5028,10 @@ fn apply_restored_builtin_schema_list(manifest: &SchemaManifest) -> anyhow::Resu
         return Ok(());
     };
     let default_id = restored_default_schema_id(&entry.files);
-    let ids = package_schema_ids(entry.files.iter().map(String::as_str), default_id.as_deref());
+    let ids = package_schema_ids(
+        entry.files.iter().map(String::as_str),
+        default_id.as_deref(),
+    );
     if ids.is_empty() {
         return Ok(());
     }
@@ -5076,8 +5088,7 @@ fn do_uninstall(schema_id: &str, deploy: bool) -> anyhow::Result<()> {
             // 整包启用（默认方案置顶），与安装/还原语义一致：只启用一个的话
             // 内置包内其余方案没有 build 产物，切换时会被判「未部署」。
             let default_id = restored_default_schema_id(&files);
-            remaining =
-                package_schema_ids(files.iter().map(String::as_str), default_id.as_deref());
+            remaining = package_schema_ids(files.iter().map(String::as_str), default_id.as_deref());
         }
     }
     if remaining.is_empty() {
@@ -5331,10 +5342,7 @@ fn do_install(schema_id: &str) -> anyhow::Result<()> {
         return Err(e);
     }
     release_files.retain(|(rel, _)| !schema_manifest::is_protected_release_path(rel));
-    anyhow::ensure!(
-        !release_files.is_empty(),
-        "下载包中没有可安装的文件"
-    );
+    anyhow::ensure!(!release_files.is_empty(), "下载包中没有可安装的文件");
 
     // 发现真实方案 id（包 id ≠ 方案 id，如 rime-ice → rime_ice；从顶层
     // *.schema.yaml 提取），并优先取与包 id 规范化后同名的为启用目标。
@@ -5643,7 +5651,7 @@ schemas:
     /// 只写一个的话包内其余方案没有 build 产物，切换会被服务端判「未部署」。
     #[test]
     fn package_schema_ids_keeps_whole_package_with_default_first() {
-        let files = vec![
+        let files = [
             "wubi86.dict.yaml".to_string(),
             "wubi86.schema.yaml".to_string(),
             "wubi86_pinyin.schema.yaml".to_string(),
@@ -5666,17 +5674,17 @@ schemas:
     /// 默认方案不在包里（或没给）时按字典序，不塞入不存在的方案。
     #[test]
     fn package_schema_ids_default_missing_falls_back_to_sorted() {
-        let files = vec!["b.schema.yaml".to_string(), "a.schema.yaml".to_string()];
+        let files = ["b.schema.yaml".to_string(), "a.schema.yaml".to_string()];
         let ids = package_schema_ids(files.iter().map(String::as_str), Some("nope"));
-        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(ids, ["a".to_string(), "b".to_string()]);
         let ids = package_schema_ids(files.iter().map(String::as_str), None);
-        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(ids, ["a".to_string(), "b".to_string()]);
     }
 
     /// 子目录里的 `.schema.yaml` 不算（rime 的 schema_list 只认顶层 id），重复项去重。
     #[test]
     fn package_schema_ids_ignores_nested_and_dedups() {
-        let files = vec![
+        let files = [
             "nested/inner.schema.yaml".to_string(),
             "top.schema.yaml".to_string(),
             "top.schema.yaml".to_string(),
@@ -5764,7 +5772,10 @@ schemas:
             "symbols.yaml".to_string(),
             "wubi86.schema.yaml".to_string(),
         ];
-        assert_eq!(restored_default_schema_id(&files).as_deref(), Some("wubi86"));
+        assert_eq!(
+            restored_default_schema_id(&files).as_deref(),
+            Some("wubi86")
+        );
 
         // 没有 wubi86 时取字典序最靠前的顶层方案；子目录里的不算、非方案文件不算。
         let files = vec![
@@ -5772,7 +5783,10 @@ schemas:
             "symbols.yaml".to_string(),
             "wubi98.schema.yaml".to_string(),
         ];
-        assert_eq!(restored_default_schema_id(&files).as_deref(), Some("wubi98"));
+        assert_eq!(
+            restored_default_schema_id(&files).as_deref(),
+            Some("wubi98")
+        );
         assert_eq!(
             restored_default_schema_id(&["symbols.yaml".to_string()]),
             None
@@ -5831,10 +5845,7 @@ mod dict_browse_tests {
     fn empty_and_exact_page_counts() {
         assert_eq!(browse_with(Vec::new(), 0).page_count(), 0);
         assert_eq!(browse_with(rows(1), 0).page_count(), 1);
-        assert_eq!(
-            browse_with(rows(DICT_ENTRIES_PAGE_SIZE), 0).page_count(),
-            1
-        );
+        assert_eq!(browse_with(rows(DICT_ENTRIES_PAGE_SIZE), 0).page_count(), 1);
         assert_eq!(
             browse_with(rows(DICT_ENTRIES_PAGE_SIZE + 1), 0).page_count(),
             2
@@ -6053,7 +6064,11 @@ mod dict_edit_tests {
             }
         }
         dict.phrase_dialog_submit();
-        assert!(dict.phrase.as_ref().and_then(|p| p.dialog.clone()).is_some());
+        assert!(dict
+            .phrase
+            .as_ref()
+            .and_then(|p| p.dialog.clone())
+            .is_some());
         assert_eq!(
             dict.phrase.as_ref().and_then(|p| p.error.clone()),
             Some("词和编码都要填".to_string())

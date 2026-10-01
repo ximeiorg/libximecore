@@ -1,8 +1,6 @@
 use crate::metadata::app_metadata;
 pub use librime::levers::SchemaInfo;
-use librime::{
-    create_session, initialize, setup, Traits,
-};
+use librime::{create_session, initialize, setup, Traits};
 use std::path::PathBuf;
 use std::sync::{Once, OnceLock};
 
@@ -129,9 +127,7 @@ pub fn deploy_all() -> Result<(), String> {
         if api.is_null() {
             return Err("Rime API 未初始化".to_string());
         }
-        let started = (*api)
-            .start_maintenance
-            .ok_or("start_maintenance 不可用")?(1);
+        let started = (*api).start_maintenance.ok_or("start_maintenance 不可用")?(1);
         if started != 0 {
             if let Some(join) = (*api).join_maintenance_thread {
                 join();
@@ -139,8 +135,8 @@ pub fn deploy_all() -> Result<(), String> {
         }
         // 全量维护后补跑 xime.yaml 配置部署（幂等）。
         if let Some(deploy_config) = (*api).deploy_config_file {
-            let version_key = std::ffi::CString::new("config_version")
-                .map_err(|e| e.to_string())?;
+            let version_key =
+                std::ffi::CString::new("config_version").map_err(|e| e.to_string())?;
             let config_c = std::ffi::CString::new(config_file).map_err(|e| e.to_string())?;
             deploy_config(config_c.as_ptr(), version_key.as_ptr());
         }

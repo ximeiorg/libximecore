@@ -25,9 +25,8 @@ pub use schema_config::{
 };
 pub use schema_manager::SchemaManager;
 pub use schema_manifest::{
-    is_protected_release_path, is_trackable_path, is_user_data_path, package_label,
-    FileConflict, PackageEntry, Registry, SchemaManifest, UninstallOutcome,
-    BUILTIN_PACKAGE_ID,
+    is_protected_release_path, is_trackable_path, is_user_data_path, package_label, FileConflict,
+    PackageEntry, Registry, SchemaManifest, UninstallOutcome, BUILTIN_PACKAGE_ID,
 };
 pub use style::ColorScheme;
 pub use style::ColorSchemeConfig;

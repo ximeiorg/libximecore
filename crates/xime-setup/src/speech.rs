@@ -232,9 +232,7 @@ fn wait_action(op: &windows_future::IAsyncAction) -> Result<(), String> {
             _ => {
                 return Err(format!(
                     "语音操作失败（0x{:08X}）",
-                    op.ErrorCode()
-                        .map(|e| e.0 as u32)
-                        .unwrap_or(0)
+                    op.ErrorCode().map(|e| e.0 as u32).unwrap_or(0)
                 ));
             }
         }
@@ -242,9 +240,7 @@ fn wait_action(op: &windows_future::IAsyncAction) -> Result<(), String> {
 }
 
 /// 轮询等待 IAsyncOperation<T>。
-fn wait_operation<T>(
-    op: &windows_future::IAsyncOperation<T>,
-) -> Result<T, String>
+fn wait_operation<T>(op: &windows_future::IAsyncOperation<T>) -> Result<T, String>
 where
     T: windows_core::RuntimeType + Clone,
 {
@@ -259,9 +255,7 @@ where
             _ => {
                 return Err(format!(
                     "语音操作失败（0x{:08X}）",
-                    op.ErrorCode()
-                        .map(|e| e.0 as u32)
-                        .unwrap_or(0)
+                    op.ErrorCode().map(|e| e.0 as u32).unwrap_or(0)
                 ));
             }
         }

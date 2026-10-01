@@ -132,12 +132,14 @@ pub fn conflict_dialog<'a>(
         .size(13)
         .color(colors.foreground_muted),
         text(packages).size(13).color(colors.foreground),
-        text("方案隔离：同一时刻 rime 目录里只保留一个方案来源。\
+        text(
+            "方案隔离：同一时刻 rime 目录里只保留一个方案来源。\
               卸载会删掉该方案包的文件连同它生成的配置（`<方案>.custom.yaml`、\
               短语表、部署缓存）；输入记录（*.userdb）与已下载的安装包保留；\
-              内置方案包已自动备份（market/builtin/），可随时还原。")
-            .size(12)
-            .color(colors.foreground_muted),
+              内置方案包已自动备份（market/builtin/），可随时还原。"
+        )
+        .size(12)
+        .color(colors.foreground_muted),
         text(format!("目标：{}", action_label))
             .size(12)
             .color(colors.foreground_muted),
@@ -158,7 +160,11 @@ pub fn conflict_dialog<'a>(
 /// 分段标签：已安装 / 已下载 / 方案词表。
 fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
     let colors = *colors;
+    // 「方案词表」tab 仅在启用词典机制时存在（Windows 恒开；Linux 走 dict-page）。
+    #[cfg(any(windows, feature = "dict-page"))]
     let labels = ["已安装", "已下载", "方案词表"];
+    #[cfg(not(any(windows, feature = "dict-page")))]
+    let labels = ["已安装", "已下载"];
     let mut bar = row![].spacing(2).padding(2);
 
     for (i, label) in labels.iter().enumerate() {
@@ -249,7 +255,7 @@ fn installed_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> El
             None => groups.push((pkg, vec![i])),
         }
     }
-    groups.sort_by(|a, b| group_order(&a.0).cmp(&group_order(&b.0)));
+    groups.sort_by_key(|g| group_order(&g.0));
 
     let mut list = column![].spacing(6).width(Length::Fill);
     for (pkg, indexes) in &groups {
@@ -319,10 +325,7 @@ fn group_header<'a>(package_id: &str, count: usize, colors: ThemeColors) -> Elem
             .color(colors.foreground_muted),
     );
 
-    container(head)
-        .width(Length::Fill)
-        .padding([8, 4])
-        .into()
+    container(head).width(Length::Fill).padding([8, 4]).into()
 }
 
 /// 单个已安装方案行。
@@ -514,7 +517,11 @@ fn package_card<'a>(
     let sid = pkg_id.to_string();
     let action = action_button(
         if installed { "卸载" } else { "安装" },
-        if installed { "卸载中…" } else { "安装中…" },
+        if installed {
+            "卸载中…"
+        } else {
+            "安装中…"
+        },
         installed,
         busy_self,
         any_busy,
@@ -564,7 +571,8 @@ fn package_card<'a>(
 }
 
 /// 扫描本地市场缓存目录中的已下载方案包（跳过隐藏目录与内置方案备份目录）。
-fn scan_market_dir() -> Vec<String> {    // 与扩展商店下载共用同一目录（state::market_dir，%APPDATA%\<name>\market\）。
+fn scan_market_dir() -> Vec<String> {
+    // 与扩展商店下载共用同一目录（state::market_dir，%APPDATA%\<name>\market\）。
     let market_dir = crate::state::market_dir();
 
     let mut pkg_ids = Vec::new();
@@ -603,7 +611,11 @@ fn scan_market_dir() -> Vec<String> {    // 与扩展商店下载共用同一目
 /// 数据由 server 解析（`winxime-server::schema_dict`），本页只做搜索/翻页；
 /// 词条来源是方案包自带的 `.dict.yaml`，改不得——要改词条用词典页的
 /// 用户词典（造词）或快捷短语（整句上屏）。
-fn schema_dict_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+#[cfg(any(windows, feature = "dict-page"))]
+fn schema_dict_tab<'a>(
+    settings: &'a SettingsState,
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
     let colors = *colors;
     let dict = &settings.input_schema.dict;
 
@@ -751,6 +763,15 @@ fn schema_dict_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> 
     }
 
     list.into()
+}
+
+/// 未启用词典机制的兜底：tab 栏只渲染两个标签，此分支实际不可达，仅为满足编译。
+#[cfg(not(any(windows, feature = "dict-page")))]
+fn schema_dict_tab<'a>(
+    settings: &'a SettingsState,
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    installed_tab(settings, colors)
 }
 
 #[cfg(test)]

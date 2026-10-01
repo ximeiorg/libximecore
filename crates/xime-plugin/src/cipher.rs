@@ -13,12 +13,15 @@
 use std::path::{Path, PathBuf};
 
 /// 密文前缀（与 Android `SecureValueCipher` 一致）。
+#[cfg(windows)]
 const ENC_PREFIX: &str = "enc:";
 
 /// GCM nonce 长度（字节）。
+#[cfg(windows)]
 const NONCE_LEN: usize = 12;
 
 /// AES-256 密钥长度（字节）。
+#[cfg(windows)]
 const KEY_LEN: usize = 32;
 
 /// 加密：`enc:` + base64(iv + ciphertext)。
@@ -160,9 +163,10 @@ mod imp {
     fn load_or_create_key(key_path: &Path) -> Option<[u8; KEY_LEN]> {
         if let Ok(content) = std::fs::read_to_string(key_path) {
             let content = content.trim();
-            if let Some(blob) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content)
-                .ok()
-                .and_then(|b| dpapi_unprotect(&b))
+            if let Some(blob) =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content)
+                    .ok()
+                    .and_then(|b| dpapi_unprotect(&b))
             {
                 if blob.len() == KEY_LEN {
                     let mut key = [0u8; KEY_LEN];
@@ -216,7 +220,8 @@ mod imp {
             // 无前缀：旧版明文兼容
             return Some(stored.to_string());
         };
-        let blob = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
+        let blob =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).ok()?;
         if blob.len() <= NONCE_LEN {
             return None;
         }
@@ -246,10 +251,7 @@ mod tests {
     use super::*;
 
     fn temp_key(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "xime_cipher_{label}_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("xime_cipher_{label}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap_or_default();
         dir.join("secret.key")
@@ -260,8 +262,13 @@ mod tests {
         let key = temp_key("roundtrip");
         let stored = encrypt_with_key_path(&key, "应用密码 secret-123");
         #[cfg(windows)]
-        assert!(stored.starts_with(ENC_PREFIX), "Windows 上应为 enc: 密文");
-        assert_ne!(stored, "应用密码 secret-123", "密文不等于明文");
+        {
+            assert!(stored.starts_with(ENC_PREFIX), "Windows 上应为 enc: 密文");
+            assert_ne!(stored, "应用密码 secret-123", "密文不等于明文");
+        }
+        // 非 Windows 当前为明文直通（Linux 密钥保护待接 keyring，见 P9）。
+        #[cfg(not(windows))]
+        assert_eq!(stored, "应用密码 secret-123");
         assert_eq!(
             decrypt_with_key_path(&key, &stored),
             Some("应用密码 secret-123".to_string())
@@ -290,7 +297,11 @@ mod tests {
             ENC_PREFIX,
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, blob)
         );
-        assert_eq!(decrypt_with_key_path(&key, &tampered), None, "GCM 认证失败返回 None");
+        assert_eq!(
+            decrypt_with_key_path(&key, &tampered),
+            None,
+            "GCM 认证失败返回 None"
+        );
     }
 
     #[cfg(windows)]

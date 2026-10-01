@@ -55,11 +55,19 @@ fn hero<'a>(
 
     let mut title_line = row![
         badge(kind.label(), badge_fg, badge_bg),
-        badge(server.backend_label(), colors.foreground_muted, colors.surface_variant),
+        badge(
+            server.backend_label(),
+            colors.foreground_muted,
+            colors.surface_variant
+        ),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
-    if server.selected_entry().map(|e| e.recommended).unwrap_or(false) {
+    if server
+        .selected_entry()
+        .map(|e| e.recommended)
+        .unwrap_or(false)
+    {
         title_line = title_line.push(badge("推荐", colors.on_primary, colors.primary));
     }
 
@@ -101,26 +109,21 @@ fn hero_glyph<'a>(kind: SpeechStatusKind, colors: &'a ThemeColors) -> Element<'a
     } else {
         (colors.tertiary_dim, colors.tertiary)
     };
-    container(
-        text("音")
-            .size(20)
-            .font(semibold())
-            .color(fg),
-    )
-    .width(HERO_GLYPH)
-    .height(HERO_GLYPH)
-    .align_x(Alignment::Center)
-    .align_y(Alignment::Center)
-    .style(move |_| container::Style {
-        background: Some(Background::Color(bg)),
-        border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: border::radius(14.0),
-        },
-        ..container::Style::default()
-    })
-    .into()
+    container(text("音").size(20).font(semibold()).color(fg))
+        .width(HERO_GLYPH)
+        .height(HERO_GLYPH)
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |_| container::Style {
+            background: Some(Background::Color(bg)),
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: border::radius(14.0),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 /// 语音模型卡：下拉选模型（单值配置）+ 选中模型的操作与进度。
@@ -138,12 +141,7 @@ fn model_card<'a>(
         } else {
             "正在读取模型列表…"
         };
-        items.push(
-            text(msg)
-                .size(14)
-                .color(colors.foreground_muted)
-                .into(),
-        );
+        items.push(text(msg).size(14).color(colors.foreground_muted).into());
         return settings_group(
             "语音模型",
             Some("模型只下载一次，之后完全离线运行，语音不会上传"),
@@ -161,12 +159,7 @@ fn model_card<'a>(
     .padding([6, 10])
     .width(Length::Fixed(360.0))
     .style(move |_theme, status| pick_list_style(colors, status));
-    items.push(
-        row![selector]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .into(),
-    );
+    items.push(row![selector].spacing(8).align_y(Alignment::Center).into());
 
     if let Some(entry) = server.selected_entry() {
         items.push(selected_model_detail(entry, server, colors));
@@ -254,9 +247,7 @@ fn selected_model_detail<'a>(
         block = block.push(
             row![
                 progress(value, colors),
-                text(format!("{percent}%"))
-                    .size(13)
-                    .color(colors.primary),
+                text(format!("{percent}%")).size(13).color(colors.primary),
             ]
             .spacing(10)
             .align_y(Alignment::Center)

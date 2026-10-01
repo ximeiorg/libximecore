@@ -108,7 +108,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::SchemaTab(i) => {
             state.settings.input_schema.current_tab = i;
             // 进「方案词表」tab 时为当前选中方案读一次词表。
-            #[cfg(windows)]
+            #[cfg(any(windows, feature = "dict-page"))]
             if i == 2 {
                 state.settings.schema_dict_ensure();
             }
@@ -118,7 +118,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             state.settings.input_schema.config_loaded = false;
             state.settings.load_schema_config();
             // 停在「方案词表」tab 时换方案 → 立即为新方案读词表。
-            #[cfg(windows)]
+            #[cfg(any(windows, feature = "dict-page"))]
             if state.settings.input_schema.current_tab == 2 {
                 state.settings.schema_dict_ensure();
             }
@@ -461,7 +461,9 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             if state.settings.speech.copy_text() {
                 state.settings.show_message("识别文本已复制".to_string());
             } else {
-                state.settings.show_message("复制失败（无文本？）".to_string());
+                state
+                    .settings
+                    .show_message("复制失败（无文本？）".to_string());
             }
         }
         #[cfg(all(feature = "voice-page", windows))]
@@ -488,15 +490,15 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                 state.settings.show_message("没有可复制的文本".to_string());
             }
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictRefresh => {
             state.settings.dict_manage.start_refresh();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictBackup(dict) => {
             state.settings.dict_manage.start_backup(dict);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictRestore => {
             // 原生文件对话框（模态；对齐 weasel 恢复流程）。
             if let Some(path) = rfd::FileDialog::new()
@@ -509,7 +511,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                     .start_restore(path.display().to_string());
             }
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictExport(dict) => {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("文本文件 (*.txt)", &["txt"])
@@ -522,7 +524,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                     .start_export(dict, path.display().to_string());
             }
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictImport(dict) => {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("文本文件 (*.txt)", &["txt"])
@@ -534,7 +536,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                     .start_import(dict, path.display().to_string());
             }
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictTab(i) => {
             state.settings.dict_manage.tab = i.min(1);
             // 进入快捷短语 Tab：首次自动为当前方案载入短语表。
@@ -544,55 +546,55 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                 }
             }
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictSelect(dict) => {
             state.settings.dict_manage.browse_select(dict);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictQueryChanged(query) => {
             state.settings.dict_manage.browse_set_query(query);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntriesPage(page) => {
             state.settings.dict_manage.browse_page(page);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryAddOpen => {
             state.settings.dict_manage.browse_add_open();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryAddCancel => {
             state.settings.dict_manage.browse_add_cancel();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryAddWordChanged(value) => {
             state.settings.dict_manage.browse_add_word(value);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryAddCodeChanged(value) => {
             state.settings.dict_manage.browse_add_code(value);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryAddCommitsChanged(value) => {
             state.settings.dict_manage.browse_add_commits(value);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryAddSubmit => {
             state.settings.dict_manage.browse_add_submit();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryDeleteRequest(word, code) => {
             state.settings.dict_manage.browse_delete_request(word, code);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryDeleteCancel => {
             state.settings.dict_manage.browse_delete_cancel();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictEntryDeleteConfirm(word, code) => {
             state.settings.dict_manage.browse_delete_confirm(word, code);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseSchemaChanged(schema_id) => {
             // 从输入方案页的方案列表里找显示名；找不到就用 id 兜底。
             let schema_name = state
@@ -603,57 +605,60 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                 .find(|info| info.schema_id == schema_id)
                 .map(|info| info.name.clone())
                 .unwrap_or_else(|| schema_id.clone());
-            state.settings.dict_manage.phrase_schema_changed(schema_id, schema_name);
+            state
+                .settings
+                .dict_manage
+                .phrase_schema_changed(schema_id, schema_name);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseAddOpen => {
             state.settings.dict_manage.phrase_add_open();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseEdit(index) => {
             state.settings.dict_manage.phrase_edit(index);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDialogCancel => {
             state.settings.dict_manage.phrase_dialog_cancel();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDialogWordChanged(value) => {
             state.settings.dict_manage.phrase_dialog_word(value);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDialogCodeChanged(value) => {
             state.settings.dict_manage.phrase_dialog_code(value);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDialogWeightChanged(value) => {
             state.settings.dict_manage.phrase_dialog_weight(value);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDialogSubmit => {
             state.settings.dict_manage.phrase_dialog_submit();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDeleteRequest(index) => {
             state.settings.dict_manage.phrase_delete_request(index);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDeleteCancel => {
             state.settings.dict_manage.phrase_delete_cancel();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::DictPhraseDeleteConfirm(index) => {
             state.settings.dict_manage.phrase_delete_confirm(index);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::SchemaDictQueryChanged(query) => {
             state.settings.schema_dict_set_query(query);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::SchemaDictRefresh => {
             state.settings.schema_dict_refresh();
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, feature = "dict-page"))]
         Message::SchemaDictPage(page) => {
             state.settings.schema_dict_page(page);
         }

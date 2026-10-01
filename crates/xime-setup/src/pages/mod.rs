@@ -14,10 +14,10 @@ pub mod clipboard;
 pub mod pair;
 #[cfg(feature = "smart-suggestion-page")]
 pub mod smart_suggestion;
-#[cfg(all(feature = "voice-page", windows))]
-pub mod voice;
 #[cfg(target_os = "linux")]
 pub mod sync;
+#[cfg(all(feature = "voice-page", windows))]
+pub mod voice;
 
 use crate::components::widgets::{medium, nav_button_style, scroll_style, semibold, sidebar_style};
 use crate::state::{Message, SettingsState};
@@ -53,9 +53,13 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
     ];
 
     // 「智能」组：智能联想 + 语音转文本（仅 Windows）。
-    #[cfg(any(feature = "smart-suggestion-page", all(feature = "voice-page", windows)))]
+    #[cfg(any(
+        feature = "smart-suggestion-page",
+        all(feature = "voice-page", windows)
+    ))]
     {
-        let mut smart_items: Vec<(&'static str, &'static str)> = Vec::new();
+        // with_capacity 绕开 vec_init_then_push：每项各自 cfg 门控，无法写成 vec! 字面量
+        let mut smart_items: Vec<(&'static str, &'static str)> = Vec::with_capacity(2);
         #[cfg(feature = "smart-suggestion-page")]
         smart_items.push(("icons/thinking.svg", "智能联想"));
         #[cfg(all(feature = "voice-page", windows))]

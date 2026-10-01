@@ -206,7 +206,10 @@ fn notify_status() -> Option<SpeechServerStatus> {
     NOTIFY_SPEECH_STATUS.get().and_then(|f| f())
 }
 
-fn notify_model_action(slot: &OnceLock<ModelActionFn>, model_id: &str) -> Option<SpeechServerStatus> {
+fn notify_model_action(
+    slot: &OnceLock<ModelActionFn>,
+    model_id: &str,
+) -> Option<SpeechServerStatus> {
     slot.get().and_then(|f| f(model_id))
 }
 
@@ -311,12 +314,7 @@ impl SpeechModelState {
             .iter()
             .map(|entry| SpeechModelChoice {
                 id: entry.id.clone(),
-                label: format!(
-                    "{} · {} · {}",
-                    entry.name,
-                    entry.size,
-                    entry.state_label()
-                ),
+                label: format!("{} · {} · {}", entry.name, entry.size, entry.state_label()),
             })
             .collect()
     }
@@ -394,7 +392,12 @@ impl SpeechModelState {
 
     /// 试听按钮文案。
     pub fn preview_label(&self) -> &'static str {
-        if self.status.as_ref().map(|s| s.is_listening()).unwrap_or(false) {
+        if self
+            .status
+            .as_ref()
+            .map(|s| s.is_listening())
+            .unwrap_or(false)
+        {
             "结束试听"
         } else {
             "试听说一句"
@@ -404,7 +407,9 @@ impl SpeechModelState {
     /// 下载 / 删除按钮是否可用（下载中、试听中都不许改模型目录）。
     pub fn busy(&self) -> bool {
         match &self.status {
-            Some(status) => status.download.is_some() || status.is_listening() || status.is_loading(),
+            Some(status) => {
+                status.download.is_some() || status.is_listening() || status.is_loading()
+            }
             None => true,
         }
     }
@@ -577,7 +582,11 @@ mod tests {
         let choices = state.choices();
         assert_eq!(choices.len(), 2);
         let labels: Vec<String> = choices.iter().map(|c| c.label.clone()).collect();
-        assert!(labels[0].contains("中英混输（自动标点）"), "{:?}", labels[0]);
+        assert!(
+            labels[0].contains("中英混输（自动标点）"),
+            "{:?}",
+            labels[0]
+        );
         assert!(labels[0].contains("133.90MB"), "{:?}", labels[0]);
         assert!(labels[0].contains("未下载"), "{:?}", labels[0]);
         assert!(labels[1].contains("当前使用"), "{:?}", labels[1]);

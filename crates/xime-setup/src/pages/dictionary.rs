@@ -9,20 +9,20 @@ use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::Element;
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 use crate::components::widgets::{
     button_danger, button_disabled, button_primary, card_style, medium, modal_dialog, semibold,
     text_button, text_input_style,
 };
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 use crate::state::{CustomPhraseState, DICT_ENTRIES_PAGE_SIZE};
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 use iced::widget::{button, column, container, pick_list, row, text, text_input, Space};
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 use iced::{border, Alignment, Background, Border, Color, Length};
 
 /// Windows：真实词典管理（rime 用户词典经 IPC 操作）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     let d = &settings.dict_manage;
 
@@ -64,7 +64,7 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
 }
 
 /// 页内 Tab 栏（样式对齐剪贴板页 / 输入方案页）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
     let colors = *colors;
     let labels = ["用户词典", "快捷短语"];
@@ -122,7 +122,7 @@ fn tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
 // ---- 表格件（列头 / 斑马纹行 / 定宽单元格 / 行内按钮） ----
 
 /// 定宽数据单元格：编码 / 频率 / 权重这类短内容列，定宽保证各行对齐。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn cell<'a>(value: String, width: f32, colors: &ThemeColors) -> Element<'a, Message> {
     text(value)
         .size(13)
@@ -133,7 +133,7 @@ fn cell<'a>(value: String, width: f32, colors: &ThemeColors) -> Element<'a, Mess
 }
 
 /// 定宽列头单元格（与 `cell` 同宽，表头与数据行天然对齐）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn head_cell<'a>(label: &'a str, width: f32, colors: &ThemeColors) -> Element<'a, Message> {
     text(label.to_string())
         .size(12)
@@ -144,7 +144,7 @@ fn head_cell<'a>(label: &'a str, width: f32, colors: &ThemeColors) -> Element<'a
 }
 
 /// 表头行：弹性首列 + 若干定宽列 + 右对齐的操作列。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn table_header<'a>(
     first_label: &'a str,
     columns: &[(&'a str, f32)],
@@ -171,14 +171,11 @@ fn table_header<'a>(
         .width(Length::Fixed(action_width))
         .align_x(iced::alignment::Horizontal::Right),
     );
-    container(head)
-        .width(Length::Fill)
-        .padding([8, 14])
-        .into()
+    container(head).width(Length::Fill).padding([8, 14]).into()
 }
 
 /// 斑马纹数据行：偶数行淡底色，与卡片底色区分。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn zebra_row<'a>(
     content: Element<'a, Message>,
     index: usize,
@@ -201,7 +198,7 @@ fn zebra_row<'a>(
 }
 
 /// 表格空态行（居中弱化文案）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn table_empty<'a>(hint: String, colors: &ThemeColors) -> Element<'a, Message> {
     container(text(hint).size(13).color(colors.foreground_muted))
         .width(Length::Fill)
@@ -211,7 +208,7 @@ fn table_empty<'a>(hint: String, colors: &ThemeColors) -> Element<'a, Message> {
 }
 
 /// 行内小按钮（普通操作：删除 / 取消 / 编辑）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn row_button<'a>(
     label: &'static str,
     colors: &ThemeColors,
@@ -221,17 +218,19 @@ fn row_button<'a>(
 }
 
 /// 行内小按钮（危险操作：确认删除）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn row_button_danger<'a>(
     label: &'static str,
     colors: &ThemeColors,
     on_press: Message,
 ) -> Element<'a, Message> {
-    button_danger(label, colors, on_press).padding([4, 10]).into()
+    button_danger(label, colors, on_press)
+        .padding([4, 10])
+        .into()
 }
 
 /// 表格卡片：列头 + 数据行（空态）合成一张卡。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn table_card<'a>(
     header: Element<'a, Message>,
     body: Vec<Element<'a, Message>>,
@@ -257,7 +256,7 @@ fn table_card<'a>(
 }
 
 /// 单行弱化文案（状态 / 提示 / 目录信息）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn hint_line<'a>(value: String, color: Color) -> Element<'a, Message> {
     text(value)
         .size(12)
@@ -270,7 +269,7 @@ fn hint_line<'a>(value: String, color: Color) -> Element<'a, Message> {
 // ---- Tab 0：用户词典 ----
 
 /// 用户词典 Tab：词典下拉 + 搜索 + 词条表格 + 整本操作。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn user_dict_view<'a>(
     d: &crate::state::DictManageState,
     colors: &'a ThemeColors,
@@ -437,10 +436,14 @@ fn user_dict_view<'a>(
     if pages > 1 {
         footer = footer.push(Space::new().width(Length::Fill));
         footer = footer.push(
-            text(format!("第 {} / {} 页 · 每页 {DICT_ENTRIES_PAGE_SIZE} 条", browse.page + 1, pages))
-                .size(12)
-                .font(medium())
-                .color(colors.foreground_muted),
+            text(format!(
+                "第 {} / {} 页 · 每页 {DICT_ENTRIES_PAGE_SIZE} 条",
+                browse.page + 1,
+                pages
+            ))
+            .size(12)
+            .font(medium())
+            .color(colors.foreground_muted),
         );
         footer = footer.push(row_button(
             "上一页",
@@ -475,14 +478,14 @@ fn user_dict_view<'a>(
 // ---- Tab 1：快捷短语 ----
 
 /// 方案下拉选项：id 参与相等性比较，避免同名方案选中错乱。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 #[derive(Clone, PartialEq)]
 struct SchemaOption {
     id: String,
     name: String,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 impl std::fmt::Display for SchemaOption {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.name)
@@ -490,7 +493,7 @@ impl std::fmt::Display for SchemaOption {
 }
 
 /// 快捷短语 Tab：方案下拉 + 短语表格 + 部署。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     let Some(phrase) = settings.dict_manage.phrase.as_ref() else {
         // 还没有可用方案：进 Tab 时自动打开，这里只剩「无方案」的空态。
@@ -536,7 +539,11 @@ fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
     if phrase.saving || phrase.loading {
         toolbar = toolbar.push(button_disabled("新增短语", colors));
     } else {
-        toolbar = toolbar.push(button_primary("新增短语", colors, Message::DictPhraseAddOpen));
+        toolbar = toolbar.push(button_primary(
+            "新增短语",
+            colors,
+            Message::DictPhraseAddOpen,
+        ));
     }
     items = items.push(toolbar);
 
@@ -651,7 +658,7 @@ fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
 }
 
 /// 短语 Tab 的状态文案（None = 无事发生，不渲染空行）。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn phrase_status_text(phrase: &CustomPhraseState) -> Option<String> {
     if phrase.loading {
         Some("正在读取短语表…".to_string())
@@ -667,7 +674,7 @@ fn phrase_status_text(phrase: &CustomPhraseState) -> Option<String> {
 // ---- 模态对话框 ----
 
 /// 新增词条对话框：词 / 编码 / 频率。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn entry_add_dialog<'a>(
     draft: &'a crate::state::DictEntryDraft,
     colors: &'a ThemeColors,
@@ -700,7 +707,11 @@ fn entry_add_dialog<'a>(
             .size(12)
             .color(colors.foreground_muted),
         row![
-            crate::components::widgets::button_secondary("取消", colors, Message::DictEntryAddCancel),
+            crate::components::widgets::button_secondary(
+                "取消",
+                colors,
+                Message::DictEntryAddCancel
+            ),
             button_primary("添加", colors, Message::DictEntryAddSubmit),
         ]
         .spacing(8),
@@ -710,7 +721,7 @@ fn entry_add_dialog<'a>(
 }
 
 /// 短语新增/编辑对话框：词 / 编码 / 权重。
-#[cfg(windows)]
+#[cfg(any(windows, feature = "dict-page"))]
 fn phrase_dialog_view<'a>(
     dialog: &'a crate::state::PhraseDialogState,
     colors: &'a ThemeColors,
@@ -765,8 +776,8 @@ fn phrase_dialog_view<'a>(
     .into()
 }
 
-/// 非 Windows：占位（rime 操作当前经 server/IPC 承载）。
-#[cfg(not(windows))]
+/// 非 Windows 且未启用 dict-page：占位（rime 操作由宿主经回调注入）。
+#[cfg(not(any(windows, feature = "dict-page")))]
 pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
     use crate::components::settings::{settings_group, settings_item, settings_page};
     use crate::components::widgets::label;

@@ -48,7 +48,10 @@ pub struct SpeechConfig {
 impl Default for SpeechConfig {
     fn default() -> Self {
         // 桌面端 2 线程：int8 zipformer 单线程已实时，2 线程留突发余量
-        Self { num_threads: 2, provider: SpeechProvider::Cpu }
+        Self {
+            num_threads: 2,
+            provider: SpeechProvider::Cpu,
+        }
     }
 }
 
@@ -79,18 +82,30 @@ impl StreamingRecognizer {
         model_dir: &Path,
         config: &SpeechConfig,
     ) -> Result<Self, SpeechError> {
-        for file in [&profile.encoder_file, &profile.decoder_file, &profile.joiner_file, &profile.tokens_file] {
+        for file in [
+            &profile.encoder_file,
+            &profile.decoder_file,
+            &profile.joiner_file,
+            &profile.tokens_file,
+        ] {
             let path = model_dir.join(file);
             if !path.is_file() {
-                return Err(SpeechError::MissingModel { path: path.to_string_lossy().into_owned() });
+                return Err(SpeechError::MissingModel {
+                    path: path.to_string_lossy().into_owned(),
+                });
             }
         }
 
         let c = build_recognizer_config(profile, model_dir, config);
-        let recognizer = OnlineRecognizer::create(&c)
-            .ok_or(SpeechError::CreateFailed { provider: config.provider.as_str() })?;
+        let recognizer = OnlineRecognizer::create(&c).ok_or(SpeechError::CreateFailed {
+            provider: config.provider.as_str(),
+        })?;
         let stream = recognizer.create_stream();
-        Ok(Self { recognizer, stream, buf: Vec::new() })
+        Ok(Self {
+            recognizer,
+            stream,
+            buf: Vec::new(),
+        })
     }
 
     /// 喂入一帧 PCM（16bit 单声道）。`sample_rate` 原样上交——sherpa 内部
@@ -112,7 +127,10 @@ impl StreamingRecognizer {
 
     /// 当前（部分）识别文本；还没有输出时为空串。
     pub fn partial_text(&self) -> String {
-        self.recognizer.get_result(&self.stream).map(|r| r.text).unwrap_or_default()
+        self.recognizer
+            .get_result(&self.stream)
+            .map(|r| r.text)
+            .unwrap_or_default()
     }
 
     /// 结束一句：冲刷解码取最终文本，并换新流（之后可继续喂下一句）。
@@ -150,9 +168,7 @@ fn build_recognizer_config(
     model_dir: &Path,
     config: &SpeechConfig,
 ) -> OnlineRecognizerConfig {
-    let abs = |file: &str| -> String {
-        model_dir.join(file).to_string_lossy().into_owned()
-    };
+    let abs = |file: &str| -> String { model_dir.join(file).to_string_lossy().into_owned() };
     let mut c = OnlineRecognizerConfig::default();
     c.model_config = OnlineModelConfig {
         transducer: OnlineTransducerModelConfig {
@@ -203,12 +219,27 @@ mod tests {
         let slash = |s: Option<String>| s.map(|x| x.replace('\\', "/"));
         let profile = AsrModelRegistry::default_profile();
         let dir = Path::new("D:/models/x");
-        let config = SpeechConfig { num_threads: 3, provider: SpeechProvider::Cpu };
+        let config = SpeechConfig {
+            num_threads: 3,
+            provider: SpeechProvider::Cpu,
+        };
         let c = build_recognizer_config(&profile, dir, &config);
-        assert_eq!(slash(c.model_config.transducer.encoder), Some("D:/models/x/encoder.int8.onnx".into()));
-        assert_eq!(slash(c.model_config.transducer.decoder), Some("D:/models/x/decoder.onnx".into()));
-        assert_eq!(slash(c.model_config.transducer.joiner), Some("D:/models/x/joiner.int8.onnx".into()));
-        assert_eq!(slash(c.model_config.tokens), Some("D:/models/x/tokens.txt".into()));
+        assert_eq!(
+            slash(c.model_config.transducer.encoder),
+            Some("D:/models/x/encoder.int8.onnx".into())
+        );
+        assert_eq!(
+            slash(c.model_config.transducer.decoder),
+            Some("D:/models/x/decoder.onnx".into())
+        );
+        assert_eq!(
+            slash(c.model_config.transducer.joiner),
+            Some("D:/models/x/joiner.int8.onnx".into())
+        );
+        assert_eq!(
+            slash(c.model_config.tokens),
+            Some("D:/models/x/tokens.txt".into())
+        );
         assert_eq!(c.model_config.num_threads, 3);
         assert_eq!(c.model_config.provider, Some("cpu".into()));
         assert_eq!(c.decoding_method, Some("greedy_search".into()));
@@ -220,7 +251,10 @@ mod tests {
     #[test]
     fn recognizer_config_passes_cuda_provider() {
         let profile = AsrModelRegistry::default_profile();
-        let config = SpeechConfig { num_threads: 2, provider: SpeechProvider::Cuda };
+        let config = SpeechConfig {
+            num_threads: 2,
+            provider: SpeechProvider::Cuda,
+        };
         let c = build_recognizer_config(&profile, Path::new("D:/models/x"), &config);
         assert_eq!(c.model_config.provider, Some("cuda".into()));
     }
@@ -279,7 +313,10 @@ mod tests {
             return; // 模型尚未下载
         }
         let profile = AsrModelRegistry::default_profile();
-        let config = SpeechConfig { num_threads: 2, provider: SpeechProvider::Cuda };
+        let config = SpeechConfig {
+            num_threads: 2,
+            provider: SpeechProvider::Cuda,
+        };
         let mut recognizer = match StreamingRecognizer::open(&profile, &model_dir, &config) {
             Ok(r) => r,
             Err(SpeechError::CreateFailed { .. }) => {

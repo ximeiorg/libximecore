@@ -86,7 +86,10 @@ impl AsrModelRegistry {
 
     /// 全部内置模型适配（对齐 Android `AsrModelRegistry.profiles`，首项即默认）。
     pub fn profiles() -> Vec<AsrModelProfile> {
-        vec![Self::x_asr_480ms_zh_en_punct_int8(), Self::zipformer_zh_int8()]
+        vec![
+            Self::x_asr_480ms_zh_en_punct_int8(),
+            Self::zipformer_zh_int8(),
+        ]
     }
 
     /// 默认模型：X-ASR 带标点（输入法听写要的是「直接可用的文本」）。
@@ -116,15 +119,27 @@ mod tests {
 
     #[test]
     fn registry_contains_both_android_profiles() {
-        let ids: Vec<String> = AsrModelRegistry::profiles().iter().map(|p| p.id.clone()).collect();
-        assert_eq!(ids, vec!["x-asr-480ms-zh-en-punct-int8", "zipformer-zh-int8"]);
+        let ids: Vec<String> = AsrModelRegistry::profiles()
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["x-asr-480ms-zh-en-punct-int8", "zipformer-zh-int8"]
+        );
     }
 
     #[test]
     fn default_is_x_asr_punct() {
         // 与 Android 默认（zipformer-zh-int8）刻意不同：听写文本要带标点可直接上屏
-        assert_eq!(AsrModelRegistry::default_profile().id, "x-asr-480ms-zh-en-punct-int8");
-        assert_eq!(AsrModelRegistry::profiles()[0].id, AsrModelRegistry::default_profile().id);
+        assert_eq!(
+            AsrModelRegistry::default_profile().id,
+            "x-asr-480ms-zh-en-punct-int8"
+        );
+        assert_eq!(
+            AsrModelRegistry::profiles()[0].id,
+            AsrModelRegistry::default_profile().id
+        );
     }
 
     #[test]
@@ -140,7 +155,10 @@ mod tests {
         let p = AsrModelRegistry::profile_or_default("future-model-id");
         assert_eq!(p.id, "future-model-id");
         // 文件布局回退默认（X-ASR 命名），目录名用原 id
-        assert_eq!(p.encoder_file, AsrModelRegistry::default_profile().encoder_file);
+        assert_eq!(
+            p.encoder_file,
+            AsrModelRegistry::default_profile().encoder_file
+        );
         // 已知 id 原样返回
         let known = AsrModelRegistry::profile_or_default("zipformer-zh-int8");
         assert_eq!(known.language, "zh");
@@ -149,7 +167,11 @@ mod tests {
     #[test]
     fn profiles_carry_download_and_file_roles() {
         for p in AsrModelRegistry::profiles() {
-            assert!(p.download_url.starts_with("https://www.modelscope.cn/"), "{} url", p.id);
+            assert!(
+                p.download_url.starts_with("https://www.modelscope.cn/"),
+                "{} url",
+                p.id
+            );
             assert!(p.download_url.ends_with(".tar.bz2"), "{} archive", p.id);
             assert!(!p.encoder_file.is_empty());
             assert!(!p.decoder_file.is_empty());

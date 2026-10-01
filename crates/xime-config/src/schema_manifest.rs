@@ -213,9 +213,7 @@ impl SchemaManifest {
 
     /// 内置方案备份目录（`market/builtin/`）。
     pub fn builtin_backup_dir(&self) -> PathBuf {
-        self.data_root
-            .join("market")
-            .join(BUILTIN_BACKUP_DIR_NAME)
+        self.data_root.join("market").join(BUILTIN_BACKUP_DIR_NAME)
     }
 
     /// 读取注册表；文件缺失或损坏时返回空表（对齐安卓 `loadRegistry` 容错）。
@@ -239,8 +237,8 @@ impl SchemaManifest {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("创建数据目录失败 {}: {}", parent.display(), e))?;
         }
-        let yaml = serde_yaml::to_string(registry)
-            .map_err(|e| format!("序列化注册表失败: {}", e))?;
+        let yaml =
+            serde_yaml::to_string(registry).map_err(|e| format!("序列化注册表失败: {}", e))?;
         std::fs::write(&path, yaml).map_err(|e| format!("写入注册表失败 {}: {}", path.display(), e))
     }
 
@@ -292,7 +290,9 @@ impl SchemaManifest {
         let mut entry = registry.remove(BUILTIN_PACKAGE_ID).unwrap_or_default();
         // 清理已消失的文件声明（用户手工删过内置方案文件时注册表不会留幽灵条目）。
         entry.files.retain(|rel| self.rime_dir.join(rel).is_file());
-        entry.sha256.retain(|rel, _| entry.files.iter().any(|f| f == rel));
+        entry
+            .sha256
+            .retain(|rel, _| entry.files.iter().any(|f| f == rel));
 
         let mut added = 0usize;
         for rel in self.collect_files()? {
@@ -385,7 +385,7 @@ impl SchemaManifest {
             if rel.is_empty() {
                 continue;
             }
-            if !entry.files.iter().any(|f| *f == rel) {
+            if !entry.files.contains(&rel) {
                 entry.files.push(rel.clone());
             }
             entry.sha256.insert(rel, hash.clone());
@@ -458,10 +458,11 @@ impl SchemaManifest {
             if let Ok(entries) = std::fs::read_dir(&build_dir) {
                 for file in entries.flatten() {
                     let name = file.file_name().to_string_lossy().to_string();
-                    if name.starts_with(&format!("{id}.")) && file.path().is_file() {
-                        if std::fs::remove_file(file.path()).is_ok() {
-                            outcome.deleted_derived += 1;
-                        }
+                    if name.starts_with(&format!("{id}."))
+                        && file.path().is_file()
+                        && std::fs::remove_file(file.path()).is_ok()
+                    {
+                        outcome.deleted_derived += 1;
                     }
                 }
             }
@@ -500,8 +501,7 @@ impl SchemaManifest {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("创建目录失败 {}: {}", parent.display(), e))?;
             }
-            std::fs::copy(&src, &dest)
-                .map_err(|e| format!("还原 {} 失败: {}", rel, e))?;
+            std::fs::copy(&src, &dest).map_err(|e| format!("还原 {} 失败: {}", rel, e))?;
             targets.push((rel, sha256_file(&dest).unwrap_or_default()));
         }
         if targets.is_empty() {
@@ -596,8 +596,8 @@ pub fn collect_files_in(root: &Path) -> Result<Vec<String>, String> {
 }
 
 fn collect_files_into(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("读取目录失败 {}: {}", dir.display(), e))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("读取目录失败 {}: {}", dir.display(), e))?;
     for entry in entries.flatten() {
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -780,12 +780,19 @@ mod tests {
             "rime-ice",
             &[("shared.dict.yaml".to_string(), hash_of("shared"))],
         );
-        assert!(non_conflict.is_empty(), "同内容不应判冲突: {:?}", non_conflict);
+        assert!(
+            non_conflict.is_empty(),
+            "同内容不应判冲突: {:?}",
+            non_conflict
+        );
 
         // 同名但内容不同（内置包已占用）→ 冲突，且指出归属
         let conflicts = m.detect_conflicts(
             "rime-ice",
-            &[("wubi86.schema.yaml".to_string(), hash_of("third-party-version"))],
+            &[(
+                "wubi86.schema.yaml".to_string(),
+                hash_of("third-party-version"),
+            )],
         );
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].file, "wubi86.schema.yaml");
@@ -795,12 +802,18 @@ mod tests {
         // 同包重装不算冲突
         m.register_package(
             "rime-ice",
-            &[("wubi86.schema.yaml".to_string(), hash_of("third-party-version"))],
+            &[(
+                "wubi86.schema.yaml".to_string(),
+                hash_of("third-party-version"),
+            )],
         )
         .unwrap();
         let reinstall = m.detect_conflicts(
             "rime-ice",
-            &[("wubi86.schema.yaml".to_string(), hash_of("third-party-version"))],
+            &[(
+                "wubi86.schema.yaml".to_string(),
+                hash_of("third-party-version"),
+            )],
         );
         assert!(reinstall.is_empty(), "同包重装不应判冲突: {:?}", reinstall);
 
@@ -847,12 +860,21 @@ mod tests {
         assert_eq!(outcome.removed_schema_ids, vec!["a".to_string()]);
 
         assert!(!m.rime_dir().join("a.schema.yaml").exists());
-        assert!(!m.rime_dir().join("a.custom.yaml").exists(), "补丁随方案删除");
-        assert!(!m.rime_dir().join("custom_phrase.txt").exists(), "短语表随方案删除");
+        assert!(
+            !m.rime_dir().join("a.custom.yaml").exists(),
+            "补丁随方案删除"
+        );
+        assert!(
+            !m.rime_dir().join("custom_phrase.txt").exists(),
+            "短语表随方案删除"
+        );
         assert!(!m.rime_dir().join("a_merged.dict.yaml").exists());
         assert!(!m.rime_dir().join("build/a.schema.yaml").exists());
         assert!(!m.rime_dir().join("build/a.prism.bin").exists());
-        assert!(m.rime_dir().join("a.userdb/db.txt").is_file(), "输入记录保留");
+        assert!(
+            m.rime_dir().join("a.userdb/db.txt").is_file(),
+            "输入记录保留"
+        );
         assert!(m.rime_dir().join("shared.dict.yaml").is_file());
         assert!(m.rime_dir().join("build/other.schema.yaml").is_file());
 
@@ -929,8 +951,8 @@ mod tests {
     }
 
     /// 方案来源互斥（用户真实场景回归）：rime 目录里先有内置方案文件，又装了第三方包
-/// （历史混装）→ 卸载其中一个来源后，rime 目录里只剩另一个来源的文件，
-/// 用户数据（输入记录、自己写的补丁）与受保护文件不受影响。
+    /// （历史混装）→ 卸载其中一个来源后，rime 目录里只剩另一个来源的文件，
+    /// 用户数据（输入记录、自己写的补丁）与受保护文件不受影响。
     #[test]
     fn mixed_sources_converge_to_single_source() {
         let (root, m) = fixture("mixed_sources");
@@ -998,7 +1020,11 @@ mod tests {
             .filter(|(_, e)| !e.is_empty())
             .map(|(pkg, _)| pkg.clone())
             .collect();
-        assert_eq!(sources, vec![BUILTIN_PACKAGE_ID.to_string()], "只剩内置来源");
+        assert_eq!(
+            sources,
+            vec![BUILTIN_PACKAGE_ID.to_string()],
+            "只剩内置来源"
+        );
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -1030,12 +1056,18 @@ mod tests {
             "patch:\n  custom_phrase/user_dict: custom_phrase_patched\n",
         );
 
-        assert_eq!(custom_phrase_dict_name(m.rime_dir(), "plain"), "custom_phrase");
+        assert_eq!(
+            custom_phrase_dict_name(m.rime_dir(), "plain"),
+            "custom_phrase"
+        );
         assert_eq!(
             custom_phrase_dict_name(m.rime_dir(), "double"),
             "custom_phrase_double"
         );
-        assert_eq!(custom_phrase_dict_name(m.rime_dir(), "quoted"), "custom_phrase_q");
+        assert_eq!(
+            custom_phrase_dict_name(m.rime_dir(), "quoted"),
+            "custom_phrase_q"
+        );
         assert_eq!(
             custom_phrase_dict_name(m.rime_dir(), "from_custom"),
             "custom_phrase_patched",
@@ -1046,7 +1078,10 @@ mod tests {
         write_file(&m, "custom_phrase_double.txt", "phrases");
         m.register_package(
             "pkg-double",
-            &[("double.schema.yaml".to_string(), hash_of("schema_id: double\ncustom_phrase:\n  user_dict: custom_phrase_double\n"))],
+            &[(
+                "double.schema.yaml".to_string(),
+                hash_of("schema_id: double\ncustom_phrase:\n  user_dict: custom_phrase_double\n"),
+            )],
         )
         .unwrap();
         m.uninstall_package("pkg-double").unwrap();
