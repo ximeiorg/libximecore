@@ -170,6 +170,22 @@ impl Session {
         Ok(())
     }
 
+    /// 清空当前组合（preedit、候选、高亮一并复位）。
+    ///
+    /// 用于宿主接管上屏的场景：先把编码作为文本 commit 给应用，
+    /// 再清掉 Rime 内部的组合状态（librime 的 RimeClearComposition）。
+    pub fn clear_composition(&self) {
+        unsafe {
+            let api = get_api();
+            if api.is_null() {
+                return;
+            }
+            if let Some(clear_composition) = (*api).clear_composition {
+                clear_composition(self.session_id);
+            }
+        }
+    }
+
     pub fn get_option(&self, option: &str) -> Result<bool> {
         let cstr = CString::new(option)?;
         unsafe {
