@@ -13,7 +13,7 @@
 //!
 //! 两条链路故意不合并：本地模型跑在 `winxime-server` 进程（与候选栏 🎙️ 共用
 //! 一条会话），WinRT 跑在设置进程，各持状态机、各管自己的麦克风。
-#![cfg(all(feature = "voice-page", windows))]
+#![cfg(feature = "voice-page")]
 
 use crate::components::settings::{settings_group, settings_item, settings_page};
 use crate::components::widgets::{
@@ -39,6 +39,8 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
             hero(server, colors),
             model_card(server, colors),
             preview_card(server, colors),
+            // 系统听写卡是 Windows WinRT 专属（Linux 无此在线服务）。
+            #[cfg(windows)]
             dictation_card(settings, colors),
             help_card(colors),
         ],
@@ -345,6 +347,7 @@ fn preview_card<'a>(
 }
 
 /// 系统听写（WinRT，仅本页试听）——弱化处理，说明它不参与输入法。
+#[cfg(windows)]
 fn dictation_card<'a>(
     settings: &'a SettingsState,
     colors: &'a ThemeColors,

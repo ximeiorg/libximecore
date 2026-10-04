@@ -129,10 +129,13 @@ fn link_librime(dist: Option<PathBuf>) {
         let lib = dist_dir.join("lib");
         println!("cargo:rustc-link-search=native={}", lib.display());
         println!("cargo:rustc-link-lib=dylib=rime");
-        // 运行时优先加载子模块构建的 librime（如 dist 不存在则该 rpath 条目被忽略）。
+        // 运行时优先加载子模块构建的 librime（如 dist 不存在则该条目回退系统库）；
+        // 同时带上 $ORIGIN/../share/xime/lib——语音运行库（sherpa-onnx）安装位，
+        // dev（~/.local/bin）与系统包（/usr/bin）布局通用。单条 -rpath 冒号
+        // 分隔多路径：lld 下多条 -rpath 会互相覆盖。
         let rpath = lib.canonicalize().unwrap_or_else(|_| lib.clone());
         println!(
-            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            "cargo:rustc-link-arg=-Wl,-rpath,{}:$ORIGIN/../share/xime/lib",
             rpath.to_string_lossy()
         );
     } else {

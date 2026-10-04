@@ -99,7 +99,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::PageSelected(i) => {
             state.settings.current_page = i;
             // 本地模型状态只在本页可见时轮询（进页立刻拉一次，离开就停）。
-            #[cfg(all(feature = "voice-page", windows))]
+            #[cfg(feature = "voice-page")]
             {
                 let on_voice_page = crate::pages::voice_page_index() == Some(i);
                 state.settings.speech_server.set_active(on_voice_page);
@@ -462,23 +462,23 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                     .show_message("复制失败（无文本？）".to_string());
             }
         }
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         Message::SpeechModelDownload(id) => {
             state.settings.speech_server.download(&id);
         }
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         Message::SpeechModelDelete(id) => {
             state.settings.speech_server.delete(&id);
         }
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         Message::SpeechModelSelect(id) => {
             state.settings.speech_server.select(&id);
         }
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         Message::SpeechPreviewToggle => {
             state.settings.speech_server.toggle_preview();
         }
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         Message::SpeechModelCopy => {
             if state.settings.speech_server.copy_text() {
                 state.settings.show_message("识别文本已复制".to_string());

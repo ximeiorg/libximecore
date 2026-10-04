@@ -16,7 +16,7 @@ pub mod pair;
 pub mod smart_suggestion;
 #[cfg(target_os = "linux")]
 pub mod sync;
-#[cfg(all(feature = "voice-page", windows))]
+#[cfg(feature = "voice-page")]
 pub mod voice;
 
 use crate::components::widgets::{medium, nav_button_style, scroll_style, semibold, sidebar_style};
@@ -62,7 +62,7 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
         let mut smart_items: Vec<(&'static str, &'static str)> = Vec::with_capacity(2);
         #[cfg(feature = "smart-suggestion-page")]
         smart_items.push(("icons/thinking.svg", "智能联想"));
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         smart_items.push(("icons/mic.svg", "语音转文本"));
         groups.push(("智能", smart_items));
     }
@@ -104,7 +104,7 @@ pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
 ///
 /// 用标题反查下标而不是写死数字：侧栏分组顺序是会变的（这页现在就在「输入」
 /// 分组里），写死迟早错位，而且错位是静默的（轮询挂到别的页上）。
-#[cfg(all(feature = "voice-page", windows))]
+#[cfg(feature = "voice-page")]
 pub fn voice_page_index() -> Option<usize> {
     sidebar_items()
         .iter()
@@ -243,7 +243,7 @@ pub fn page_content<'a>(
         "剪贴板" => clipboard::view(settings, colors),
         #[cfg(feature = "backup-page")]
         "同步与备份" => backup::view(settings, colors),
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         "语音转文本" => voice::view(settings, colors),
         _ => about::view(settings, colors),
     }

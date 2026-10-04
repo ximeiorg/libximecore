@@ -7,7 +7,7 @@
 //!
 //! 页面不在前台时不去打扰 server（`set_active`），进页面/操作后 250ms 轮询一次。
 
-#![cfg(all(feature = "voice-page", windows))]
+#![cfg(feature = "voice-page")]
 
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
 
 /// 一个可管理的语音模型（`xime-speech` 注册表的镜像）。
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
 pub struct SpeechModelEntry {
     /// 模型 id（= 模型目录名）。
     pub id: String,
@@ -113,8 +114,9 @@ impl std::fmt::Display for SpeechModelChoice {
     }
 }
 
-/// server 侧语音状态镜像。
-#[derive(Clone, Debug, Default, PartialEq)]
+/// server 侧语音状态镜像（serde 用于从 DBus JSON 反序列化 daemon 快照）。
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
 pub struct SpeechServerStatus {
     /// 引擎状态：`idle` / `loading` / `listening`。
     pub state: String,
@@ -577,8 +579,10 @@ mod tests {
 
     #[test]
     fn choices_carry_name_size_and_state_not_raw_id() {
-        let mut state = SpeechModelState::default();
-        state.status = Some(status("idle", true));
+        let state = SpeechModelState {
+            status: Some(status("idle", true)),
+            ..SpeechModelState::default()
+        };
         let choices = state.choices();
         assert_eq!(choices.len(), 2);
         let labels: Vec<String> = choices.iter().map(|c| c.label.clone()).collect();
@@ -596,8 +600,10 @@ mod tests {
 
     #[test]
     fn selected_entry_and_backend_label_follow_status() {
-        let mut state = SpeechModelState::default();
-        state.status = Some(status("idle", true));
+        let state = SpeechModelState {
+            status: Some(status("idle", true)),
+            ..SpeechModelState::default()
+        };
         assert_eq!(
             state.selected_entry().map(|e| e.id.as_str()),
             Some("zipformer-zh-int8")

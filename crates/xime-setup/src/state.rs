@@ -670,19 +670,19 @@ pub enum Message {
     #[cfg(windows)]
     SpeechCopy,
     /// 本地模型：下载（模型 id）。
-    #[cfg(all(feature = "voice-page", windows))]
+    #[cfg(feature = "voice-page")]
     SpeechModelDownload(String),
     /// 本地模型：删除目录（模型 id）。
-    #[cfg(all(feature = "voice-page", windows))]
+    #[cfg(feature = "voice-page")]
     SpeechModelDelete(String),
     /// 本地模型：切换当前使用的模型（模型 id）。
-    #[cfg(all(feature = "voice-page", windows))]
+    #[cfg(feature = "voice-page")]
     SpeechModelSelect(String),
     /// 本地模型：试听起停（结果只在本页显示，不上屏）。
-    #[cfg(all(feature = "voice-page", windows))]
+    #[cfg(feature = "voice-page")]
     SpeechPreviewToggle,
     /// 本地模型：复制试听文本到剪贴板。
-    #[cfg(all(feature = "voice-page", windows))]
+    #[cfg(feature = "voice-page")]
     SpeechModelCopy,
     /// 词典管理：刷新（重读词典列表，选中词典不变）。
     #[cfg(any(windows, feature = "dict-page"))]
@@ -824,7 +824,7 @@ pub struct SettingsState {
     #[cfg(windows)]
     pub speech: SpeechState,
     /// 本地离线模型（server 侧引擎）的镜像：模型列表 / 下载进度 / 试听。
-    #[cfg(all(feature = "voice-page", windows))]
+    #[cfg(feature = "voice-page")]
     pub speech_server: crate::speech_models::SpeechModelState,
     /// 词典管理（用户词典列表 + 备份/恢复/导出/导入）。
     #[cfg(any(windows, feature = "dict-page"))]
@@ -873,7 +873,7 @@ impl SettingsState {
             rime_sync: RimeSyncState::load(),
             #[cfg(all(feature = "voice-page", windows))]
             speech: SpeechState::default(),
-            #[cfg(all(feature = "voice-page", windows))]
+            #[cfg(feature = "voice-page")]
             speech_server: crate::speech_models::SpeechModelState::default(),
             #[cfg(any(windows, feature = "dict-page"))]
             dict_manage: DictManageState::default(),
@@ -1395,7 +1395,7 @@ impl SettingsState {
         #[cfg(all(feature = "voice-page", windows))]
         self.speech.poll();
         // 本地模型状态：只在本页可见时真的发 IPC（见 SpeechModelState::poll）。
-        #[cfg(all(feature = "voice-page", windows))]
+        #[cfg(feature = "voice-page")]
         self.speech_server.poll();
     }
 

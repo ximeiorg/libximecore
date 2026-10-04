@@ -58,6 +58,8 @@ rfd.workspace = true
 # （KDE/GNOME 标配），不引 GTK 构建依赖。
 [target.'cfg(target_os = "linux")'.dependencies]
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+# 语音页复制识别文本（arboard 带 wayland-data-control，KDE 可用）。
+arboard.workspace = true
 
 [features]
 default = []

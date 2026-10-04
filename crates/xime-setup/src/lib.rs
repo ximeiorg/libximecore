@@ -6,15 +6,15 @@ pub mod state;
 pub mod theme;
 pub mod webdav;
 
-#[cfg(all(feature = "voice-page", windows))]
+#[cfg(feature = "voice-page")]
 pub mod speech;
 
 /// 本地语音模型（server 侧引擎）在设置端的镜像与回调槽。
-#[cfg(all(feature = "voice-page", windows))]
+#[cfg(feature = "voice-page")]
 pub mod speech_models;
 
 pub use app::{run, SettingsApp};
-#[cfg(all(feature = "voice-page", windows))]
+#[cfg(feature = "voice-page")]
 pub use speech_models::{
     set_notify_speech_delete, set_notify_speech_download, set_notify_speech_select,
     set_notify_speech_status, set_notify_speech_test_start, set_notify_speech_test_stop,
