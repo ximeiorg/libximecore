@@ -73,6 +73,7 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
         feature = "backup-page"
     ))]
     {
+        #[allow(unused_mut)] // pair-page 单独启用时仍需 push
         let mut sync_items: Vec<(&'static str, &'static str)> = Vec::new();
         #[cfg(feature = "pair-page")]
         sync_items.push(("icons/sync.svg", "设备关联"));

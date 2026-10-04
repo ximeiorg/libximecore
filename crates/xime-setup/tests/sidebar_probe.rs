@@ -3,7 +3,7 @@
 fn sidebar_contains_voice_entry() {
     let groups = xime_setup_lib::pages::sidebar_groups();
     for (name, items) in &groups {
-        for (icon, label) in items {
+        for (_icon, label) in items {
             println!("组[{name}] {label}");
         }
     }
