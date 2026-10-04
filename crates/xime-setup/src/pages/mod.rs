@@ -15,7 +15,6 @@ pub mod pair;
 #[cfg(feature = "smart-suggestion-page")]
 pub mod smart_suggestion;
 #[cfg(target_os = "linux")]
-pub mod sync;
 #[cfg(feature = "voice-page")]
 pub mod voice;
 
@@ -75,8 +74,6 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
     ))]
     {
         let mut sync_items: Vec<(&'static str, &'static str)> = Vec::new();
-        #[cfg(target_os = "linux")]
-        sync_items.push(("icons/sync.svg", "同步"));
         #[cfg(feature = "pair-page")]
         sync_items.push(("icons/sync.svg", "设备关联"));
         #[cfg(feature = "clipboard-page")]
@@ -235,8 +232,6 @@ pub fn page_content<'a>(
         "插件管理" => plugins::view(settings, colors),
         #[cfg(feature = "smart-suggestion-page")]
         "智能联想" => smart_suggestion::view(settings, colors),
-        #[cfg(target_os = "linux")]
-        "同步" => sync::view(settings, colors),
         #[cfg(feature = "pair-page")]
         "设备关联" => pair::view(settings, colors),
         #[cfg(feature = "clipboard-page")]
