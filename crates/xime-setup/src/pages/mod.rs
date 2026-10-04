@@ -52,10 +52,10 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
         ),
     ];
 
-    // 「智能」组：智能联想 + 语音转文本（仅 Windows）。
+    // 「智能」组：智能联想 + 语音转文本（各条目自门控）。
     #[cfg(any(
         feature = "smart-suggestion-page",
-        all(feature = "voice-page", windows)
+        feature = "voice-page"
     ))]
     {
         // with_capacity 绕开 vec_init_then_push：每项各自 cfg 门控，无法写成 vec! 字面量
