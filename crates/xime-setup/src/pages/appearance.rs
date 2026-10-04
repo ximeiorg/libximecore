@@ -1,5 +1,5 @@
 use crate::components::settings::{settings_group, settings_item, settings_page};
-use crate::components::widgets::{button_primary, number_input};
+use crate::components::widgets::{button_primary, number_input, pick_list_style};
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{pick_list, row};
@@ -85,6 +85,7 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                             Some(dark_mode_option),
                             |mode| Message::DarkModeChanged(mode.to_value()),
                         )
+                        .style(move |_theme, status| pick_list_style(colors, status))
                         .into(),
                     ),
                     settings_item(
@@ -96,6 +97,7 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                             Some(light_scheme),
                             Message::ColorSchemeLightChanged,
                         )
+                        .style(move |_theme, status| pick_list_style(colors, status))
                         .into(),
                     ),
                     settings_item(
@@ -107,6 +109,7 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                             Some(dark_scheme),
                             Message::ColorSchemeDarkChanged,
                         )
+                        .style(move |_theme, status| pick_list_style(colors, status))
                         .into(),
                     ),
                 ],

@@ -52,10 +52,7 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
     ];
 
     // 「智能」组：智能联想 + 语音转文本（各条目自门控）。
-    #[cfg(any(
-        feature = "smart-suggestion-page",
-        feature = "voice-page"
-    ))]
+    #[cfg(any(feature = "smart-suggestion-page", feature = "voice-page"))]
     {
         // with_capacity 绕开 vec_init_then_push：每项各自 cfg 门控，无法写成 vec! 字面量
         let mut smart_items: Vec<(&'static str, &'static str)> = Vec::with_capacity(2);

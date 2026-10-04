@@ -1,6 +1,6 @@
 use crate::components::widgets::{
-    badge, button_danger, button_disabled, button_primary, card_style, semibold, switch,
-    text_button, RADIUS_MD,
+    badge, button_danger, button_disabled, button_primary, card_style, pick_list_style, semibold,
+    switch, text_button, RADIUS_MD,
 };
 use crate::state::{
     MarketModel, MarketModelState, MarketPlugin, MarketPluginState, MarketSchema,
@@ -1037,17 +1037,7 @@ fn version_selector<'a>(
         .padding([4, 8])
         .text_size(12)
         .width(Length::Shrink)
-        .style(move |_theme, _status| iced::widget::pick_list::Style {
-            text_color: colors.primary,
-            background: Background::Color(colors.surface_variant),
-            border: Border {
-                color: colors.border,
-                width: 1.0,
-                radius: border::radius(8.0),
-            },
-            handle_color: colors.primary,
-            placeholder_color: colors.foreground_muted,
-        })
+        .style(move |_theme, status| pick_list_style(&colors, status))
         .into()
 }
 

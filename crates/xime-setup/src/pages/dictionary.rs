@@ -11,8 +11,8 @@ use iced::Element;
 
 #[cfg(any(windows, feature = "dict-page"))]
 use crate::components::widgets::{
-    button_danger, button_disabled, button_primary, card_style, medium, modal_dialog, semibold,
-    text_button, text_input_style,
+    button_danger, button_disabled, button_primary, card_style, medium, modal_dialog,
+    pick_list_style, semibold, text_button, text_input_style,
 };
 #[cfg(any(windows, feature = "dict-page"))]
 use crate::state::{CustomPhraseState, DICT_ENTRIES_PAGE_SIZE};
@@ -298,6 +298,7 @@ fn user_dict_view<'a>(
         .into()
     } else {
         pick_list(dict_options, current, Message::DictSelect)
+            .style(move |_theme, status| pick_list_style(colors, status))
             .placeholder("选择词典")
             .width(Length::Fixed(180.0))
             .into()
@@ -532,7 +533,8 @@ fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
                 Message::DictPhraseSchemaChanged(chosen.id)
             })
             .placeholder("选择方案")
-            .width(Length::Fixed(180.0)),
+            .width(Length::Fixed(180.0))
+            .style(move |_theme, status| pick_list_style(colors, status)),
         );
     }
     toolbar = toolbar.push(Space::new().width(Length::Fill));
