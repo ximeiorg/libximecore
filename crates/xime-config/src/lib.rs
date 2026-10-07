@@ -44,6 +44,11 @@ pub struct XimeConfig {
     pub color_schemes: HashMap<String, ColorScheme>,
     #[serde(default)]
     pub pair_secret: String,
+    /// 日志级别（error/warn/info/debug/trace），作用于本项目自己的 crate；
+    /// 三方库固定 info（三方 debug 量极大且格式化发生在日志调用线程上）。
+    /// 未设或非法值回退 info；进程环境变量 RUST_LOG 仍优先于本配置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_level: Option<String>,
 }
 
 impl XimeConfig {
@@ -195,6 +200,7 @@ impl XimeConfig {
             } else {
                 over.pair_secret
             },
+            log_level: over.log_level.clone().or(base.log_level),
         }
     }
 
@@ -281,6 +287,18 @@ impl XimeConfig {
     /// Returns e.g. "Ctrl" or "Shift" from `wubi_radicals.hotkeys.show_key`.
     pub fn get_last_key_root_binding(&self) -> String {
         self.wubi_radicals.hotkeys.show_key.clone()
+    }
+
+    /// 规范化后的日志级别：未设/非法回退 "info"，大小写不敏感、去首尾空白。
+    pub fn effective_log_level(&self) -> &str {
+        let raw = self.log_level.as_deref().unwrap_or("").trim();
+        match raw.to_ascii_lowercase().as_str() {
+            "error" => "error",
+            "warn" => "warn",
+            "debug" => "debug",
+            "trace" => "trace",
+            _ => "info",
+        }
     }
 }
 
@@ -391,6 +409,71 @@ fn dirs_or_home() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 日志级别解析：非法值必须静默回退 info 而不是让整个过滤器失效。
+    #[test]
+    fn effective_log_level_validation() {
+        for (raw, want) in [
+            (None, "info"),
+            (Some("debug"), "debug"),
+            (Some(" DEBUG "), "debug"),
+            (Some("Trace"), "trace"),
+            (Some("warn"), "warn"),
+            (Some("error"), "error"),
+            (Some(""), "info"),
+            (Some("verbose"), "info"),
+            (Some("debug; rm -rf"), "info"),
+        ] {
+            let cfg = XimeConfig {
+                log_level: raw.map(str::to_string),
+                ..XimeConfig::default()
+            };
+            assert_eq!(cfg.effective_log_level(), want, "raw = {raw:?}");
+        }
+    }
+
+    /// 合并语义：上层配置显式设置了 log_level 才覆盖；未设时保留下层值。
+    #[test]
+    fn merge_log_level_precedence() {
+        let base = XimeConfig {
+            log_level: Some("info".to_string()),
+            ..XimeConfig::default()
+        };
+        let over = XimeConfig {
+            log_level: Some("debug".to_string()),
+            ..XimeConfig::default()
+        };
+        assert_eq!(
+            XimeConfig::merge_configs(base.clone(), over).effective_log_level(),
+            "debug"
+        );
+
+        // 上层未设：保留下层的 debug（不能被空值打回 info）
+        let base = XimeConfig {
+            log_level: Some("debug".to_string()),
+            ..XimeConfig::default()
+        };
+        let over = XimeConfig::default();
+        assert_eq!(
+            XimeConfig::merge_configs(base, over).effective_log_level(),
+            "debug"
+        );
+    }
+
+    /// 序列化不回写未设置的 log_level（setup 保存配置不应引入 null/空键）。
+    #[test]
+    fn log_level_absent_is_not_serialized() {
+        let cfg = XimeConfig::default();
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        assert!(!yaml.contains("log_level"), "未设置时不应序列化: {yaml}");
+
+        let cfg = XimeConfig {
+            log_level: Some("debug".to_string()),
+            ..XimeConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&cfg).unwrap();
+        assert!(yaml.contains("log_level: debug"));
+    }
 
     /// 默认日志过滤必须能被 EnvFilter 解析：写错指令时 `EnvFilter::new` 只是
     /// 静默丢掉那一条，会把我们自己的 debug 日志一起吞掉而无人察觉。

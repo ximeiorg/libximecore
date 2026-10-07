@@ -1,3 +1,8 @@
+# 日志级别（error/warn/info/debug/trace）：作用于本项目自己的 crate，
+# 三方库固定 info；环境变量 RUST_LOG 优先于本配置。排查问题时改 debug
+# 并重启输入法（设置里保存任意配置或重载样式也会热生效）。
+# log_level: info
+
 wubi_radicals:
   hotkeys:
     show_key: "Ctrl"
