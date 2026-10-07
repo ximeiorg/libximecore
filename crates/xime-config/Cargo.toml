@@ -20,6 +20,9 @@ thiserror.workspace = true
 # 方案包清单：文件内容 sha256（冲突检测/共享判断）与十六进制编码
 sha2.workspace = true
 hex.workspace = true
+# 启动部署复制后保留源文件 mtime：下次启动可只靠 (len, mtime) stat 判断
+# "是否需要比较"，避免每次启动整文件读盘比对（五笔词典数 MB 级）。
+filetime = "0.2.29" 
 
 [dev-dependencies]
 tempfile.workspace = true

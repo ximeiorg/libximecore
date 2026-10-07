@@ -89,7 +89,14 @@ async fn handle_socket_impl(socket: WebSocket, state: SharedState) {
                             return;
                         }
                     }
-                    Err(_) => return, // 广播源关闭（服务停机）
+                    // Lagged = 慢客户端落后超过通道容量被丢弃了 n 条，
+                    // 通道仍存活——踢掉连接是误判（大帧 + 慢网络很容易积压）。
+                    // 跳过后继续推流，客户端靠下一次全量拉取补齐。
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("WS client lagged, skipped {n} events");
+                        continue;
+                    }
+                    Err(_) => return, // Closed：广播源关闭（服务停机）
                 }
             }
         }
@@ -151,7 +158,12 @@ async fn handle_client_message(
             }
         }
         Message::Binary(data) => {
-            // 附件数据帧：落在 pending_file 声明过的文件名下
+            // 附件数据帧：落在 pending_file 声明过的文件名下。
+            // tungstenite 默认放行 64MiB 消息，max_frame_size 只约束 HTTP
+            // body——这里按同一上限复核，防止 oversized 附件绕过配置落盘。
+            if data.len() > state.clipboard_cfg.max_frame_size {
+                return false;
+            }
             if let Some(name) = pending_file.take()
                 && ClipboardService
                     .put_file(&state.clipboard, &name, &data)

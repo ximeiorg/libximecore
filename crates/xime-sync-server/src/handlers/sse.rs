@@ -58,7 +58,10 @@ async fn run_sse_stream(
     last_event_id: u64,
     heartbeat: Duration,
 ) {
-    // 1. 补发历史中序号 > last_event_id 的事件
+    // 1. 先订阅实时广播、再补发历史：顺序反过来会在"读完历史"与
+    // "订阅完成"之间留下丢事件窗口（这条变更既不在快照里、广播也收不到）。
+    // 订阅到广播后，历史里与其重叠的序号由下方 `ev.seq <= max_sent` 去重。
+    let mut broadcast_rx = ctx.broadcast.subscribe();
     let mut max_sent = last_event_id;
     {
         let history = ctx.history.read().await;
@@ -71,9 +74,6 @@ async fn run_sse_stream(
             }
         }
     }
-
-    // 2. 订阅实时广播
-    let mut broadcast_rx = ctx.broadcast.subscribe();
     let mut heartbeat_interval = tokio::time::interval(heartbeat);
     heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -92,7 +92,13 @@ async fn run_sse_stream(
                             return;
                         }
                     }
-                    Err(_) => return, // 广播源关闭
+                    // Lagged = 被广播通道丢弃了 n 条但通道仍存活，继续推流
+                    //（客户端靠全量拉取补齐），不能当成服务停机断流。
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("SSE client lagged, skipped {n} events");
+                        continue;
+                    }
+                    Err(_) => return, // Closed：广播源关闭
                 }
             }
             // 心跳保活

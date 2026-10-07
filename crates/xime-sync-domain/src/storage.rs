@@ -39,6 +39,9 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 /// history/{id}.json        # 历史记录（P7）
 /// ```
 #[async_trait]
+// 新版 clippy：async_trait 给每个方法生成 #[must_use] 的 boxed Future，
+// 而 Result 本身已是 must_use，触发 double_must_use——宏展开问题，非代码缺陷。
+#[allow(clippy::double_must_use)]
 pub trait Storage: Send + Sync {
     /// 写入 key → blob（覆盖）。
     async fn put(&self, key: &str, data: &[u8]) -> Result<()>;

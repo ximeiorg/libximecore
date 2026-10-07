@@ -1962,6 +1962,13 @@ impl SettingsState {
     }
 
     pub fn delete_market_package(&mut self, schema_id: &str) {
+        // 与 delete_market_model 同型守卫：下载/安装中删包会让下载线程
+        // 往已删目录回写残缺包、或让安装线程从被删目录读包。
+        if self.market_schema.downloading.as_deref() == Some(schema_id)
+            || self.market_schema.installing.as_deref() == Some(schema_id)
+        {
+            return;
+        }
         let sid = schema_id.to_string();
         std::thread::spawn(move || {
             let pkg_dir = market_dir().join(&sid);
@@ -2276,12 +2283,24 @@ impl ClipboardState {
         let content = toml::to_string(&cfg).map_err(|e| e.to_string())?;
         let parent = self.config_path.parent().ok_or("配置目录无效")?;
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        std::fs::write(&self.config_path, content).map_err(|e| e.to_string())?;
+        // 含明文密码：必须 0600 一步创建——先 0644 写入再补 chmod 存在同机
+        // 其他用户可读的窗口。
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.config_path, std::fs::Permissions::from_mode(0o600));
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&self.config_path)
+                .map_err(|e| e.to_string())?;
+            f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&self.config_path, content).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -2359,7 +2378,13 @@ impl ClipboardState {
 /// 共享 blocking 客户端（reqwest blocking 每个实例内建 runtime 线程，必须复用）。
 pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::blocking::Client::new)
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(0))
+            .build()
+            .expect("failed to build http client")
+    })
 }
 
 #[cfg(any(feature = "clipboard-page", feature = "backup-page"))]
@@ -4377,12 +4402,24 @@ impl BackupState {
         let content = toml::to_string(&cfg).map_err(|e| e.to_string())?;
         let parent = self.config_path.parent().ok_or("配置目录无效")?;
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        std::fs::write(&self.config_path, content).map_err(|e| e.to_string())?;
+        // 含明文密码：必须 0600 一步创建——先 0644 写入再补 chmod 存在同机
+        // 其他用户可读的窗口。
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&self.config_path, std::fs::Permissions::from_mode(0o600));
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&self.config_path)
+                .map_err(|e| e.to_string())?;
+            f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&self.config_path, content).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -4476,8 +4513,14 @@ impl BackupState {
         self.message = None;
         let snapshot = self.clone();
         std::thread::spawn(move || {
-            let result = op(&snapshot);
-            *BACKUP_OUTCOME.lock().unwrap() = Some(result);
+            // catch_unwind：op 里跑的是插件/第三方代码（load_plugin_runtime），
+            // panic 不落结果信箱的话 busy 永不清除，备份页所有入口永久卡死。
+            let result =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(&snapshot))) {
+                    Ok(r) => r,
+                    Err(_) => Err("后台任务异常终止（panic），请重试".to_string()),
+                };
+            *BACKUP_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
         });
     }
 
@@ -5279,38 +5322,62 @@ fn download_file(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| anyhow::anyhow!("创建目录失败: {}", e))?;
     }
+    // 先写 .part 临时文件、全部成功后再 rename：直写最终路径的话，任何
+    // 中途失败都会留残缺文件在"已下载"位置（目录存在即被判为已下载，
+    // 之后安装永远失败且用户无从自愈）。
+    let tmp = dest.with_extension(format!(
+        "{}part.{}",
+        dest.extension()
+            .map(|e| format!("{}.part", e.to_string_lossy()))
+            .unwrap_or_else(|| "part".to_string()),
+        std::process::id()
+    ));
     let mut output =
-        std::fs::File::create(dest).map_err(|e| anyhow::anyhow!("创建文件失败: {}", e))?;
+        std::fs::File::create(&tmp).map_err(|e| anyhow::anyhow!("创建文件失败: {}", e))?;
 
-    let mut buf = [0u8; 8192];
-    let mut done: u64 = 0;
-    loop {
-        let n = response
-            .read(&mut buf)
-            .map_err(|e| anyhow::anyhow!("读取响应失败: {}", e))?;
-        if n == 0 {
-            break;
+    let result = (|| -> anyhow::Result<()> {
+        let mut buf = [0u8; 8192];
+        let mut done: u64 = 0;
+        loop {
+            let n = response
+                .read(&mut buf)
+                .map_err(|e| anyhow::anyhow!("读取响应失败: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            if let Some(h) = &mut hasher {
+                h.update(&buf[..n]);
+            }
+            output
+                .write_all(&buf[..n])
+                .map_err(|e| anyhow::anyhow!("写入文件失败: {}", e))?;
+            done += n as u64;
+            if total > 0 {
+                on_progress(done as f64 / total as f64);
+            }
         }
-        if let Some(h) = &mut hasher {
-            h.update(&buf[..n]);
+
+        if let (Some(h), Some(expected)) = (hasher, sha256) {
+            let actual = hex::encode(h.finalize());
+            if !actual.eq_ignore_ascii_case(expected.trim()) {
+                anyhow::bail!("文件校验失败（sha256 不匹配），文件可能不完整");
+            }
         }
-        output
-            .write_all(&buf[..n])
-            .map_err(|e| anyhow::anyhow!("写入文件失败: {}", e))?;
-        done += n as u64;
-        if total > 0 {
-            on_progress(done as f64 / total as f64);
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            drop(output);
+            std::fs::rename(&tmp, dest).map_err(|e| anyhow::anyhow!("落盘失败: {}", e))?;
+            Ok(())
+        }
+        Err(e) => {
+            drop(output);
+            std::fs::remove_file(&tmp).ok();
+            Err(e)
         }
     }
-
-    if let (Some(h), Some(expected)) = (hasher, sha256) {
-        let actual = hex::encode(h.finalize());
-        if !actual.eq_ignore_ascii_case(expected.trim()) {
-            std::fs::remove_file(dest).ok();
-            anyhow::bail!("文件校验失败（sha256 不匹配），文件可能不完整");
-        }
-    }
-    Ok(())
 }
 
 /// 递归收集解压目录下全部文件（相对路径统一 `/` 分隔，对齐归档条目路径）。

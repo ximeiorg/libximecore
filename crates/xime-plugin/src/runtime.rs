@@ -387,8 +387,15 @@ globalThis.__ximeSettle = function (value) {
 };
 
 // 沙箱屏蔽动态求值（require 已捕获原始 Function）
+// 注意：仅屏蔽 globalThis.Function/eval 不够——`(function(){}).constructor`
+// 仍能拿到原始 Function 动态求值，必须把 Function.prototype.constructor
+// 一并拆掉（正常插件代码不依赖函数的 .constructor）。
 Object.defineProperty(globalThis, 'eval', { value: undefined, writable: false, configurable: false });
 Object.defineProperty(globalThis, 'Function', { value: undefined, writable: false, configurable: false });
+if (globalThis.__ximeOriginalFunction && globalThis.__ximeOriginalFunction.prototype) {
+  Object.defineProperty(globalThis.__ximeOriginalFunction.prototype, 'constructor',
+    { value: null, writable: false, configurable: false });
+}
 "#;
 
 /// JS 插件运行时：一个插件一个独立 QuickJS Context（沙箱）。
@@ -570,6 +577,15 @@ impl PluginRuntime {
         setter.call(vec![value])?;
         let mut spins = 0u32;
         loop {
+            // 永不落定的 Promise（如 `new Promise(()=>{})`）不会执行任何
+            // JS 字节码，中断处理器永远没机会命中——循环必须自己检查
+            // deadline，否则硬超时失效，宿主线程（wayland/clipboard 桥）
+            // 被忙等到 MAX_SETTLE_SPINS。
+            if self.deadline_expired() {
+                return Err(ExecutionError::Internal(
+                    "执行超时（promise 未落定）".into(),
+                ));
+            }
             self.context.execute_pending_job()?;
             let state = global
                 .property("__ximeSettleState")?

@@ -29,11 +29,26 @@ impl Storage for LocalStorage {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        // 原子写：写临时文件 + rename，避免读到半截内容
-        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-        tokio::fs::write(&tmp, data).await?;
-        tokio::fs::rename(&tmp, &path).await?;
-        Ok(())
+        // 原子写：写临时文件 + rename，避免读到半截内容。
+        // 临时名必须带唯一后缀：仅 PID 的话，同进程两个并发 put 同一 key
+        // （多连接同时 file.set 同名附件）会写同一 tmp 互相截断后各自 rename，
+        // 发布交错内容。失败时清掉 tmp 残件。
+        static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
+        let write = tokio::fs::write(&tmp, data).await;
+        match write {
+            Ok(()) => {
+                tokio::fs::rename(&tmp, &path).await.inspect_err(|_| {
+                    let _ = std::fs::remove_file(&tmp);
+                })?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e.into())
+            }
+        }
     }
 
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {

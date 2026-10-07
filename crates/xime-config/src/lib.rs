@@ -213,12 +213,8 @@ impl XimeConfig {
         let content = serde_yaml::to_string(self)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create config dir: {}", e))?;
-        }
-
-        fs::write(&path, content).map_err(|e| format!("Failed to write config: {}", e))?;
+        atomic_write(&path, content.as_bytes())
+            .map_err(|e| format!("Failed to write config: {e}"))?;
 
         Ok(())
     }
@@ -304,6 +300,53 @@ impl XimeConfig {
 
 // Logging support (cross-platform)
 static LOG_GUARD: Mutex<Option<tracing_appender::non_blocking::WorkerGuard>> = Mutex::new(None);
+
+/// 原子覆盖写：先在同目录写临时文件（unix 下 0600，防多用户机器上的
+/// 短暂可读窗口）再 rename。崩溃/掉电最坏留下一个 `.tmp.<pid>` 残件，
+/// 目标文件要么是旧内容要么是新内容，不会是半截——所有"读-改-写"的
+/// 用户配置（短语表、词典补丁、插件注册表、方案清单）都应走这里。
+pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| std::io::Error::other("no parent directory"))?;
+    fs::create_dir_all(dir)?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("no file name"))?
+        .to_string_lossy();
+    let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
+
+    {
+        let mut f = open_private_file(&tmp)?;
+        f.write_all(data)?;
+    }
+    fs::rename(&tmp, path)
+}
+
+/// 以 0600 新建/截断文件（unix）；其他平台按默认权限。
+fn open_private_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+    }
+}
 
 /// 默认日志过滤：
 /// - **三方库**（wgpu / winit / glyphon / fontdb / hyper…）只到 `info`。它们的

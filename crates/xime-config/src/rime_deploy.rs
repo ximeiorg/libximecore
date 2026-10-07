@@ -221,6 +221,7 @@ pub fn ensure_bundled_rime_data(source_dirs: &[std::path::PathBuf], rime_dir: &s
         })
         .unwrap_or(false);
 
+    let mut failures: Vec<String> = Vec::new();
     for source in source_dirs {
         if !source.exists() {
             continue;
@@ -229,10 +230,26 @@ pub fn ensure_bundled_rime_data(source_dirs: &[std::path::PathBuf], rime_dir: &s
             // 升级路径：用户已弃用的 builtin 方案文件不强更。
             let enabled = read_enabled_schemas(rime_dir);
             let skip_builtin = !enabled.is_empty();
-            copy_changed_files(source, rime_dir, skip_builtin.then_some(&enabled));
+            failures.extend(copy_changed_files(
+                source,
+                rime_dir,
+                skip_builtin.then_some(&enabled),
+            ));
         } else {
-            copy_dir_contents(source, rime_dir);
+            failures.extend(copy_dir_contents(source, rime_dir));
         }
+    }
+    // 复制失败不能静默：磁盘满/权限问题会产出半更新的方案数据（schema 更新
+    // 而词典没落），用户侧表现为部署出"死会话"。daemon 启动时调用本函数，
+    // 此时日志已初始化，warn 即可见。
+    for f in &failures {
+        tracing::warn!("rime data deploy copy failed: {f}");
+    }
+    if !failures.is_empty() {
+        tracing::warn!(
+            "rime data deploy finished with {} failed file(s); check disk space/permissions",
+            failures.len()
+        );
     }
 }
 
@@ -270,9 +287,42 @@ fn is_unused_builtin_file(
     builtin_ids.contains(id) && !enabled.iter().any(|e| e == id)
 }
 
+/// (len, mtime 纳秒) 签名：stat 即得，用于跳过"自上次复制后没变过"的文件。
+type FileSignature = Option<(u64, i128)>;
+
+fn file_signature(path: &std::path::Path) -> FileSignature {
+    use std::time::UNIX_EPOCH;
+    std::fs::metadata(path).ok().map(|m| {
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        (m.len(), mtime as i128)
+    })
+}
+
+/// 复制并把目标文件的 mtime 改成源文件的：fs::copy 不保留时间戳，不回写的话
+/// 下次启动 (len, mtime) 永远对不上，stat 短路就失效了。
+fn copy_preserving_mtime(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::copy(src, dst)?;
+    // filetime 支持 unix/windows；失败不致命（只是下次多一次内容比对）
+    if let Ok(mtime) = std::fs::metadata(src).and_then(|m| m.modified()) {
+        let _ = filetime::set_file_mtime(dst, filetime::FileTime::from_system_time(mtime));
+    }
+    Ok(())
+}
+
 /// 升级复制：仅当目标缺失或内容不同，且文件名不含 "custom"（保护用户定制）。
 /// `skip` 传入用户启用列表时，未启用的 builtin 方案文件不再强更。
-fn copy_changed_files(src: &std::path::Path, dst: &std::path::Path, skip: Option<&[String]>) {
+/// 返回失败的文件描述（不中断整体复制，逐个上报）。
+fn copy_changed_files(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    skip: Option<&[String]>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
     let builtin_ids: std::collections::HashSet<String> = match skip {
         Some(_) => std::fs::read_dir(src)
             .map(|entries| {
@@ -289,49 +339,72 @@ fn copy_changed_files(src: &std::path::Path, dst: &std::path::Path, skip: Option
             .unwrap_or_default(),
         None => Default::default(),
     };
-    if let Ok(entries) = std::fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
-            let dest = dst.join(entry.file_name());
-            if ft.is_dir() {
-                let _ = std::fs::create_dir_all(&dest);
-                copy_changed_files(&entry.path(), &dest, skip);
-            } else {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if name.contains("custom") {
+    let Ok(entries) = std::fs::read_dir(src) else {
+        failures.push(format!("read_dir {}: {}", src.display(), "failed"));
+        return failures;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        let dest = dst.join(entry.file_name());
+        if ft.is_dir() {
+            let _ = std::fs::create_dir_all(&dest);
+            failures.extend(copy_changed_files(&entry.path(), &dest, skip));
+        } else {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if name.contains("custom") {
+                continue;
+            }
+            if let Some(enabled) = skip {
+                if is_unused_builtin_file(&name, &builtin_ids, enabled) {
                     continue;
                 }
-                if let Some(enabled) = skip {
-                    if is_unused_builtin_file(&name, &builtin_ids, enabled) {
-                        continue;
-                    }
-                }
-                let needs_copy = match std::fs::read(&dest) {
+            }
+            // (len, mtime) 一致 = 自上次复制后源文件没变过：stat 短路，不读盘。
+            // 签名不一致（含首次）才读内容比对。
+            let needs_copy = match (file_signature(&entry.path()), file_signature(&dest)) {
+                (Some(s), Some(d)) if s == d => false,
+                (Some(s), Some(d)) if s.0 != d.0 => true,
+                _ => match std::fs::read(&dest) {
                     Ok(existing) => existing != std::fs::read(entry.path()).unwrap_or_default(),
                     Err(_) => true,
-                };
-                if needs_copy {
-                    let _ = std::fs::copy(entry.path(), &dest);
+                },
+            };
+            if needs_copy {
+                if let Err(e) = copy_preserving_mtime(&entry.path(), &dest) {
+                    failures.push(format!(
+                        "{} -> {}: {e}",
+                        entry.path().display(),
+                        dest.display()
+                    ));
                 }
             }
         }
     }
+    failures
 }
 
-/// 首装全量复制（递归）。
-fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) {
-    if let Ok(entries) = std::fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let Ok(ft) = entry.file_type() else { continue };
-            let dest = dst.join(entry.file_name());
-            if ft.is_dir() {
-                let _ = std::fs::create_dir_all(&dest);
-                copy_dir_contents(&entry.path(), &dest);
-            } else {
-                let _ = std::fs::copy(entry.path(), &dest);
-            }
+/// 首装全量复制（递归）。返回失败的文件描述。
+fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Vec<String> {
+    let mut failures = Vec::new();
+    let Ok(entries) = std::fs::read_dir(src) else {
+        failures.push(format!("read_dir {}: failed", src.display()));
+        return failures;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        let dest = dst.join(entry.file_name());
+        if ft.is_dir() {
+            let _ = std::fs::create_dir_all(&dest);
+            failures.extend(copy_dir_contents(&entry.path(), &dest));
+        } else if let Err(e) = copy_preserving_mtime(&entry.path(), &dest) {
+            failures.push(format!(
+                "{} -> {}: {e}",
+                entry.path().display(),
+                dest.display()
+            ));
         }
     }
+    failures
 }
 
 #[cfg(test)]
