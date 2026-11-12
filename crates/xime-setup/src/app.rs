@@ -319,6 +319,12 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::CornerRadiusChanged(v) => {
             state.settings.appearance.corner_radius = v;
         }
+        Message::HorizontalChanged(v) => {
+            state.settings.appearance.horizontal = v;
+        }
+        Message::AutoDetectChanged(v) => {
+            state.settings.appearance.auto_detect = v;
+        }
         Message::ColorSchemeLightChanged(scheme) => {
             use xime_config::ColorSchemeConfig;
             state.settings.appearance.color_scheme = match &state.settings.appearance.color_scheme {

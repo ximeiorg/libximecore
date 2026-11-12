@@ -1,7 +1,7 @@
 use crate::components::settings::{settings_group, settings_item, settings_page};
 use crate::components::widgets::{
     button_danger, button_disabled, button_primary, button_secondary, number_input,
-    pick_list_style,
+    pick_list_style, switch,
 };
 use crate::state::{Message, SettingsState};
 use crate::theme::ThemeColors;
@@ -160,6 +160,18 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
                             colors,
                             Message::CornerRadiusChanged,
                         ),
+                    ),
+                    settings_item(
+                        "候选栏横向排列",
+                        Some("开：候选横排；关：候选竖排（每行一个）"),
+                        colors,
+                        switch(appearance.horizontal, colors, Message::HorizontalChanged),
+                    ),
+                    settings_item(
+                        "数学计算",
+                        Some("数字开头自动识别为算式，按 = 或工具栏计算"),
+                        colors,
+                        switch(appearance.auto_detect, colors, Message::AutoDetectChanged),
                     ),
                 ],
             ),
