@@ -1,9 +1,20 @@
 # libximecore
 
-曦码（Xime）输入法的跨端核心库（Rust）。librime 引擎接入、配置与部署、剪贴板存储、JS 插件运行时、语音识别、剪贴板同步都由这里提供，macOS / Windows / Android / 服务端宿主共用。
+曦码（Xime）输入法的跨端核心库（Rust）。librime 引擎接入、配置与部署、剪贴板存储、JS 插件运行时、语音识别、剪贴板同步都由这里提供。
+
+宿主：
+
+| 平台 | 宿主 | 平台层 |
+| --- | --- | --- |
+| macOS | XimeYi（曦码·逸） | InputMethodKit |
+| Windows | XimeYao（曦码·曜） | TSF |
+| Linux | 设置界面、本地同步服务 | X11 / Wayland |
+| 桌面全平台 | ximed（剪贴板同步） | iced + 托盘 |
+
+Android 版不依赖本库，仅插件与语音的调用契约与此处保持一致。
 
 ```
-宿主  XimeYi (IMK) · XimeYao (TSF) · xime (JNI) · ximed (iced)
+XimeYi · XimeYao · Linux 桌面组件 · ximed
                       │
 ┌─────────────────────▼─────────────────────┐
 │ libximecore                               │
@@ -45,10 +56,10 @@ cargo build
 ```
 
 - `librime/` 为 submodule；系统存在 librime 时走 pkg-config，否则 CMake 现场编译，并自动拉取 rime-lua 插件。
-- 使用预编译库跑测试：
+- 使用预编译库跑测试（macOS 用 `DYLD_LIBRARY_PATH`，Linux 用 `LD_LIBRARY_PATH`）：
 
   ```bash
-  DYLD_LIBRARY_PATH=$HOME/vscode/libximecore/librime/dist/lib cargo test
+  DYLD_LIBRARY_PATH=/path/to/librime/dist/lib cargo test
   ```
 
 - `xime-speech` 不在 `default-members`，需显式构建：
