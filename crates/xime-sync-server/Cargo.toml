@@ -2,7 +2,7 @@
 name = "xime-sync-server"
 version.workspace = true
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 description = "Xime sync HTTP/WS/SSE server"
 repository.workspace = true
 

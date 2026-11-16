@@ -9,7 +9,7 @@ members = [
     "crates/xime-plugin",
     "crates/xime-speech",
     "crates/xime-setup",
-    # ---- 同步服务（store/service/server 为 MIT）----
+    # ---- 同步服务 ----
     "crates/xime-sync-store",
     "crates/xime-sync-service",
     "crates/xime-sync-server",
@@ -38,9 +38,7 @@ edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/ximeiorg/libximecore"
 
-# 许可说明：本 workspace 混合许可。
-# - librime / xime-config / xime-rime / xime-ipc / xime-plugin / xime-setup：GPL-3.0-or-later
-# - xime-sync-*（同步服务）：MIT（各自 Cargo.toml 中 license = "MIT"）
+# 许可说明：本 workspace 全部为 GPL-3.0-or-later。
 # - xime-sync-domain / xime-p2p：已迁到独立仓 libximep2p（GPL-3.0-or-later，git 依赖）
 [workspace.dependencies]
 # ---- 输入法核心 ----

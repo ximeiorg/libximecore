@@ -2,7 +2,7 @@
 name = "xime-sync-store"
 version.workspace = true
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 description = "Xime sync storage backends (local, history)"
 repository.workspace = true
 

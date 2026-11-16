@@ -2,7 +2,7 @@
 name = "xime-sync-service"
 version.workspace = true
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 description = "Xime clipboard sync business logic"
 repository.workspace = true
 
