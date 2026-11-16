@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | macOS | XimeYi（曦码·逸） | InputMethodKit |
 | Windows | XimeYao（曦码·曜） | TSF |
-| Linux | 设置界面、本地同步服务 | X11 / Wayland |
+| Linux | 设置界面、本地同步服务 | Wayland |
 | 桌面全平台 | ximed（剪贴板同步） | iced + 托盘 |
 
 Android 版不依赖本库，仅插件与语音的调用契约与此处保持一致。
