@@ -8,6 +8,7 @@ members = [
     "crates/xime-ipc",
     "crates/xime-plugin",
     "crates/xime-speech",
+    "crates/xime-infer",
     "crates/xime-setup",
     # ---- 同步服务 ----
     "crates/xime-sync-store",
@@ -19,6 +20,8 @@ members = [
 # SHERPA_ONNX_ARCHIVE_DIR），未准备的机器上会构建失败。默认成员排除它：
 # 需要时显式 `cargo build -p xime-speech`；宿主 workspace（winxime-server 等）
 # 经 path 依赖引用时不受影响。
+# xime-infer（candle）编译较重且 GPU feature 与平台相关，同样排除；
+# 需要时 `cargo test -p xime-infer`，macOS GPU 加 `--features metal`。
 default-members = [
     "crates/librime-sys2",
     "crates/librime",

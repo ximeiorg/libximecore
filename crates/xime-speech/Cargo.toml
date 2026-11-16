@@ -22,4 +22,6 @@ thiserror = { workspace = true }
 # sherpa-onnx 官方 Rust crate（Apache-2.0，与 C 库同步发版）。
 # 选 shared 链接（DLL 随 exe 旁置）：CPU 包/CUDA 包同 ABI 可替换，
 # 是「GPU 可选加速包」成立的前提；静态会把 ~90MB onnxruntime 打进 exe。
-sherpa-onnx = { version = "1.13.8", default-features = false, features = ["shared"] }
+sherpa-onnx = { version = "2.0.1", default-features = false, features = [
+    "shared",
+] }

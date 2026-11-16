@@ -39,6 +39,7 @@ XimeYi · XimeYao · Linux 桌面组件 · ximed
 | `xime-setup-lib` | iced 跨平台设置界面（页面按 feature 门控） |
 | `xime-plugin` | QuickJS 插件运行时：`.xipk` 包、manifest、能力白名单、超时熔断 |
 | `xime-speech` | 基于 sherpa-onnx 的流式语音识别推理封装 |
+| `xime-infer` | 基于 candle 的本地模型推理：笔画手写识别（CPU / Metal / CUDA，按 feature 分包） |
 | `xime-sync-store` | 同步存储后端（本地、历史） |
 | `xime-sync-service` | 同步业务逻辑（幂等写入、事件序号） |
 | `xime-sync-server` | HTTP / WS / SSE 同步服务端、TLS、鉴权 |
@@ -56,6 +57,8 @@ cargo build
 ```
 
 - `librime/` 为 submodule；系统存在 librime 时走 pkg-config，否则 CMake 现场编译，并自动拉取 rime-lua 插件。
+- `xime-infer`（candle）不在 `default-members`（编译较重），单独构建/测试：
+  `cargo test -p xime-infer`；macOS GPU 用 `--features metal`。
 - 使用预编译库跑测试（macOS 用 `DYLD_LIBRARY_PATH`，Linux 用 `LD_LIBRARY_PATH`）：
 
   ```bash

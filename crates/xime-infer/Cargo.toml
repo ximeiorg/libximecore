@@ -1,0 +1,28 @@
+[package]
+name = "xime-infer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "本地模型推理（candle）：笔画手写识别等，CPU / Metal / CUDA"
+
+[features]
+default = []
+# Apple GPU。非 macOS 开启会在编译期失败（candle 的约束），由宿主按平台选择。
+metal = ["candle-core/metal", "candle-nn/metal"]
+# NVIDIA GPU。CUDA 版与 CPU 版需用独立 target 目录（同 xime-speech 的分包纪律）。
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+# macOS CPU 上的 BLAS 加速（可选）。
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
+
+[dependencies]
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lib]
+# candle-nn 把 candle-core 重命名为 `candle`，rustdoc --test 只收到 `--extern
+# candle_core`，会报 E0463。本 crate 的文档示例不参与 doctest（用 `text` 标记）。
+doctest = false
