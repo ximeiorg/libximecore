@@ -325,31 +325,8 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::AutoDetectChanged(v) => {
             state.settings.appearance.auto_detect = v;
         }
-        Message::ColorSchemeLightChanged(scheme) => {
-            use xime_config::ColorSchemeConfig;
-            state.settings.appearance.color_scheme = match &state.settings.appearance.color_scheme {
-                ColorSchemeConfig::Simple(_) => ColorSchemeConfig::Named {
-                    light: scheme,
-                    dark: "slate_gray".to_string(),
-                },
-                ColorSchemeConfig::Named { dark, .. } => ColorSchemeConfig::Named {
-                    light: scheme,
-                    dark: dark.clone(),
-                },
-            };
-        }
-        Message::ColorSchemeDarkChanged(scheme) => {
-            use xime_config::ColorSchemeConfig;
-            state.settings.appearance.color_scheme = match &state.settings.appearance.color_scheme {
-                ColorSchemeConfig::Simple(_) => ColorSchemeConfig::Named {
-                    light: "lavender_purple".to_string(),
-                    dark: scheme,
-                },
-                ColorSchemeConfig::Named { light, .. } => ColorSchemeConfig::Named {
-                    light: light.clone(),
-                    dark: scheme,
-                },
-            };
+        Message::ColorSchemeChanged(scheme) => {
+            state.settings.appearance.color_scheme = scheme;
         }
         Message::DarkModeChanged(mode) => {
             state.settings.appearance.dark_mode = xime_config::DarkMode::Simple(mode);

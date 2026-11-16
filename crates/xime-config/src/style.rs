@@ -34,39 +34,8 @@ impl DarkMode {
     }
 }
 
-/// Color scheme config that supports both string and object formats.
-/// - String: `"lavender_purple"` (same scheme for light/dark)
-/// - Object: `{ light: "lavender_purple", dark: "slate_gray" }`
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(untagged)]
-pub enum ColorSchemeConfig {
-    /// Simple string (same scheme for light/dark)
-    Simple(String),
-    /// Object with separate light/dark schemes
-    Named { light: String, dark: String },
-}
-
-impl Default for ColorSchemeConfig {
-    fn default() -> Self {
-        ColorSchemeConfig::Simple("lavender_purple".to_string())
-    }
-}
-
-impl ColorSchemeConfig {
-    /// Get the scheme name for the given dark mode state.
-    pub fn scheme_name(&self, is_dark: bool) -> String {
-        match self {
-            ColorSchemeConfig::Simple(name) => name.clone(),
-            ColorSchemeConfig::Named { light, dark } => {
-                if is_dark {
-                    dark.clone()
-                } else {
-                    light.clone()
-                }
-            }
-        }
-    }
-}
+/// 默认配色方案 id。
+pub const DEFAULT_COLOR_SCHEME: &str = "lavender_purple";
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StyleConfig {
@@ -80,8 +49,14 @@ pub struct StyleConfig {
     pub horizontal: bool,
     #[serde(default = "default_corner_radius")]
     pub corner_radius: f32,
-    #[serde(default = "default_color_scheme")]
-    pub color_scheme: ColorSchemeConfig,
+    /// 配色方案 id（`color_schemes` 的键）。浅色与深色是这个方案自己的
+    /// `color` / `color_dark`、`candidate_text_color` / `_dark` 等成对字段，
+    /// 由 `dark_mode` 决定用哪一套，不再分别为明暗挑两套方案。
+    #[serde(
+        default = "default_color_scheme",
+        deserialize_with = "deserialize_color_scheme"
+    )]
+    pub color_scheme: String,
     #[serde(default = "default_dark_mode")]
     pub dark_mode: DarkMode,
 }
@@ -112,8 +87,34 @@ fn default_horizontal() -> bool {
 fn default_corner_radius() -> f32 {
     8.0
 }
-fn default_color_scheme() -> ColorSchemeConfig {
-    ColorSchemeConfig::Simple("lavender_purple".to_string())
+fn default_color_scheme() -> String {
+    DEFAULT_COLOR_SCHEME.to_string()
+}
+
+/// 兼容旧写法 `color_scheme: { light: a, dark: b }`：早期方案没有 `*_dark`
+/// 变体，只能拆成两套方案区分明暗；现在方案自身成对，读取时归并成一个 id，
+/// 保存时一律写回单值。
+fn deserialize_color_scheme<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Single(String),
+        Pair {
+            light: Option<String>,
+            dark: Option<String>,
+        },
+    }
+
+    Ok(match Compat::deserialize(deserializer)? {
+        Compat::Single(name) => name,
+        // 成对配置取 light（方案的"身份"）；只写了 dark 就取 dark。
+        Compat::Pair { light, dark } => light
+            .or(dark)
+            .unwrap_or_else(|| DEFAULT_COLOR_SCHEME.to_string()),
+    })
 }
 fn default_dark_mode() -> DarkMode {
     DarkMode::Simple(2)

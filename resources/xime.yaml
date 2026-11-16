@@ -26,10 +26,8 @@ style:
   candidate_count: 5          # 落成 rime 的 menu/page_size，改动需重新部署
   horizontal: true
   corner_radius: 8.0
-  # 浅色 / 深色配色：color_schemes 中的 id
-  color_scheme:
-    light: lavender_purple
-    dark: slate_gray
+  # 配色方案 id（color_schemes 的键）。浅色与深色是方案内成对的变体，由 dark_mode 选择。
+  color_scheme: lavender_purple
   dark_mode: 2                # 0=浅色 1=深色 2=跟随系统
 
 # ── 配色方案 ──

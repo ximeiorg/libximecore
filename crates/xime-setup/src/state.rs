@@ -11,8 +11,8 @@ use xime_config::schema_manifest::{
 /// 供页面层判断两个 id 是否指向同一个方案包（忽略大小写/分隔符/版本尾巴）。
 pub use xime_config::schema_manifest::same_package_id as package_id_eq;
 use xime_config::{
-    deploy_all, get_data_dirs, ColorSchemeConfig, DarkMode, SchemaConfig, SchemaConfigManager,
-    SchemaInfo, SchemaManager, XimeConfig,
+    deploy_all, get_data_dirs, ColorScheme, DarkMode, SchemaConfig, SchemaConfigManager, SchemaInfo,
+    SchemaManager, XimeConfig,
 };
 
 static MARKET_TASK_RESULT: OnceLock<Mutex<Option<MarketTaskResult>>> = OnceLock::new();
@@ -817,10 +817,8 @@ pub enum Message {
     HorizontalChanged(bool),
     /// 外观：数字开头自动识别（数学计算）开关切换。
     AutoDetectChanged(bool),
-    /// 外观：浅色模式配色方案变更。
-    ColorSchemeLightChanged(String),
-    /// 外观：深色模式配色方案变更。
-    ColorSchemeDarkChanged(String),
+    /// 外观：配色方案变更（方案的浅色 / 深色变体由 `dark_mode` 选择）。
+    ColorSchemeChanged(String),
     /// 外观：深色模式变更（0=浅色, 1=深色, 2=跟随系统）。
     DarkModeChanged(u8),
     /// 外观：保存。
@@ -1222,15 +1220,10 @@ impl SettingsState {
     }
 
     fn get_primary_color(&self) -> u32 {
-        let is_dark = self
-            .appearance
-            .dark_mode
-            .is_dark(self.system_theme.is_dark());
-        let scheme_name = self.appearance.color_scheme.scheme_name(is_dark);
         self.appearance
             .available_color_schemes
             .iter()
-            .find(|(id, _, _)| *id == scheme_name)
+            .find(|(id, _, _)| *id == self.appearance.color_scheme)
             .map(|(_, _, color)| *color)
             .unwrap_or(0x8F73E2)
     }
@@ -1310,6 +1303,8 @@ impl SettingsState {
             .iter()
             .map(|(id, scheme)| (id.clone(), scheme.name.clone(), scheme.primary_color))
             .collect();
+        // 预览要读窗背景与候选色，整份留下（方案数量有限，克隆代价可忽略）。
+        self.appearance.color_schemes = config.color_schemes.clone();
         self.appearance.font_size = config.style.font_size as f64;
         self.appearance.candidate_count = config.style.candidate_count;
         self.appearance.corner_radius = config.style.corner_radius as f64;
@@ -6431,9 +6426,12 @@ pub struct AppearanceState {
     pub horizontal: bool,
     /// 数字开头自动识别（数学计算）开关。对应配置 `calculator.auto_detect`。
     pub auto_detect: bool,
-    pub color_scheme: ColorSchemeConfig,
+    /// 当前配色方案 id；浅色 / 深色是这个方案自己成对的变体字段。
+    pub color_scheme: String,
     pub dark_mode: DarkMode,
     pub available_color_schemes: Vec<(String, String, u32)>,
+    /// 配色方案全量（含窗背景与候选色），外观页的候选栏预览要读。
+    pub color_schemes: std::collections::HashMap<String, ColorScheme>,
     pub color_schemes_loaded: bool,
 }
 
@@ -6445,9 +6443,10 @@ impl Default for AppearanceState {
             corner_radius: 8.0,
             horizontal: true,
             auto_detect: true,
-            color_scheme: ColorSchemeConfig::default(),
+            color_scheme: xime_config::DEFAULT_COLOR_SCHEME.to_string(),
             dark_mode: DarkMode::default(),
             available_color_schemes: Vec::new(),
+            color_schemes: std::collections::HashMap::new(),
             color_schemes_loaded: false,
         }
     }

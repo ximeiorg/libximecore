@@ -40,7 +40,7 @@
 
 | 字段 | 桌面端 | 移动端 | 说明 |
 | --- | --- | --- | --- |
-| `color_scheme` | 读 | 读 | `{ light, dark }` 或单个字符串 |
+| `color_scheme` | 读 | 读 | 单个方案 id（`color_schemes` 的键）。浅色 / 深色是方案内成对的变体，由 `dark_mode` 选择；旧版 `{ light, dark }` 写法仍能读，取 `light`（只写 `dark` 时取 `dark`），保存时归一为单值 |
 | `dark_mode` | 读 | 读 | `0` 浅色 / `1` 深色 / `2` 跟随系统 |
 | `font_family` / `font_size` | 读 | — | 候选窗字体 |
 | `candidate_count` | 读 | — | 落成 rime `menu/page_size`，改动需重新部署 |

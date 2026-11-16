@@ -33,10 +33,10 @@ pub use schema_manifest::{
     SchemaManifest, UninstallOutcome, BUILTIN_PACKAGE_ID, LOCAL_PACKAGE_ID,
 };
 pub use style::ColorScheme;
-pub use style::ColorSchemeConfig;
 pub use style::DarkMode;
 pub use style::KeyboardBackground;
 pub use style::StyleConfig;
+pub use style::DEFAULT_COLOR_SCHEME;
 pub use user_config::{
     backup_path, original_path, restore_defaults_at, restore_original_at, state_at, undo_at,
     write_overrides_at, ConfigFileState,
@@ -274,10 +274,8 @@ impl XimeConfig {
         self.get_primary_color_for_theme(false)
     }
 
-    pub fn get_primary_color_for_theme(&self, system_is_dark: bool) -> (u8, u8, u8) {
-        let is_dark = self.style.dark_mode.is_dark(system_is_dark);
-        let scheme_name = self.style.color_scheme.scheme_name(is_dark);
-        if let Some(scheme) = self.color_schemes.get(&scheme_name) {
+    pub fn get_primary_color_for_theme(&self, _system_is_dark: bool) -> (u8, u8, u8) {
+        if let Some(scheme) = self.color_schemes.get(&self.style.color_scheme) {
             let r = (scheme.primary_color >> 16) as u8;
             let g = (scheme.primary_color >> 8) as u8;
             let b = scheme.primary_color as u8;
@@ -287,18 +285,16 @@ impl XimeConfig {
         }
     }
 
-    /// Get the resolved color scheme name based on dark_mode setting.
-    pub fn get_color_scheme_name(&self, system_is_dark: bool) -> String {
-        let is_dark = self.style.dark_mode.is_dark(system_is_dark);
-        self.style.color_scheme.scheme_name(is_dark)
+    /// 当前配色方案 id（明暗共用同一方案，具体取哪个变体由调用方按 `dark_mode` 决定）。
+    pub fn color_scheme_name(&self) -> &str {
+        &self.style.color_scheme
     }
 
     /// Get keyboard background color for the current theme.
     pub fn get_keyboard_bg_color(&self, system_is_dark: bool) -> Option<u32> {
         let is_dark = self.style.dark_mode.is_dark(system_is_dark);
-        let scheme_name = self.style.color_scheme.scheme_name(is_dark);
         self.color_schemes
-            .get(&scheme_name)
+            .get(&self.style.color_scheme)
             .and_then(|scheme| scheme.keyboard_bg(is_dark))
     }
 
@@ -705,6 +701,36 @@ mod tests {
 
         // 桌面端专属节不能被丢
         assert!(cfg.wubi_radicals.schema_radicals.contains_key("wubi86"));
+    }
+
+    /// 配色是「方案成对」：只配一个 id，浅色 / 深色取方案自己的 `*_dark` 字段；
+    /// 旧版 `{light, dark}` 写法仍能读，归一成单个 id。
+    #[test]
+    fn color_scheme_is_single_id_with_legacy_pair_compat() {
+        let cfg: XimeConfig = serde_yaml::from_value(XimeConfig::default_tree()).unwrap();
+        assert_eq!(cfg.style.color_scheme, DEFAULT_COLOR_SCHEME);
+        assert!(cfg.color_schemes.contains_key(cfg.color_scheme_name()));
+        assert!(cfg.get_keyboard_bg_color(false).is_some());
+        assert!(cfg.get_keyboard_bg_color(true).is_some());
+
+        // 序列化回单值，不再产出 {light, dark}
+        let dumped = serde_yaml::to_string(&cfg).unwrap();
+        assert!(
+            dumped.contains("color_scheme: lavender_purple"),
+            "配色应写成单个 id:\n{dumped}"
+        );
+
+        // 旧写法（成对）：取 light 作为方案身份
+        let pair: XimeConfig = serde_yaml::from_str(
+            "style:\n  color_scheme:\n    light: sakura_pink\n    dark: slate_gray\n",
+        )
+        .unwrap();
+        assert_eq!(pair.style.color_scheme, "sakura_pink");
+
+        // 旧写法但只写了 dark（用户文件里常见这种残片）
+        let dark_only: XimeConfig =
+            serde_yaml::from_str("style:\n  color_scheme:\n    dark: sakura_pink\n").unwrap();
+        assert_eq!(dark_only.style.color_scheme, "sakura_pink");
     }
 
     /// 市场地址按配置顺序拼接，末尾 `/` 自动补齐；未配置时回落官方基址。
