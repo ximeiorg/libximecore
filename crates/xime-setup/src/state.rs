@@ -813,6 +813,10 @@ pub enum Message {
     CandidateCountChanged(i32),
     /// 外观：圆角大小变更。
     CornerRadiusChanged(f64),
+    /// 外观：候选栏横排（`true`）/ 竖排（`false`）切换。
+    HorizontalChanged(bool),
+    /// 外观：数字开头自动识别（数学计算）开关切换。
+    AutoDetectChanged(bool),
     /// 外观：浅色模式配色方案变更。
     ColorSchemeLightChanged(String),
     /// 外观：深色模式配色方案变更。
@@ -1309,6 +1313,8 @@ impl SettingsState {
         self.appearance.font_size = config.style.font_size as f64;
         self.appearance.candidate_count = config.style.candidate_count;
         self.appearance.corner_radius = config.style.corner_radius as f64;
+        self.appearance.horizontal = config.style.horizontal;
+        self.appearance.auto_detect = config.calculator.auto_detect;
         self.appearance.color_schemes_loaded = true;
     }
 
@@ -1324,11 +1330,13 @@ impl SettingsState {
     pub fn save_appearance(&self) -> Result<(), String> {
         let mut config = XimeConfig::load();
         // 候选数量要落成 rime 的 `menu/page_size`，**必须重新部署**才生效；
-        // 字号/配色/圆角靠配置缓存（用户文件 mtime）即时生效，不用部署。
+        // 字号/配色/圆角/横纵/数学计算开关靠配置缓存（用户文件 mtime）即时生效，不用部署。
         let count_changed = config.style.candidate_count != self.appearance.candidate_count;
         config.style.font_size = self.appearance.font_size as f32;
         config.style.candidate_count = self.appearance.candidate_count;
         config.style.corner_radius = self.appearance.corner_radius as f32;
+        config.style.horizontal = self.appearance.horizontal;
+        config.calculator.auto_detect = self.appearance.auto_detect;
         // 配色也并在这一次写入里：分两次 save 会留两份快照，
         // 「撤销上一次修改」就只能退掉一半（改字号撤销后配色还是新的）。
         config.style.color_scheme = self.appearance.color_scheme.clone();
@@ -6420,6 +6428,10 @@ pub struct AppearanceState {
     pub font_size: f64,
     pub candidate_count: i32,
     pub corner_radius: f64,
+    /// 候选栏横排（`true`）/ 竖排（`false`）。对应配置 `style.horizontal`。
+    pub horizontal: bool,
+    /// 数字开头自动识别（数学计算）开关。对应配置 `calculator.auto_detect`。
+    pub auto_detect: bool,
     pub color_scheme: ColorSchemeConfig,
     pub dark_mode: DarkMode,
     pub available_color_schemes: Vec<(String, String, u32)>,
@@ -6432,6 +6444,8 @@ impl Default for AppearanceState {
             font_size: 14.0,
             candidate_count: 5,
             corner_radius: 8.0,
+            horizontal: true,
+            auto_detect: true,
             color_scheme: ColorSchemeConfig::default(),
             dark_mode: DarkMode::default(),
             available_color_schemes: Vec::new(),

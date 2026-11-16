@@ -1,3 +1,4 @@
+pub mod calculator;
 pub mod clipboard_store;
 pub mod metadata;
 pub mod rime_deploy;
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing_subscriber::prelude::*;
 
+pub use calculator::CalculatorConfig;
 pub use metadata::{app_metadata, set_app_metadata, AppMetadata};
 pub use rime_deploy::{
     default_rime_paths, deploy_all, deploy_all_schemas, ensure_bundled_rime_data, get_data_dirs,
@@ -46,6 +48,9 @@ pub struct XimeConfig {
     pub wubi_radicals: WubiRadicalsConfig,
     #[serde(default)]
     pub style: StyleConfig,
+    /// 计算器（数字开头自动识别）配置。设置页「外观」里的「数学计算」开关写这里。
+    #[serde(default)]
+    pub calculator: CalculatorConfig,
     #[serde(default)]
     pub color_schemes: HashMap<String, ColorScheme>,
     #[serde(default)]
