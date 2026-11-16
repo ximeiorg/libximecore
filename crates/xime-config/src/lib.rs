@@ -35,6 +35,7 @@ pub use schema_manifest::{
 pub use style::ColorScheme;
 pub use style::ColorSchemeConfig;
 pub use style::DarkMode;
+pub use style::KeyboardBackground;
 pub use style::StyleConfig;
 pub use user_config::{
     backup_path, original_path, restore_defaults_at, restore_original_at, state_at, undo_at,
@@ -55,12 +56,36 @@ pub struct XimeConfig {
     pub color_schemes: HashMap<String, ColorScheme>,
     #[serde(default)]
     pub pair_secret: String,
+    /// 方案 / 插件 / 模型市场的索引端点（与移动端 `xime_index.base_urls` 同构）。
+    #[serde(default)]
+    pub xime_index: XimeIndexConfig,
     /// 日志级别（error/warn/info/debug/trace），作用于本项目自己的 crate；
     /// 三方库固定 info（三方 debug 量极大且格式化发生在日志调用线程上）。
     /// 未设或非法值回退 info；进程环境变量 RUST_LOG 仍优先于本配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
 }
+
+/// 市场索引端点配置。
+///
+/// `base_urls` 按顺序尝试（可替换为自建代理 / 镜像），末尾缺 `/` 自动补齐。
+/// 全部失败或未配置时回落到 [`DEFAULT_BASE_URL`]。
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct XimeIndexConfig {
+    #[serde(default)]
+    pub base_urls: Vec<String>,
+}
+
+impl Default for XimeIndexConfig {
+    fn default() -> Self {
+        Self {
+            base_urls: vec![DEFAULT_BASE_URL.to_string()],
+        }
+    }
+}
+
+/// 官方索引基址（配置缺失时的兜底）。
+pub const DEFAULT_BASE_URL: &str = "https://index.ximei.me/";
 
 impl XimeConfig {
     pub fn load() -> Self {
@@ -272,30 +297,35 @@ impl XimeConfig {
     pub fn get_keyboard_bg_color(&self, system_is_dark: bool) -> Option<u32> {
         let is_dark = self.style.dark_mode.is_dark(system_is_dark);
         let scheme_name = self.style.color_scheme.scheme_name(is_dark);
-        if let Some(scheme) = self.color_schemes.get(&scheme_name) {
-            if let Some(ref bg) = scheme.keyboard_background {
-                if is_dark {
-                    return bg.color_dark;
-                } else {
-                    return bg.color;
-                }
-            }
-        }
-        None
+        self.color_schemes
+            .get(&scheme_name)
+            .and_then(|scheme| scheme.keyboard_bg(is_dark))
     }
 
-    /// Get key background color for the current theme.
-    pub fn get_key_bg_color(&self, system_is_dark: bool) -> Option<u32> {
-        let is_dark = self.style.dark_mode.is_dark(system_is_dark);
-        let scheme_name = self.style.color_scheme.scheme_name(is_dark);
-        if let Some(scheme) = self.color_schemes.get(&scheme_name) {
-            if is_dark {
-                return scheme.key_bg_color_dark;
-            } else {
-                return scheme.key_bg_color;
-            }
+    /// 市场索引的候选地址：`xime_index.base_urls` 按顺序拼 `path`，末尾补 `/`；
+    /// 未配置时回落到官方基址。调用方按顺序尝试即可。
+    pub fn market_urls(&self, path: &str) -> Vec<String> {
+        let path = path.trim_start_matches('/');
+        let mut bases: Vec<String> = self
+            .xime_index
+            .base_urls
+            .iter()
+            .map(|u| u.trim().to_string())
+            .filter(|u| !u.is_empty())
+            .collect();
+        if bases.is_empty() {
+            bases.push(DEFAULT_BASE_URL.to_string());
         }
-        None
+        bases
+            .into_iter()
+            .map(|base| {
+                if base.ends_with('/') {
+                    format!("{base}{path}")
+                } else {
+                    format!("{base}/{path}")
+                }
+            })
+            .collect()
     }
 
     /// Get wubi root text for a key press in the given schema.
@@ -633,5 +663,70 @@ mod tests {
                 "缺少本项目 crate 的 debug 指令: {target}"
             );
         }
+    }
+
+    /// 内置 xime.yaml 必须与移动端共用同一套结构：共享节能解析、配色全量可选。
+    ///
+    /// 直接解析内嵌文件而不是 `load_defaults()`：系统级配置（/usr/share/...）会污染断言。
+    #[test]
+    fn builtin_yaml_follows_shared_spec() {
+        let tree = XimeConfig::default_tree();
+        let cfg: XimeConfig =
+            serde_yaml::from_value(tree).expect("内置 xime.yaml 必须能被 XimeConfig 解析");
+
+        // 共享节：索引镜像、配色表、样式
+        assert_eq!(
+            cfg.xime_index.base_urls.len(),
+            4,
+            "base_urls 需与移动端保持同样的镜像列表"
+        );
+        assert_eq!(cfg.style.candidate_count, 5);
+        assert!(cfg.color_schemes.len() >= 20, "桌面端应沿用移动端全量配色");
+
+        // 移动端有、桌面端也要读得懂的字段
+        let lav = cfg.color_schemes.get("lavender_purple").unwrap();
+        assert_eq!(lav.primary_color, 0x8F73E2);
+        assert_eq!(lav.keyboard_bg(false), Some(0xE3E4E8));
+
+        let aurora = cfg.color_schemes.get("aurora_gradient").unwrap();
+        let bg = aurora.keyboard_background.as_ref().unwrap();
+        assert_eq!(bg.r#type, "gradient");
+        assert!(bg.colors.is_some(), "渐变主题必须带断点色");
+        assert!(aurora.candidate_text_color.is_some());
+
+        // 桌面端没有软键盘：内置配色不应再带 key_* / special_key_* 字段
+        let dumped = serde_yaml::to_string(&cfg).unwrap();
+        for mobile_only in ["key_bg_color", "key_text_color", "special_key_bg_color"] {
+            assert!(
+                !dumped.contains(mobile_only),
+                "桌面端配色不该包含软键盘字段: {mobile_only}"
+            );
+        }
+
+        // 桌面端专属节不能被丢
+        assert!(cfg.wubi_radicals.schema_radicals.contains_key("wubi86"));
+    }
+
+    /// 市场地址按配置顺序拼接，末尾 `/` 自动补齐；未配置时回落官方基址。
+    #[test]
+    fn market_urls_follow_config_order() {
+        let mut cfg = XimeConfig::default();
+        assert_eq!(
+            cfg.market_urls("rimes/index.yaml"),
+            vec!["https://index.ximei.me/rimes/index.yaml".to_string()]
+        );
+
+        cfg.xime_index.base_urls = vec![
+            "https://a.example/".to_string(),
+            "https://b.example".to_string(),
+            "  ".to_string(),
+        ];
+        assert_eq!(
+            cfg.market_urls("/rimes/index.yaml"),
+            vec![
+                "https://a.example/rimes/index.yaml".to_string(),
+                "https://b.example/rimes/index.yaml".to_string(),
+            ]
+        );
     }
 }

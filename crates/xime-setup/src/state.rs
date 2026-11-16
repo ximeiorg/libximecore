@@ -1555,15 +1555,7 @@ impl SettingsState {
         self.market_schema.loading = true;
 
         std::thread::spawn(|| {
-            let result = (|| -> Result<String, String> {
-                let response = http_client()
-                    .get("https://index.ximei.me/rimes/index.yaml")
-                    .send()
-                    .and_then(|r| r.error_for_status())
-                    .map_err(|e| format!("网络请求失败: {}", e))?;
-                response.text().map_err(|e| format!("读取响应失败: {}", e))
-            })();
-
+            let result = fetch_market_index("rimes/index.yaml");
             *market_yaml_result().lock().unwrap() = Some(result);
         });
     }
@@ -1696,15 +1688,7 @@ impl SettingsState {
         self.market_model.loading = true;
 
         std::thread::spawn(|| {
-            let result = (|| -> Result<String, String> {
-                let response = http_client()
-                    .get("https://index.ximei.me/models/index.yaml")
-                    .send()
-                    .and_then(|r| r.error_for_status())
-                    .map_err(|e| format!("网络请求失败: {}", e))?;
-                response.text().map_err(|e| format!("读取响应失败: {}", e))
-            })();
-
+            let result = fetch_market_index("models/index.yaml");
             *model_yaml_result().lock().unwrap() = Some(result);
         });
     }
@@ -1993,17 +1977,9 @@ impl SettingsState {
         self.market_plugin.loading = true;
 
         std::thread::spawn(|| {
-            let result = (|| -> Result<String, String> {
-                // v2 子索引：JS/QuickJS 插件（minHostVersion 3.0.0，对齐
-                // xime-plugin quickjs 运行时）；根路径 v1 为 Lua 时代遗留索引。
-                let response = http_client()
-                    .get("https://index.ximei.me/plugins/v2/index.yaml")
-                    .send()
-                    .and_then(|r| r.error_for_status())
-                    .map_err(|e| format!("网络请求失败: {}", e))?;
-                response.text().map_err(|e| format!("读取响应失败: {}", e))
-            })();
-
+            // v2 子索引：JS/QuickJS 插件（minHostVersion 3.0.0，对齐
+            // xime-plugin quickjs 运行时）；根路径 v1 为 Lua 时代遗留索引。
+            let result = fetch_market_index("plugins/v2/index.yaml");
             *plugin_yaml_result().lock().unwrap() = Some(result);
         });
     }
@@ -3924,6 +3900,29 @@ pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
             .build()
             .expect("failed to build http client")
     })
+}
+
+/// 按 `xime_index.base_urls` 顺序拉取市场索引，任一地址成功即返回。
+///
+/// 端点可由用户换成自建镜像/代理（与移动端同一份配置）；全部失败时把最后
+/// 一次的错误带回界面，避免只报"网络错误"、看不出试了哪个地址。
+pub(crate) fn fetch_market_index(path: &str) -> Result<String, String> {
+    let urls = XimeConfig::load().market_urls(path);
+    let mut last_err = String::from("未配置可用的索引地址");
+    for url in urls {
+        match http_client()
+            .get(&url)
+            .send()
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(resp) => match resp.text() {
+                Ok(text) => return Ok(text),
+                Err(e) => last_err = format!("读取响应失败（{url}）: {e}"),
+            },
+            Err(e) => last_err = format!("网络请求失败（{url}）: {e}"),
+        }
+    }
+    Err(last_err)
 }
 
 #[cfg(any(feature = "clipboard-page", feature = "backup-page"))]

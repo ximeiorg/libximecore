@@ -176,6 +176,12 @@ impl Default for KeyboardBackground {
     }
 }
 
+/// 一套配色。
+///
+/// 桌面端只有候选窗、没有软键盘，所以这里只保留候选窗能画出来的颜色：
+/// 主色（强调/选中）、窗背景、候选文字、选中文字、选中底色。
+/// 移动端的 `key_*` / `special_key_*`（按键、功能键底色）**不进**这个结构体——
+/// 那属于软键盘；配置里写了也不会被桌面端读取，用户文件中的这些键原样保留。
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ColorScheme {
     #[serde(default)]
@@ -186,33 +192,9 @@ pub struct ColorScheme {
         default = "default_primary_color"
     )]
     pub primary_color: u32,
+    /// 候选窗背景（solid / gradient / image）。
     #[serde(default)]
     pub keyboard_background: Option<KeyboardBackground>,
-    // Key colors
-    #[serde(
-        deserialize_with = "deserialize_hex_color_optional",
-        serialize_with = "serialize_hex_color_optional",
-        default
-    )]
-    pub key_bg_color: Option<u32>,
-    #[serde(
-        deserialize_with = "deserialize_hex_color_optional",
-        serialize_with = "serialize_hex_color_optional",
-        default
-    )]
-    pub key_bg_color_dark: Option<u32>,
-    #[serde(
-        deserialize_with = "deserialize_hex_color_optional",
-        serialize_with = "serialize_hex_color_optional",
-        default
-    )]
-    pub key_text_color: Option<u32>,
-    #[serde(
-        deserialize_with = "deserialize_hex_color_optional",
-        serialize_with = "serialize_hex_color_optional",
-        default
-    )]
-    pub key_text_color_dark: Option<u32>,
     // Candidate colors
     #[serde(
         deserialize_with = "deserialize_hex_color_optional",
@@ -238,9 +220,57 @@ pub struct ColorScheme {
         default
     )]
     pub candidate_selected_text_color_dark: Option<u32>,
-    // Dynamic color (Material You)
-    #[serde(default)]
-    pub dynamic_color: Option<bool>,
+    /// 候选选中背景色；未配置时由宿主按主色派生。
+    #[serde(
+        deserialize_with = "deserialize_hex_color_optional",
+        serialize_with = "serialize_hex_color_optional",
+        default
+    )]
+    pub candidate_selected_bg_color: Option<u32>,
+    #[serde(
+        deserialize_with = "deserialize_hex_color_optional",
+        serialize_with = "serialize_hex_color_optional",
+        default
+    )]
+    pub candidate_selected_bg_color_dark: Option<u32>,
+}
+
+impl ColorScheme {
+    /// 候选窗背景色（亮/暗）。
+    pub fn keyboard_bg(&self, dark: bool) -> Option<u32> {
+        let bg = self.keyboard_background.as_ref()?;
+        if dark {
+            bg.color_dark
+        } else {
+            bg.color
+        }
+    }
+
+    pub fn candidate_text(&self, dark: bool) -> Option<u32> {
+        if dark {
+            self.candidate_text_color_dark.or(self.candidate_text_color)
+        } else {
+            self.candidate_text_color
+        }
+    }
+
+    pub fn candidate_selected_text(&self, dark: bool) -> Option<u32> {
+        if dark {
+            self.candidate_selected_text_color_dark
+                .or(self.candidate_selected_text_color)
+        } else {
+            self.candidate_selected_text_color
+        }
+    }
+
+    pub fn candidate_selected_bg(&self, dark: bool) -> Option<u32> {
+        if dark {
+            self.candidate_selected_bg_color_dark
+                .or(self.candidate_selected_bg_color)
+        } else {
+            self.candidate_selected_bg_color
+        }
+    }
 }
 
 impl Default for ColorScheme {
@@ -249,15 +279,12 @@ impl Default for ColorScheme {
             name: String::new(),
             primary_color: default_primary_color(),
             keyboard_background: None,
-            key_bg_color: None,
-            key_bg_color_dark: None,
-            key_text_color: None,
-            key_text_color_dark: None,
             candidate_text_color: None,
             candidate_text_color_dark: None,
             candidate_selected_text_color: None,
             candidate_selected_text_color_dark: None,
-            dynamic_color: None,
+            candidate_selected_bg_color: None,
+            candidate_selected_bg_color_dark: None,
         }
     }
 }

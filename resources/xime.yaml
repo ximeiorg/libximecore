@@ -1,8 +1,274 @@
-# 日志级别（error/warn/info/debug/trace）：作用于本项目自己的 crate，
-# 三方库固定 info；环境变量 RUST_LOG 优先于本配置。排查问题时改 debug
-# 并重启输入法（设置里保存任意配置或重载样式也会热生效）。
-# log_level: info
+# 曦码 xime.yaml —— 桌面端配置基座（随安装包分发，升级时被覆盖，勿直接修改）
+# 用户自定义写同目录 xime.custom.yaml：只写要改的键，未写的键自动回退本文件；
+# 列表（xime_index.base_urls 等）需整段写出。与移动端同一套字段命名。
+# 颜色写 0xRRGGBB；移动端的 0xAARRGGBB（带透明度）桌面端只取低 24 位。
 
+metadata:
+  app_name: Xime
+  app_version: ">=0.3.0"      # 配置适用的最低客户端版本（当前未参与校验）
+  platform: [windows, linux, macos]
+  config_version: 1
+  generator: "Xime Config Generator"
+  modified_time: "2026-11-16"
+
+xime_index:
+  # 方案 / 插件 / 模型市场索引基址（ximeiorg/xime-index），按顺序尝试直到成功。
+  # 可替换为自建代理 / 镜像；末尾需 /。
+  base_urls:
+    - "https://cdn.jsdelivr.net/gh/ximeiorg/xime-index@master/"
+    - "https://fastly.jsdelivr.net/gh/ximeiorg/xime-index@master/"
+    - "https://index.ximei.me/"
+    - "https://raw.githubusercontent.com/ximeiorg/xime-index/refs/heads/main/"
+
+style:
+  font_family: ""             # 候选窗字体，空 = 跟随系统
+  font_size: 14.0
+  candidate_count: 5          # 落成 rime 的 menu/page_size，改动需重新部署
+  horizontal: true
+  corner_radius: 8.0
+  # 浅色 / 深色配色：color_schemes 中的 id
+  color_scheme:
+    light: lavender_purple
+    dark: slate_gray
+  dark_mode: 2                # 0=浅色 1=深色 2=跟随系统
+
+# ── 配色方案 ──
+# 每个主题可用的颜色字段（未配置的由宿主派生）：
+#   primary_color                       主题强调色（选中/高亮）
+#   keyboard_background                 候选窗背景（solid / gradient / image）
+#   candidate_text_color / _dark        候选文字色
+#   candidate_selected_text_color / _dark   候选选中文字色
+#   candidate_selected_bg_color / _dark     候选选中背景色，支持 0xAARRGGBB 的透明度
+#
+# 桌面端只读候选窗用得到的颜色；按键与功能键底色（key_*、special_key_*）属于软键盘，
+# 本文件不写，写了也不读。
+#
+# 暗色配色约束（新增皮肤请遵守）：
+# 1. 渐变皮肤的 colors_dark 暗端压到 OKLCH L ≤ 0.32 / C ≤ 0.10，避免整个候选窗过亮。
+# 2. 候选文字与窗口背景的对比度不低于 4.5:1（深底别直接拿 primary 当正文色）。
+# 3. 选中底色与普通底色要能分辨；只靠透明度差时，选中文字需要自带对比度。
+
+color_schemes:
+  lavender_purple:
+    name: "薰衣草紫"
+    primary_color: 0x8F73E2
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x1E1838
+
+  ocean_blue:
+    name: "海洋蔚蓝"
+    primary_color: 0x1A73E8
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x0D1B33
+
+  sunset_orange:
+    name: "落日橙光"
+    primary_color: 0xE65100
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x1A0D00
+
+  slate_gray:
+    name: "沉稳石墨"
+    primary_color: 0x424242
+    # 灰色系 primary 提亮后仍偏暗（≈0x979797），深色模式首选项单独提亮保证辨识度
+    # （非纯白，高对比在暗光下刺眼；普通候选为 0xE8EAED，靠字重+高亮底区分）
+    candidate_selected_text_color_dark: 0xF0F0F0
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x1A1A1A
+
+  rose_pink:
+    name: "浪漫玫瑰"
+    primary_color: 0xAD1457
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x2D1020
+
+  teal_cyan:
+    name: "青碧如水"
+    primary_color: 0x00796B
+    keyboard_background:
+      type: solid
+      color: 0xE3E4E8
+      color_dark: 0x002622
+
+  sakura_pink:
+    name: "樱花粉黛"
+    primary_color: 0xe91e63
+    keyboard_background:
+      type: solid
+      color: 0xfdf0f4
+      color_dark: 0xfdf0f4
+    candidate_text_color: 0x7d3a52
+    candidate_text_color_dark: 0x7d3a52
+
+  sky_blue:
+    name: "晴空浅蓝"
+    primary_color: 0x0288d1
+    keyboard_background:
+      type: solid
+      color: 0xe8f4fd
+      color_dark: 0xe8f4fd
+    candidate_text_color: 0x2d5f7a
+    candidate_text_color_dark: 0x2d5f7a
+
+  mint_green:
+    name: "薄荷浅绿"
+    primary_color: 0x2e7d32
+    keyboard_background:
+      type: solid
+      color: 0xe9f5ec
+      color_dark: 0xe9f5ec
+    candidate_text_color: 0x3c5c44
+    candidate_text_color_dark: 0x3c5c44
+
+  lilac_purple:
+    name: "丁香浅紫"
+    primary_color: 0x8e24aa
+    keyboard_background:
+      type: solid
+      color: 0xf3edf8
+      color_dark: 0xf3edf8
+    candidate_text_color: 0x5d4a70
+    candidate_text_color_dark: 0x5d4a70
+
+  peach_orange:
+    name: "蜜桃浅橙"
+    primary_color: 0xef6c00
+    keyboard_background:
+      type: solid
+      color: 0xfdf0e3
+      color_dark: 0xfdf0e3
+    candidate_text_color: 0x7a5130
+    candidate_text_color_dark: 0x7a5130
+
+  cream_beige:
+    name: "奶油米白"
+    primary_color: 0x8d6e63
+    keyboard_background:
+      type: solid
+      color: 0xfaf5ee
+      color_dark: 0xfaf5ee
+    candidate_text_color: 0x5d4037
+    candidate_text_color_dark: 0x5d4037
+
+  aurora_gradient:
+    name: "极光青蓝"
+    primary_color: 0x00b0a8
+    keyboard_background:
+      type: gradient
+      colors: [0xe0f7fa, 0xb2ebf2]
+      colors_dark: [0x001915, 0x003d38]
+      angle: 90
+    candidate_text_color: 0x14444a
+    candidate_text_color_dark: 0xe0f7fa
+
+  sunset_gradient:
+    name: "落日余晖"
+    primary_color: 0xff7043
+    keyboard_background:
+      type: gradient
+      colors: [0xfff3e0, 0xffccbc]
+      # 暗端原为 0x8c2f1d（L0.44 / C0.13）：锈红大面积铺底在暗环境偏亮，压到 L0.32 以下。
+      colors_dark: [0x260703, 0x5a170a]
+      angle: 90
+    candidate_text_color: 0x5d2a17
+    candidate_text_color_dark: 0xffe0d6
+
+  ocean_gradient:
+    name: "深海渐变"
+    primary_color: 0x1e88e5
+    keyboard_background:
+      type: gradient
+      colors: [0xe3f2fd, 0x90caf9]
+      # 暗端原为 0x0d47a1（L0.42 / C0.16）：压到 L0.32 以下，避免整个候选窗发亮。
+      colors_dark: [0x01132a, 0x0f2f63]
+      angle: 90
+    candidate_text_color: 0x0d3a5c
+    candidate_text_color_dark: 0xd6eaff
+
+  purple_gradient:
+    name: "紫梦渐变"
+    primary_color: 0x7e57c2
+    keyboard_background:
+      type: gradient
+      colors: [0xede7f6, 0xd1c4e9]
+      # 暗端原为 0x4527a0（C=0.181 是全表最高彩度），压到 C0.10 / L0.31。
+      colors_dark: [0x130d29, 0x2f2661]
+      angle: 90
+    candidate_text_color: 0x3c2a66
+    candidate_text_color_dark: 0xe8def8
+
+  rose_gradient:
+    name: "玫瑰渐变"
+    primary_color: 0xec407a
+    keyboard_background:
+      type: gradient
+      colors: [0xfce4ec, 0xf8bbd0]
+      # 暗端原为 0x8c1356（L0.43 / C0.16）：整个候选窗在暗环境下像发光板，压到 L0.32 以下。
+      colors_dark: [0x240614, 0x551535]
+      angle: 90
+    candidate_text_color: 0x5d1035
+    candidate_text_color_dark: 0xffdbe8
+
+  forest_gradient:
+    name: "森林迷雾"
+    primary_color: 0x43a047
+    keyboard_background:
+      type: gradient
+      colors: [0xe8f5e9, 0xc8e6c9]
+      # 暗端原为 0x1b5e20（L0.43 / C0.12）：压到 L0.32 以下，避免整个候选窗发亮。
+      colors_dark: [0x001904, 0x013e09]
+      angle: 90
+    candidate_text_color: 0x1e4620
+    candidate_text_color_dark: 0xdff5e0
+
+  kitosonita_landscape:
+    name: "夜幕之影"
+    keyboard_background:
+      type: image
+      src: "themes/lll-sh-silhouette-bg.jpg"
+      fit: cover
+      overlay_alpha: 0.15
+      overlay_alpha_dark: 0.30
+    candidate_text_color: 0x232323
+    candidate_text_color_dark: 0xf2f2f2
+    candidate_selected_text_color: 0x9CB2D6
+    candidate_selected_text_color_dark: 0x9CB2D6
+
+  mrfawdi_nature:
+    name: "暮色之桥"
+    keyboard_background:
+      type: image
+      src: "themes/nordseher-bridge-bg.jpg"
+      fit: cover
+      overlay_alpha: 0.15
+      overlay_alpha_dark: 0.30
+    candidate_text_color: 0xA4828C
+    candidate_text_color_dark: 0xA4828C
+    candidate_selected_text_color: 0xDCA79C
+    candidate_selected_text_color_dark: 0xDCA79C
+
+  olivcelso_desert:
+    name: "大漠流金"
+    keyboard_background:
+      type: image
+      src: "themes/olivcelso-desert-bg.jpg"
+      fit: cover
+      overlay_alpha: 0.30
+      overlay_alpha_dark: 0.45
+    candidate_text_color: 0x6789BF
+    candidate_text_color_dark: 0xE4C656
+
+# ── 五笔字根（桌面端专属：按键提示浮层用）──
 wubi_radicals:
   hotkeys:
     show_key: "Ctrl"
@@ -60,63 +326,6 @@ wubi_radicals:
       c: "又巴牛马"
       x: "母弓匕纟糸"
 
-style:
-  font_family: ""
-  font_size: 14.0
-  candidate_count: 5
-  horizontal: true
-  corner_radius: 8.0
-  color_scheme:
-    light: lavender_purple
-    dark: slate_gray
-  dark_mode: 2
-
-color_schemes:
-  lavender_purple:
-    name: "薰衣草紫"
-    primary_color: 0x8F73E2
-    keyboard_background:
-      type: solid
-      color: 0xE3E4E8
-      color_dark: 0x1E1838
-  
-  ocean_blue:
-    name: "海洋蔚蓝"
-    primary_color: 0x1A73E8
-    keyboard_background:
-      type: solid
-      color: 0xE3E4E8
-      color_dark: 0x0D1B33
-  
-  sunset_orange:
-    name: "落日橙光"
-    primary_color: 0xE65100
-    keyboard_background:
-      type: solid
-      color: 0xE3E4E8
-      color_dark: 0x1A0D00
-  
-  slate_gray:
-    name: "沉稳石墨"
-    primary_color: 0x424242
-    keyboard_background:
-      type: solid
-      color: 0xE3E4E8
-      color_dark: 0x1A1A1A
-  
-  rose_pink:
-    name: "浪漫玫瑰"
-    primary_color: 0xAD1457
-    keyboard_background:
-      type: solid
-      color: 0xE3E4E8
-      color_dark: 0x2D1020
-  
-  teal_cyan:
-    name: "青碧如水"
-    primary_color: 0x00796B
-    keyboard_background:
-      type: solid
-      color: 0xE3E4E8
-      color_dark: 0x002622
-
+# 日志级别（error/warn/info/debug/trace）：作用于本项目自己的 crate，
+# 三方库固定 info；环境变量 RUST_LOG 优先于本配置。
+# log_level: info
