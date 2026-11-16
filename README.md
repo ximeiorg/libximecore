@@ -20,7 +20,7 @@ XimeYi · XimeYao · Linux 桌面组件 · ximed
 │ libximecore                               │
 │  librime-sys2 → librime → xime-rime       │
 │  xime-config   xime-ipc   xime-setup-lib  │
-│  xime-plugin   xime-speech                │
+│  xime-plugin   xime-infer                 │
 │  xime-sync-store → service → server       │
 └─────────────────────┬─────────────────────┘
                       ▼
@@ -38,7 +38,7 @@ XimeYi · XimeYao · Linux 桌面组件 · ximed
 | `xime-ipc` | 输入法进程与后台守护的消息类型、`DaemonClient` trait |
 | `xime-setup-lib` | iced 跨平台设置界面（页面按 feature 门控） |
 | `xime-plugin` | QuickJS 插件运行时：`.xipk` 包、manifest、能力白名单、超时熔断 |
-| `xime-speech` | 基于 sherpa-onnx 的流式语音识别推理封装 |
+| `xime-infer` | 基于 candle 的本地模型推理（笔画手写识别等） |
 | `xime-infer` | 基于 candle 的本地模型推理：笔画手写识别（CPU / Metal / CUDA，按 feature 分包） |
 | `xime-sync-store` | 同步存储后端（本地、历史） |
 | `xime-sync-service` | 同步业务逻辑（幂等写入、事件序号） |
@@ -65,12 +65,7 @@ cargo build
   DYLD_LIBRARY_PATH=/path/to/librime/dist/lib cargo test
   ```
 
-- `xime-speech` 不在 `default-members`，需显式构建：
-
   ```bash
-  SHERPA_ONNX_LIB_DIR=/path/to/sherpa-onnx/lib cargo build -p xime-speech
-  ```
-
 ## 在宿主中引用
 
 ```toml
