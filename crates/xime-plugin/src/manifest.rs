@@ -39,6 +39,31 @@ pub enum PluginType {
     Other,
 }
 
+/// 当前运行平台，取值与 manifest 的 `platforms` 一致：
+/// `macos` / `windows` / `linux` / `android` / `ios`。
+pub fn current_platform() -> &'static str {
+    std::env::consts::OS
+}
+
+/// 桌面平台标识（与 `std::env::consts::OS`、`xime.yaml` 的 `metadata.platform` 一致）。
+///
+/// `platforms` 里要逐个写具体平台，不接受 `pc` 之类的简写。
+pub const DESKTOP_PLATFORMS: [&str; 3] = ["macos", "windows", "linux"];
+
+/// 平台是否属于桌面组（macos / windows / linux）。
+pub fn is_pc_platform(platform: &str) -> bool {
+    DESKTOP_PLATFORMS
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(platform))
+}
+
+/// 平台列表是否命中目标平台（大小写不敏感；列表里须写具体平台名）。
+pub fn platform_matches(platforms: &[String], platform: &str) -> bool {
+    platforms
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(platform))
+}
+
 /// 插件包根目录的 manifest（.xipk 元数据；manifest.json 优先，兼容旧 manifest.yaml）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
@@ -61,6 +86,10 @@ pub struct PluginManifest {
     /// 入口脚本（相对插件包根目录），默认 main.js。
     #[serde(default = "default_entry")]
     pub entry: String,
+    /// 宿主最低版本（仅 Android 宿主应用版本）。
+    ///
+    /// 这是与 Android 共享的字段，Android 侧模型是 `String`（kaml / kotlinx），
+    /// 类型不能改，否则整条索引或整包清单在 Android 上反序列化失败。
     #[serde(rename = "minHostVersion", default)]
     pub min_host_version: String,
     #[serde(rename = "maxHostVersion", default)]
@@ -73,8 +102,11 @@ pub struct PluginManifest {
     /// 网络访问声明。
     #[serde(default)]
     pub network: NetworkDecl,
-    /// 目标平台（android/ios/windows/macos/linux）；缺省视为 `["android"]`
-    /// （同 Android `PluginInfo.supportsPlatform`）。
+    /// 目标平台，逐个写明：`android` / `ios` / `macos` / `windows` / `linux`。
+    ///
+    /// 声明了就按列表匹配；未声明时 [`PluginManifest::supports_platform`] 按
+    /// Android 契约视为 `["android"]`，而安装门禁
+    /// [`PluginManifest::runs_on_platform`] 放行（存量包兼容）。
     #[serde(default)]
     pub platforms: Vec<String>,
     /// 工具栏按钮声明。
@@ -159,10 +191,32 @@ impl PluginManifest {
         if self.platforms.is_empty() {
             platform == "android"
         } else {
-            self.platforms
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(platform))
+            platform_matches(&self.platforms, platform)
         }
+    }
+
+    /// 安装门禁用的平台判断：未声明 `platforms` 的存量包一律放行，
+    /// 声明了才按列表匹配。
+    pub fn runs_on_platform(&self, platform: &str) -> bool {
+        self.platforms.is_empty() || platform_matches(&self.platforms, platform)
+    }
+
+    /// 当前平台是否可安装 / 运行。
+    pub fn runs_on_current_platform(&self) -> bool {
+        self.runs_on_platform(current_platform())
+    }
+
+    /// 给定宿主版本是否满足包内声明的 `minHostVersion` / `maxHostVersion`。
+    ///
+    /// **桌面端安装流程不调用它**：那两个字段是 Android 应用版本（3.x），桌面三端
+    /// 各有自己的应用版本（0.1.0 / 0.3.1 / …），没有可共用的下限。宿主若要自行
+    /// 校验（例如某个发行版有额外要求），再显式调用并自行决定传什么版本。
+    pub fn host_compatible(&self, host_version: &str) -> bool {
+        version_compatible(
+            host_version,
+            &self.min_host_version,
+            &self.max_host_version,
+        )
     }
 
     /// 从已解压的插件目录读取 manifest：manifest.json 优先，回落 manifest.yaml。
@@ -365,10 +419,64 @@ toolbarButtons:
         assert!(m.supports_platform("macos"));
         assert!(!m.supports_platform("ios"));
 
-        // 缺省视为 ["android"]（同 Android 契约）
+        // 缺省视为 ["android"]（同 Android 契约）；但安装门禁对存量包放行
         let m = PluginManifest::parse("id: a\nname: b\nversion: 1\n").unwrap();
         assert!(m.supports_platform("android"));
         assert!(!m.supports_platform("macos"));
+        assert!(m.runs_on_platform("macos"), "未声明 platforms 的存量包应放行");
+        assert!(m.runs_on_platform("android"));
+    }
+
+    /// `platforms` 必须逐个写具体平台；大小写不敏感，但不接受 `pc` 简写。
+    #[test]
+    fn platforms_are_explicit() {
+        let m = PluginManifest::parse(
+            "id: a\nname: b\nversion: 1\nplatforms: [android, macOS, windows, linux]\n",
+        )
+        .unwrap();
+        assert!(m.supports_platform("android"));
+        assert!(m.supports_platform("macos"), "平台名大小写不敏感");
+        assert!(m.supports_platform("windows"));
+        assert!(m.supports_platform("linux"));
+        assert!(!m.supports_platform("ios"));
+
+        // 只支持 Android 的包，在桌面端拒绝安装
+        let android_only = PluginManifest::parse(
+            "id: a\nname: b\nversion: 1\nplatforms: [android]\n",
+        )
+        .unwrap();
+        assert!(!android_only.runs_on_platform("macos"));
+        assert!(android_only.runs_on_platform("android"));
+
+        // `pc` 不是合法平台名，写了也不生效（必须逐个列出）
+        let pc_shorthand = PluginManifest::parse(
+            "id: a\nname: b\nversion: 1\nplatforms: [android, pc]\n",
+        )
+        .unwrap();
+        assert!(!pc_shorthand.runs_on_platform("macos"));
+    }
+
+    /// `minHostVersion` 只描述 Android 宿主应用版本；桌面三端版本各不相同，
+    /// 因此安装流程不校验它，需要时宿主自己用 `host_compatible` 判断。
+    #[test]
+    fn host_version_is_android_only_and_opt_in() {
+        let yaml = r#"id: a
+name: b
+version: 1
+platforms: [android, macos, windows, linux]
+minHostVersion: '3.0.0'
+maxHostVersion: '3.9.9'
+"#;
+        let m = PluginManifest::parse(yaml).unwrap();
+        // 字段本身照常解析（Android 侧语义不变）
+        assert_eq!(m.min_host_version, "3.0.0");
+        assert_eq!(m.max_host_version, "3.9.9");
+        // 桌面端不会因为 Android 的 3.0.0 被挡：安装门禁只看平台
+        assert!(m.runs_on_platform("macos"));
+        // 宿主若想自行校验，可以显式调；判断规则与 Android 一致（>= min 且 <= max）
+        assert!(!m.host_compatible("0.1.0"));
+        assert!(m.host_compatible("3.0.0"));
+        assert!(!m.host_compatible("3.9.9.1"));
     }
 
     #[test]

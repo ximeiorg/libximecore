@@ -663,15 +663,22 @@ fn plugins_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
 }
 
 fn plugin_list<'a>(store: &'a MarketPluginState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    // 只列当前平台能装的：索引里 `platforms: [android]` 的插件在桌面端不出现，
+    // 否则点了「安装」才在门禁处报错。
+    let available: Vec<&MarketPlugin> = store
+        .plugins
+        .iter()
+        .filter(|p| p.runs_on_current_platform())
+        .collect();
+
     let tags: Vec<String> = PLUGIN_CATEGORIES
         .iter()
-        .filter(|(key, _)| store.plugins.iter().any(|p| plugin_kind(p) == *key))
+        .filter(|(key, _)| available.iter().any(|p| plugin_kind(p) == *key))
         .map(|(_, label)| label.to_string())
         .collect();
 
-    let plugins: Vec<&MarketPlugin> = store
-        .plugins
-        .iter()
+    let plugins: Vec<&MarketPlugin> = available
+        .into_iter()
         .filter(|p| {
             store
                 .selected_tag
@@ -682,7 +689,11 @@ fn plugin_list<'a>(store: &'a MarketPluginState, colors: &'a ThemeColors) -> Ele
         .collect();
 
     if plugins.is_empty() {
-        return center_msg(colors, "没有匹配的插件");
+        return if store.plugins.is_empty() {
+            center_msg(colors, "没有匹配的插件")
+        } else {
+            center_msg(colors, "当前平台暂无可用的插件")
+        };
     }
 
     let mut list = column![].spacing(8).width(Length::Fill);

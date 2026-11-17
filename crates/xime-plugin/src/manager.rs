@@ -28,8 +28,11 @@ pub enum ManagerError {
     MissingEntry(String),
     #[error("插件已安装: {0}")]
     AlreadyInstalled(String),
-    #[error("宿主版本不满足插件要求: {0}")]
-    IncompatibleHost(String),
+    #[error("插件不支持当前平台 {platform}（声明: {platforms:?}）")]
+    IncompatiblePlatform {
+        platform: String,
+        platforms: Vec<String>,
+    },
     #[error("插件包超出限制: {0}")]
     PackageLimit(String),
 }
@@ -123,7 +126,7 @@ impl PluginManager {
     /// 安装 .xipk 压缩包到插件目录。
     ///
     /// - 校验包内 manifest（manifest.json 优先，兼容 manifest.yaml）与入口脚本存在
-    /// - 宿主版本门禁（minHostVersion/maxHostVersion，同 Android InstallerManager）
+    /// - 平台门禁（`platforms`）；`minHostVersion` 属 Android 应用版本，桌面端不校验
     /// - 限额：包 ≤10MB、条目 ≤512、解压总量 ≤64MB；`lib/` 前缀条目跳过
     /// - 已安装同版本时报错；不同版本时覆盖（保持 enabled 状态）
     pub fn install_from_zip(&self, xipk: &Path, force: bool) -> Result<PluginRecord, ManagerError> {
@@ -163,7 +166,7 @@ impl PluginManager {
                 .ok_or(ManagerError::MissingManifest)?;
             PluginManifest::parse(&yaml)?
         };
-        check_host_compatibility(&manifest)?;
+        self.check_platform(&manifest)?;
         let id = manifest.id.clone();
 
         // 入口脚本必须在包内
@@ -215,7 +218,7 @@ impl PluginManager {
         force: bool,
     ) -> Result<PluginRecord, ManagerError> {
         let manifest = PluginManifest::from_dir(source)?;
-        check_host_compatibility(&manifest)?;
+        self.check_platform(&manifest)?;
         let id = manifest.id.clone();
 
         if !source.join(&manifest.entry).exists() {
@@ -302,17 +305,24 @@ impl PluginManager {
     }
 }
 
-/// 宿主版本门禁：JS 插件宿主代次以 SDK_VERSION 表达（插件声明的
-/// minHostVersion 3.0.0 指向 Android 3.0 / 桌面对齐代次）。
-fn check_host_compatibility(manifest: &PluginManifest) -> Result<(), ManagerError> {
-    let host = crate::runtime::SDK_VERSION;
-    if !manifest::version_compatible(host, &manifest.min_host_version, &manifest.max_host_version) {
-        return Err(ManagerError::IncompatibleHost(format!(
-            "宿主 {host} 不在 [{}, {}] 区间内",
-            manifest.min_host_version, manifest.max_host_version
-        )));
+impl PluginManager {
+    /// 安装门禁：只校验平台。
+    ///
+    /// 未声明 `platforms` 的存量包放行；声明了则要求命中当前平台。
+    ///
+    /// **不校验 `minHostVersion`**：那是 Android 应用版本（3.x），桌面三端是
+    /// 各自的应用版本（0.1.0 / 0.3.1 / …），没有可共用的口径。宿主若确实需要，
+    /// 可自己用 [`PluginManifest::host_compatible`] 判断，安装流程不拦。
+    fn check_platform(&self, manifest: &PluginManifest) -> Result<(), ManagerError> {
+        let platform = manifest::current_platform();
+        if !manifest.runs_on_platform(platform) {
+            return Err(ManagerError::IncompatiblePlatform {
+                platform: platform.to_string(),
+                platforms: manifest.platforms.clone(),
+            });
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn now_string() -> String {
@@ -484,32 +494,57 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    #[test]
-    fn install_rejects_incompatible_host_version() {
-        let dir = std::env::temp_dir().join(format!("xime_plugin_ver_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let xipk = dir.join("future.xipk");
+    /// 造一个最小插件包（manifest + 空 main.js）。
+    fn write_xipk(dir: &Path, name: &str, manifest: &str) -> PathBuf {
+        let xipk = dir.join(name);
         let file = std::fs::File::create(&xipk).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
             .unwrap();
-        zip.write_all(
-            br#"{"id":"com.example.future","name":"Future","version":"9.0.0","type":"emoji",
-                "entry":"main.js","minHostVersion":"9.0.0"}"#,
-        )
-        .unwrap();
+        zip.write_all(manifest.as_bytes()).unwrap();
         zip.start_file("main.js", zip::write::SimpleFileOptions::default())
             .unwrap();
         zip.write_all(b"globalThis.plugin = {};\n").unwrap();
         zip.finish().unwrap();
+        xipk
+    }
 
+    #[test]
+    fn install_gates_on_platform_only() {
+        let dir = std::env::temp_dir().join(format!("xime_plugin_platform_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         let manager = PluginManager::new(dir.join("root"));
-        assert!(matches!(
-            manager.install_from_zip(&xipk, false),
-            Err(ManagerError::IncompatibleHost(_))
-        ));
+
+        // 1) 目标平台不含当前平台 → 拒绝
+        let ios_only = write_xipk(
+            &dir,
+            "ios.xipk",
+            r#"{"id":"com.example.ios","name":"I","version":"1.0.0","type":"emoji",
+                "entry":"main.js","platforms":["ios"]}"#,
+        );
+        match manager.install_from_zip(&ios_only, false) {
+            Err(ManagerError::IncompatiblePlatform { platforms, .. }) => {
+                assert_eq!(platforms, vec!["ios".to_string()]);
+            }
+            other => panic!("应被平台门禁挡住: {other:?}"),
+        }
+
+        // 2) 声明了桌面平台，即使 minHostVersion 是 Android 的 9.0.0 也照装：
+        //    桌面端不做版本门禁（各平台应用版本不同代）。
+        let desktop_ok = write_xipk(
+            &dir,
+            "desktop.xipk",
+            r#"{"id":"com.example.desktop","name":"D","version":"1.0.0","type":"emoji",
+                "entry":"main.js","platforms":["android","macos","windows","linux"],
+                "minHostVersion":"9.0.0"}"#,
+        );
+        if manifest::current_platform() != "android" {
+            assert!(
+                manager.install_from_zip(&desktop_ok, false).is_ok(),
+                "桌面端不该因为 Android 的 minHostVersion 被挡"
+            );
+        }
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

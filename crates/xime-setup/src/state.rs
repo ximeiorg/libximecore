@@ -3059,6 +3059,7 @@ fn plugins_dir() -> std::path::PathBuf {
 
 /// 构建插件管理器（注册表/配置都在 plugins 目录下）。
 fn plugin_manager() -> xime_plugin::PluginManager {
+    // 安装门禁只看平台；`minHostVersion` 是 Android 应用版本，桌面端不校验。
     xime_plugin::PluginManager::new(plugins_dir())
 }
 
@@ -6642,12 +6643,30 @@ pub struct MarketPlugin {
     pub current_version: Option<String>,
     #[serde(default)]
     pub versions: Vec<MarketPluginVersion>,
+    /// 目标平台，逐个写明：`android` / `macos` / `windows` / `linux`。
+    /// 缺省视为通用插件（存量条目兼容）。
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// 宿主最低版本（Android 应用版本；与 Android 共享的字段，类型不能改）。
+    #[serde(rename = "minHostVersion", default)]
+    pub min_host_version: String,
+    #[serde(rename = "maxHostVersion", default)]
+    pub max_host_version: String,
     #[serde(rename = "appVersion", default)]
     pub app_version: Option<String>,
     #[serde(default)]
     pub license: Option<String>,
     #[serde(default)]
     pub warning: Option<String>,
+}
+
+impl MarketPlugin {
+    /// 当前平台是否可安装（未声明 `platforms` 视为通用插件）。
+    pub fn runs_on_current_platform(&self) -> bool {
+        self.platforms.is_empty()
+            || xime_plugin::platform_matches(&self.platforms, xime_plugin::current_platform())
+    }
+
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -7803,6 +7822,46 @@ plugins:
             version.download_url[0].sha256.is_some(),
             "sha256 用于下载校验"
         );
+
+        // 平台与版本要求必须解析出来：桌面端据此过滤商店列表、安装时再门禁一次。
+        assert_eq!(plugin.platforms, vec!["android".to_string()]);
+        assert_eq!(plugin.min_host_version, "3.0.0");
+        if xime_plugin::current_platform() != "android" {
+            assert!(!plugin.runs_on_current_platform(), "仅 Android 的插件不该出现在桌面商店");
+        }
+    }
+
+    /// 索引里的 `platforms` 逐个写明平台；`minHostVersion` 是 Android 应用版本
+    /// （类型与语义都不能动），桌面端只做平台门禁、不做版本门禁。
+    #[test]
+    fn plugin_index_platform_and_version_gating() {
+        let yaml = r#"
+index_version: 2
+updated_at: '2026-11-17'
+plugins:
+- id: com.example.pc_ok
+  name: 桌面插件
+  platforms: [android, macos, windows, linux]
+  minHostVersion: '3.0.0'
+- id: com.example.android_only
+  name: 仅安卓
+  platforms: [android]
+- id: com.example.legacy
+  name: 未声明平台
+"#;
+        let index: PluginIndex = serde_yaml::from_str(yaml).unwrap();
+        let ok = &index.plugins[0];
+        let android_only = &index.plugins[1];
+        let legacy = &index.plugins[2];
+
+        // 未声明 platforms 的存量条目视为通用，不会被过滤掉
+        assert!(legacy.platforms.is_empty());
+        assert!(legacy.runs_on_current_platform());
+
+        if xime_plugin::is_pc_platform(xime_plugin::current_platform()) {
+            assert!(ok.runs_on_current_platform(), "列了桌面平台就该可见");
+            assert!(!android_only.runs_on_current_platform());
+        }
     }
 
     const MODEL_INDEX_YAML: &str = r#"

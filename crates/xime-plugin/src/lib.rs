@@ -19,7 +19,10 @@ pub use capabilities::{
     ClipboardSyncCapabilities, EmojiCapabilities, PluginCapabilities, SpeechCapabilities,
     ToolCapabilities,
 };
-pub use manifest::{NetworkDecl, PluginManifest, PluginType, ToolbarButton};
+pub use manifest::{
+    current_platform, is_pc_platform, platform_matches, NetworkDecl, PluginManifest, PluginType,
+    ToolbarButton, DESKTOP_PLATFORMS,
+};
 pub use runtime::{
     BackupUploadResult, CandidateTransformCircuitBreaker, CandidateTransformItem,
     CandidateTransformOutcome, EmojiItem, EmojiLayout, PluginRuntime, RemoteBackupEntry,
