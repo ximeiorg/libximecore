@@ -314,9 +314,38 @@ pub fn main_translator(schema_text: &str) -> Option<TranslatorInfo> {
 
 /// 读某方案的翻译器信息；方案文件不存在或没有翻译器时返回 `None`。
 pub fn schema_translator(user_dir: &Path, schema_id: &str) -> Option<TranslatorInfo> {
-    let path = user_dir.join(format!("{schema_id}.schema.yaml"));
-    let text = std::fs::read_to_string(path).ok()?;
-    main_translator(&text)
+    schema_translator_in(&schema_search_dirs(user_dir), schema_id)
+}
+
+/// 按给定目录顺序找方案（测试直接用它，免得受真实共享目录影响）。
+fn schema_translator_in(dirs: &[PathBuf], schema_id: &str) -> Option<TranslatorInfo> {
+    for dir in dirs {
+        let path = dir.join(format!("{schema_id}.schema.yaml"));
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            return main_translator(&text);
+        }
+    }
+    None
+}
+
+/// 方案文件的查找目录：用户目录优先，回落到共享目录。
+///
+/// macOS / Linux 是「双目录模型」：方案装在
+/// `XimeYi.app/Contents/SharedSupport/rime`，用户目录里只有用户数据
+/// （`*.userdb`、`*.custom.yaml`、导入的词典）。只在用户目录里找
+/// `<schema>.schema.yaml`，会得出「一个方案都没有」的结论，导入页的
+/// 「挂载方案」就永远是空的。
+fn schema_search_dirs(user_dir: &Path) -> Vec<PathBuf> {
+    let (shared, _) = crate::rime_deploy::get_data_dirs();
+    schema_search_dirs_in(user_dir, &shared)
+}
+
+fn schema_search_dirs_in(user_dir: &Path, shared: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![user_dir.to_path_buf()];
+    if shared != user_dir && shared.is_dir() {
+        dirs.push(shared.to_path_buf());
+    }
+    dirs
 }
 
 /// 该方案能否挂这种编码体系的词库。
@@ -774,9 +803,20 @@ fn apply_packs(
         written.push(scheme_id.to_string());
 
         let custom = user_dir.join(format!("{scheme_id}.custom.yaml"));
-        let original = std::fs::read_to_string(&custom).ok();
+        let dirs = schema_search_dirs(user_dir);
+        let schema_exists = dirs
+            .iter()
+            .any(|dir| dir.join(format!("{scheme_id}.schema.yaml")).exists());
+        // 用户目录没有 custom 时，用共享目录（方案包自带）的那份做基线。
+        // Rime 对同名文件是「用户目录覆盖共享目录」而不是合并，直接凭托管块
+        // 新建一份会把方案包里的 patch 整份丢掉。
+        let original = std::fs::read_to_string(&custom).ok().or_else(|| {
+            dirs.iter()
+                .skip(1)
+                .find_map(|dir| std::fs::read_to_string(dir.join(format!("{scheme_id}.custom.yaml"))).ok())
+        });
         // 方案本身不在了就别凭空造 custom.yaml（只更新已存在的文件）。
-        if original.is_none() && !user_dir.join(format!("{scheme_id}.schema.yaml")).exists() {
+        if original.is_none() && !schema_exists {
             continue;
         }
 
@@ -1189,6 +1229,27 @@ mod tests {
 
         let custom = std::fs::read_to_string(root.join("pinyin.custom.yaml")).expect("custom");
         assert!(custom.contains(&format!("- {}", outcome.record.id)));
+    }
+
+    /// 方案装在共享目录、用户目录只有数据时，也要能认出「这个方案能挂拼音词库」。
+    ///
+    /// 这正是 macOS 的实际布局（方案在 `SharedSupport/rime`），只在用户目录
+    /// 找会得出「没有方案可挂」——导入页的挂载候选因此永远是空的。
+    #[test]
+    fn finds_schema_in_shared_dir() {
+        let user = temp_dir();
+        let shared = temp_dir();
+        let user_dir = user.path();
+        let shared_dir = shared.path();
+        write_schema(shared_dir, "pinyin", &["script_translator"]);
+
+        let dirs = schema_search_dirs_in(user_dir, shared_dir);
+        assert_eq!(schema_translator_in(&dirs, "pinyin").map(|i| i.component), Some("script_translator".to_string()));
+
+        // 用户目录同名方案优先（就地覆盖方案包里的定义）
+        write_schema(user_dir, "pinyin", &["table_translator"]);
+        let dirs = schema_search_dirs_in(user_dir, shared_dir);
+        assert_eq!(schema_translator_in(&dirs, "pinyin").map(|i| i.component), Some("table_translator".to_string()));
     }
 
     /// 旧 `manifest.json` 一次性迁进表：方案绑定与 namespace 不能丢。

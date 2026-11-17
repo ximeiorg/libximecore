@@ -42,6 +42,10 @@ struct SchemaSnapshot {
     schemas: Vec<SchemaInfo>,
     packages: Vec<String>,
     builtin_restorable: bool,
+    /// 内置方案文件是否落在**用户目录**（能删）——双目录模型下它们在 app 包内，
+    /// 「清理内置方案」删不动，只会在用户目录留一个「已清理」标记，反而让
+    /// 宿主以为用户不需要内置方案。
+    builtin_cleanable: bool,
     deployed: Vec<String>,
 }
 
@@ -1307,6 +1311,7 @@ impl SettingsState {
         }
         self.input_schema.schema_packages = snapshot.packages;
         self.input_schema.builtin_restorable = snapshot.builtin_restorable;
+        self.input_schema.builtin_cleanable = snapshot.builtin_cleanable;
         self.input_schema.deployed_schema_ids = snapshot.deployed;
         self.schemas_loaded = true;
     }
@@ -3043,6 +3048,9 @@ fn load_schema_snapshot() -> SchemaSnapshot {
     let mut schemas = Vec::new();
     let mut packages = Vec::new();
     let mut builtin_restorable = false;
+    let mut builtin_cleanable = false;
+    // 双目录模型下方案在共享目录（app 包内），注册表只登记用户目录的文件。
+    let (shared_dir, _) = get_data_dirs();
 
     if let Ok(manager) = SchemaManager::new() {
         schemas = manager.get_schema_list();
@@ -3059,17 +3067,40 @@ fn load_schema_snapshot() -> SchemaSnapshot {
                 let rel = format!("{}.schema.yaml", schema.schema_id);
                 if let Some(pkg) = SchemaManifest::package_of(&registry, &rel) {
                     packages[i] = pkg;
+                } else if shared_dir.join(&rel).is_file() {
+                    // 随包分发的方案：注册表里查不到（它只登记用户目录），
+                    // 但文件在共享目录里，归属就是内置包。这里只影响分组显示，
+                    // 不参与卸载/校验，避免误删 app 包内的文件。
+                    packages[i] = BUILTIN_PACKAGE_ID.to_string();
                 }
             }
             // 内置方案可一键还原的判定：market/builtin/ 备份存在，且当前
             // builtin 条目里没有任何方案文件——包括被卸载（注册表无条目）和
             // 只剩无主共享词典的残缺条目。
-            let builtin_has_schema = registry
+            // 「内置方案还在不在」要看共享目录：macOS/Linux 的方案不落在用户目录。
+            let shared_has_schema = std::fs::read_dir(&shared_dir)
+                .map(|entries| {
+                    entries.flatten().any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .ends_with(".schema.yaml")
+                    })
+                })
+                .unwrap_or(false);
+            let builtin_in_user_dir = registry
                 .get(BUILTIN_PACKAGE_ID)
                 .map(|entry| entry.files.iter().any(|f| f.ends_with(".schema.yaml")))
                 .unwrap_or(false);
-            builtin_restorable =
-                !builtin_has_schema && !manifest.builtin_backup_files().is_empty();
+            let builtin_has_schema = builtin_in_user_dir || shared_has_schema;
+            builtin_cleanable = builtin_in_user_dir;
+            // 备份里得真有方案文件才算「可还原」：目录里只剩 `.DS_Store`
+            // 时 `is_empty()` 为 false，会把空备份报成可还原。
+            let backup_has_schema = manifest
+                .builtin_backup_files()
+                .iter()
+                .any(|file| file.ends_with(".schema.yaml"));
+            builtin_restorable = !builtin_has_schema && backup_has_schema;
         }
     }
 
@@ -3077,6 +3108,7 @@ fn load_schema_snapshot() -> SchemaSnapshot {
         schemas,
         packages,
         builtin_restorable,
+        builtin_cleanable,
         deployed: deployed_schema_ids(),
     }
 }
@@ -6961,6 +6993,8 @@ pub struct InputSchemaState {
     pub current_tab: usize,
     /// 内置方案包已卸载但 `market/builtin/` 备份仍在 → 可一键还原。
     pub builtin_restorable: bool,
+    /// 内置方案文件在用户目录里 → 才提供「清理内置方案」。
+    pub builtin_cleanable: bool,
     /// `build/` 里有编译产物的方案 id（= 真正「已部署」的方案）。
     ///
     /// 目录里有 `*.schema.yaml` 不等于能用：librime 只编译启用列表里的方案，

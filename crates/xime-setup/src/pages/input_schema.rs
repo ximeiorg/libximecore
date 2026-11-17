@@ -357,7 +357,12 @@ fn installed_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> El
     }
 
     // 内置方案包被卸载（隔离安装第三方方案）后可从备份一键还原。
-    if groups.iter().any(|(pkg, _)| pkg == BUILTIN_PACKAGE_ID) {
+    //
+    // 「清理」只在方案文件位于用户目录时提供：macOS/Linux 的内置方案在
+    // app 包内（共享目录），删不掉也不该删，这个操作只会写「已清理」标记。
+    if settings.input_schema.builtin_cleanable
+        && groups.iter().any(|(pkg, _)| pkg == BUILTIN_PACKAGE_ID)
+    {
         let cleaning = busy_id == Some(BUILTIN_PACKAGE_ID);
         list = list.push(clean_card(
             cleaning,

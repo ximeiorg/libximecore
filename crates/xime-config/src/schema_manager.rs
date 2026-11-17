@@ -2,51 +2,68 @@ use crate::rime_deploy::{get_data_dirs, init_rime_deployer, SchemaInfo};
 use std::collections::HashSet;
 
 fn replace_schema_list(content: &str, new_list: &str) -> String {
-    if content.is_empty() {
-        let mut result = String::from("patch:\n  schema_list:\n");
-        for item in new_list.lines() {
-            result.push_str(&format!("    {}\n", item.trim()));
+    // 去重保序：读侧可能带回历史重复项（见下），写回去就会越滚越大。
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for item in new_list.lines() {
+        let raw = item.trim();
+        let raw = raw.strip_prefix('-').unwrap_or(raw).trim();
+        let raw = raw.strip_prefix("schema:").unwrap_or(raw).trim();
+        let id = raw.trim_matches('"').trim_matches('\'').to_string();
+        if id.is_empty() {
+            continue;
         }
-        return result;
+        if seen.insert(id.clone()) {
+            ids.push(id);
+        }
+    }
+    let block = || -> String {
+        let mut out = String::new();
+        for id in &ids {
+            out.push_str(&format!("    - schema: {id}\n"));
+        }
+        out
+    };
+
+    if content.trim().is_empty() {
+        return format!("patch:\n  schema_list:\n{}", block());
     }
 
-    let mut result = String::new();
-    let mut replaced = false;
-    let mut inserted_under_patch = false;
     let lines: Vec<&str> = content.lines().collect();
-    let mut i = 0;
+    let has_patch = lines.iter().any(|line| line.trim() == "patch:");
+    // 先整体判断，不能边遍历边决定：`patch:` 排在 `schema_list:` 前面，
+    // 走到 patch 时还不知道后面有没有 schema_list，旧实现于是插一段、后面
+    // 又替换一段——每调用一次多一段（实测攒出 7 段 / 3 万行 / 800KB）。
+    let has_schema_list = lines.iter().any(|line| line.trim() == "schema_list:");
 
+    let mut result = String::new();
+    let mut emitted = false;
+    let mut inserted = false;
+    let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
 
-        // 已有 schema_list：整段替换。
         if line.trim() == "schema_list:" {
-            replaced = true;
+            // 跳过整段列表项；第一段换成新列表，之后重复出现的整段丢弃。
             i += 1;
-            while i < lines.len()
-                && lines[i].trim_start().starts_with('-')
-                && lines[i].starts_with("    ")
-            {
+            while i < lines.len() && is_schema_list_item(lines[i]) {
                 i += 1;
             }
-            result.push_str("  schema_list:\n");
-            for item in new_list.lines() {
-                result.push_str(&format!("    {}\n", item.trim()));
+            if !emitted {
+                result.push_str("  schema_list:\n");
+                result.push_str(&block());
+                emitted = true;
             }
             continue;
         }
 
-        // 没有 schema_list 时插到已有 patch 下面，不能再追加一个顶层 patch：
-        // YAML 出现重复 key 时 librime 只取第一个 patch，schema_list 会被静默丢掉，
-        // 表现为部署后没有 build、方案全显示「未启用」。
-        if !replaced && !inserted_under_patch && line.trim() == "patch:" {
+        if !has_schema_list && !inserted && line.trim() == "patch:" {
             result.push_str(line);
             result.push('\n');
             result.push_str("  schema_list:\n");
-            for item in new_list.lines() {
-                result.push_str(&format!("    {}\n", item.trim()));
-            }
-            inserted_under_patch = true;
+            result.push_str(&block());
+            inserted = true;
+            emitted = true;
             i += 1;
             continue;
         }
@@ -56,15 +73,20 @@ fn replace_schema_list(content: &str, new_list: &str) -> String {
         i += 1;
     }
 
-    if !replaced && !inserted_under_patch {
-        result.push_str("\npatch:\n  schema_list:\n");
-        for item in new_list.lines() {
-            result.push_str(&format!("    {}\n", item.trim()));
+    if !emitted {
+        if !has_patch {
+            result.push_str("\npatch:\n");
         }
-        result.push('\n');
+        result.push_str("  schema_list:\n");
+        result.push_str(&block());
     }
 
     result
+}
+
+/// `schema_list` 的列表项：缩进 4 空格且以 `-` 开头（段结束的判据）。
+fn is_schema_list_item(line: &str) -> bool {
+    line.starts_with("    ") && line.trim_start().starts_with('-')
 }
 
 /// 写 `default.custom.yaml` 里的 `patch.menu.page_size`（不需要初始化 librime）。
@@ -272,7 +294,13 @@ impl SchemaManager {
         let Ok(content) = std::fs::read_to_string(&default_custom) else {
             return Vec::new();
         };
-        content.lines().filter_map(extract_schema_line).collect()
+        // 去重保序：历史损坏的文件里同一个 id 可能出现几千次。
+        let mut seen: HashSet<String> = HashSet::new();
+        content
+            .lines()
+            .filter_map(extract_schema_line)
+            .filter(|id| seen.insert(id.clone()))
+            .collect()
     }
 }
 
@@ -383,6 +411,53 @@ mod tests {
         assert!(text.contains("page_size: 9"), "{text}");
         assert!(text.contains("moqi_wan_flypymo"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 替换必须只留一段 schema_list，且其余 patch 内容不动。
+    #[test]
+    fn replace_schema_list_replaces_in_place() {
+        let content = "patch:\n  schema_list:\n    - schema: a\n    - schema: b\n  menu:\n    page_size: 5\n";
+        let out = replace_schema_list(content, "- schema: b\n- schema: c");
+        assert_eq!(out.matches("schema_list:").count(), 1, "{out}");
+        assert!(out.contains("- schema: b"));
+        assert!(out.contains("- schema: c"));
+        assert!(!out.contains("- schema: a"), "旧列表项没清掉: {out}");
+        assert!(out.contains("page_size: 5"), "其它 patch 被删: {out}");
+    }
+
+    /// 历史损坏文件（多段 + 段内重复）在下次写入时自愈。
+    #[test]
+    fn replace_schema_list_collapses_duplicate_blocks() {
+        let content = "patch:\n  schema_list:\n    - schema: a\n    - schema: a\n    - schema: a\n  schema_list:\n    - schema: b\n  menu:\n    page_size: 3\n";
+        let out = replace_schema_list(content, "- schema: a\n- schema: a\n- schema: b");
+        assert_eq!(out.matches("schema_list:").count(), 1, "{out}");
+        assert_eq!(out.matches("- schema: a").count(), 1, "没去重: {out}");
+        assert!(out.contains("- schema: b"));
+        assert!(out.contains("page_size: 3"), "其它 patch 被删: {out}");
+    }
+
+    /// 反复写入不能膨胀——旧实现每调一次多一段，读回来再写，列表指数增长。
+    #[test]
+    fn replace_schema_list_is_stable_across_calls() {
+        let mut content = String::from("patch:\n  schema_list:\n    - schema: a\n");
+        for _ in 0..10 {
+            content = replace_schema_list(&content, "- schema: a\n- schema: b");
+        }
+        assert_eq!(content.matches("schema_list:").count(), 1, "{content}");
+        let items = content
+            .lines()
+            .filter(|line| line.trim_start().starts_with("- schema:"))
+            .count();
+        assert_eq!(items, 2, "{content}");
+    }
+
+    /// 文件里没有 patch 时要新建一整块，而不是丢掉已有内容。
+    #[test]
+    fn replace_schema_list_creates_patch_when_missing() {
+        let out = replace_schema_list("config_version: \"1\"\n", "- schema: a");
+        assert!(out.contains("config_version"), "{out}");
+        assert_eq!(out.matches("patch:").count(), 1, "{out}");
+        assert_eq!(out.matches("schema_list:").count(), 1, "{out}");
     }
 
     #[test]
