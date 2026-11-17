@@ -5,9 +5,12 @@
 //! 具体格式由 `xime-lexicon` 的解析器负责；本模块只处理
 //! 「统一词条模型 → 派生词典 → packs」。
 //!
-//! 记录写在 `<用户目录>/imported_dicts/manifest.json`（纯文件，不引数据库），
-//! 派生词典与方案同目录，交给 Rime 部署编译。
+//! 记录写在统一库 `xime.db` 的 `imported_lexicons` 表（与 Android 同表同列），
+//! 派生词典与方案同目录，交给 Rime 部署编译。旧版
+//! `<用户目录>/imported_dicts/manifest.json` 由 [`migrate_manifest_file`]
+//! 一次性搬进表并改名为 `.migrated`。
 
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -102,35 +105,181 @@ pub fn dict_path(user_dir: &Path, id: &str) -> PathBuf {
     user_dir.join(format!("{id}.dict.yaml"))
 }
 
-/// 读清单。文件不存在/损坏都按空清单处理（不让坏 JSON 卡住整个页面）。
+/// 记录所在的统一库路径（Rime 用户目录的同级 `xime.db`）。
+pub fn db_path(user_dir: &Path) -> PathBuf {
+    crate::app_db::db_path_beside(user_dir)
+}
+
+/// 读清单；库打不开或记录损坏都按空清单处理（不让存储问题卡住整个页面）。
 pub fn list(user_dir: &Path) -> Vec<ImportedDict> {
-    let path = manifest_path(user_dir);
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    match serde_json::from_str::<Manifest>(&text) {
-        Ok(manifest) => manifest.items,
+    match open_db(user_dir).and_then(|conn| load_all(&conn)) {
+        Ok(items) => items,
         Err(error) => {
-            tracing::warn!("[imported_dict] 清单解析失败 {}: {error}", path.display());
+            tracing::warn!("[imported_dict] 读取导入记录失败：{error}");
             Vec::new()
         }
     }
 }
 
-fn save_manifest(user_dir: &Path, items: &[ImportedDict]) -> Result<(), String> {
+/// 打开统一库，顺手把旧 `manifest.json` 搬进表（幂等）。
+fn open_db(user_dir: &Path) -> Result<Connection, String> {
+    let conn = crate::app_db::open(&db_path(user_dir))
+        .map_err(|e| format!("打开数据库失败：{e}"))?;
+    migrate_manifest_file(user_dir, &conn)?;
+    Ok(conn)
+}
+
+/// 旧版 `manifest.json` → `imported_lexicons` 表，只跑一次。
+///
+/// 表里已有记录就不搬（否则会把用户新导入的盖掉）；文件解析失败也保留原样，
+/// 交给用户自己看——反正读出来是空清单，页面不会崩。
+fn migrate_manifest_file(user_dir: &Path, conn: &Connection) -> Result<(), String> {
     let path = manifest_path(user_dir);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("创建目录 {} 失败：{e}", parent.display()))?;
+    if !path.is_file() {
+        return Ok(());
     }
-    let manifest = Manifest {
-        items: items.to_vec(),
+    let existing: i64 = conn
+        .query_row("SELECT COUNT(*) FROM imported_lexicons", [], |row| row.get(0))
+        .map_err(|e| format!("统计导入记录失败：{e}"))?;
+    if existing > 0 {
+        return Ok(());
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
     };
-    let text = serde_json::to_string_pretty(&manifest).map_err(|e| format!("序列化清单失败：{e}"))?;
-    // 先写临时文件再改名：写一半崩溃不会留下半截 JSON。
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| format!("写清单失败：{e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("替换清单失败：{e}"))
+    let Ok(manifest) = serde_json::from_str::<Manifest>(&text) else {
+        tracing::warn!(
+            "[imported_dict] 旧清单解析失败，保留原文件 {}",
+            path.display()
+        );
+        return Ok(());
+    };
+    if manifest.items.is_empty() {
+        return Ok(());
+    }
+    write_all(conn, &manifest.items)?;
+    // 改名而不是删：万一迁移字段有偏差，用户还能找回原文件。
+    let _ = std::fs::rename(&path, path.with_extension("json.migrated"));
+    tracing::info!(
+        "[imported_dict] 已把 {} 条导入记录从 manifest.json 迁入 xime.db",
+        manifest.items.len()
+    );
+    Ok(())
+}
+
+fn load_all(conn: &Connection) -> Result<Vec<ImportedDict>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, displayName, formatId, formatName, codeSystem, schemes,
+                    entryCount, enabled, sourceName, createdAt
+             FROM imported_lexicons
+             ORDER BY createdAt DESC, id DESC",
+        )
+        .map_err(|e| format!("查询导入记录失败：{e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let schemes: String = row.get(5)?;
+            let (attached_schemas, namespaces) = decode_schemes(&schemes);
+            Ok(ImportedDict {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                entry_count: row.get::<_, i64>(6)?.max(0) as usize,
+                attached_schemas,
+                namespaces,
+                created_at: row.get(9)?,
+                format_id: row.get(2)?,
+                format_name: row.get(3)?,
+                source_name: row.get(8)?,
+                code_system: row.get(4)?,
+                enabled: row.get::<_, i64>(7)? != 0,
+            })
+        })
+        .map_err(|e| format!("查询导入记录失败：{e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("读取导入记录失败：{e}"))
+}
+
+/// 整份重写记录（数据量只有几本~几十本，事务内清空再插最省心）。
+fn save_manifest(user_dir: &Path, items: &[ImportedDict]) -> Result<(), String> {
+    let conn = open_db(user_dir)?;
+    write_all(&conn, items)
+}
+
+fn write_all(conn: &Connection, items: &[ImportedDict]) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("开启事务失败：{e}"))?;
+    tx.execute("DELETE FROM imported_lexicons", [])
+        .map_err(|e| format!("清空导入记录失败：{e}"))?;
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT OR REPLACE INTO imported_lexicons
+                 (id, displayName, dictFile, formatId, formatName, codeSystem, schemes,
+                  entryCount, enabled, sourceName, createdAt)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )
+            .map_err(|e| format!("准备写入记录失败：{e}"))?;
+        for item in items {
+            stmt.execute(params![
+                item.id.as_str(),
+                item.display_name.as_str(),
+                format!("{}.dict.yaml", item.id),
+                item.format_id.as_str(),
+                item.format_name.as_str(),
+                item.code_system.as_str(),
+                encode_schemes(&item.attached_schemas, &item.namespaces),
+                item.entry_count as i64,
+                i64::from(item.enabled),
+                item.source_name.as_str(),
+                item.created_at,
+            ])
+            .map_err(|e| format!("写入记录 {} 失败：{e}", item.id))?;
+        }
+    }
+    tx.commit().map_err(|e| format!("提交导入记录失败：{e}"))
+}
+
+/// 方案绑定序列化成 `schemaId=namespace;...`（与 Android `encodeSchemes` 同格式）。
+fn encode_schemes(schemas: &[String], namespaces: &BTreeMap<String, String>) -> String {
+    schemas
+        .iter()
+        .map(|id| {
+            format!(
+                "{id}={}",
+                namespaces
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or("translator")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// `schemaId=namespace;...` → (方案列表, 命名空间表)。
+fn decode_schemes(value: &str) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut schemas = Vec::new();
+    let mut namespaces = BTreeMap::new();
+    for part in value.split(';') {
+        let (schema_id, namespace) = match part.split_once('=') {
+            Some((id, ns)) => (id.trim(), ns.trim()),
+            None => (part.trim(), "translator"),
+        };
+        if schema_id.is_empty() {
+            continue;
+        }
+        schemas.push(schema_id.to_string());
+        namespaces.insert(
+            schema_id.to_string(),
+            if namespace.is_empty() {
+                "translator".to_string()
+            } else {
+                namespace.to_string()
+            },
+        );
+    }
+    (schemas, namespaces)
 }
 
 // ------------------------------------------------------------------
@@ -743,6 +892,17 @@ mod tests {
         tempfile::tempdir().expect("tempdir")
     }
 
+    /// 测试用的 Rime 用户目录：放在临时目录的 `rime/` 子目录下。
+    ///
+    /// 统一库落在用户目录的**同级**（`xime.db`），所以不能让 root 直接就是
+    /// 临时目录——那样所有测试的库都会落到系统的 `/tmp/xime.db` 上互相污染
+    /// （第一次改表时确实踩到了：id 冲突、`list()` 读到别的测试的记录）。
+    fn rime_root(dir: &tempfile::TempDir) -> PathBuf {
+        let root = dir.path().join("rime");
+        std::fs::create_dir_all(&root).expect("mkdir rime");
+        root
+    }
+
     fn write_schema(dir: &Path, id: &str, translators: &[&str]) {
         let list = translators
             .iter()
@@ -844,7 +1004,8 @@ mod tests {
     #[test]
     fn import_writes_dict_and_packs() {
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         write_schema(root, "pinyin", &["script_translator@translator"]);
 
         let outcome = import_parsed(
@@ -879,7 +1040,8 @@ mod tests {
     #[test]
     fn import_without_scheme_only_writes_file() {
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         let outcome = import_parsed(
             root,
             &parsed(vec![entry("你好", "ni hao")]),
@@ -896,7 +1058,8 @@ mod tests {
     #[test]
     fn import_rejects_scheme_with_wrong_translator() {
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         write_schema(root, "wubi", &["table_translator@wubi"]);
         let error = import_parsed(
             root,
@@ -912,7 +1075,8 @@ mod tests {
     #[test]
     fn disable_and_remove_toggle_packs() {
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         write_schema(root, "pinyin", &["script_translator@translator"]);
         let outcome = import_parsed(
             root,
@@ -941,7 +1105,8 @@ mod tests {
     #[test]
     fn remove_keeps_user_patch_content() {
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         write_schema(root, "pinyin", &["script_translator@translator"]);
         std::fs::write(
             root.join("pinyin.custom.yaml"),
@@ -963,7 +1128,8 @@ mod tests {
     #[test]
     fn rebind_moves_pack_between_schemes() {
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         write_schema(root, "pinyin", &["script_translator@translator"]);
         write_schema(root, "double", &["script_translator@translator"]);
         let outcome = import_parsed(
@@ -1002,7 +1168,8 @@ mod tests {
             return;
         }
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         write_schema(root, "pinyin", &["script_translator@translator"]);
 
         let outcome = import_file(root, &sample, &["pinyin".to_string()]).expect("import");
@@ -1024,10 +1191,70 @@ mod tests {
         assert!(custom.contains(&format!("- {}", outcome.record.id)));
     }
 
+    /// 旧 `manifest.json` 一次性迁进表：方案绑定与 namespace 不能丢。
+    #[test]
+    fn migrates_manifest_json_into_table() {
+        let dir = temp_dir();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
+        let path = manifest_path(root);
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
+        let json = r#"{"items":[{"id":"xime_import_abc","display_name":"测试词库",
+            "entry_count":42,"attached_schemas":["pinyin","wubi86"],
+            "namespaces":{"pinyin":"translator","wubi86":"translator@custom"},
+            "created_at":1700000000000,"format_id":"sogou-scel",
+            "format_name":"搜狗细胞词库","source_name":"a.scel",
+            "code_system":"Pinyin","enabled":false}]}"#;
+        std::fs::write(&path, json).expect("write");
+
+        let items = list(root);
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.id, "xime_import_abc");
+        assert_eq!(item.display_name, "测试词库");
+        assert_eq!(item.entry_count, 42);
+        assert_eq!(item.attached_schemas, vec!["pinyin", "wubi86"]);
+        assert_eq!(
+            item.namespaces.get("wubi86").map(String::as_str),
+            Some("translator@custom")
+        );
+        assert!(!item.enabled);
+        assert_eq!(item.format_id, "sogou-scel");
+        assert_eq!(item.created_at, 1_700_000_000_000);
+
+        // 迁完改名，别重复搬
+        assert!(!path.exists());
+        assert!(path.with_extension("json.migrated").exists());
+        // 再读一次仍是同一条（走表，不走文件）
+        assert_eq!(list(root).len(), 1);
+    }
+
+    /// `schemes` 列必须与 Android `encodeSchemes` 同格式，否则跨端读同一张表会错位。
+    #[test]
+    fn schemes_column_matches_android_format() {
+        let mut namespaces = BTreeMap::new();
+        namespaces.insert("pinyin".to_string(), "translator".to_string());
+        namespaces.insert("wubi86".to_string(), "translator@custom".to_string());
+        let encoded = encode_schemes(
+            &["pinyin".to_string(), "wubi86".to_string()],
+            &namespaces,
+        );
+        assert_eq!(encoded, "pinyin=translator;wubi86=translator@custom");
+
+        let (schemas, decoded) = decode_schemes(&encoded);
+        assert_eq!(schemas, vec!["pinyin", "wubi86"]);
+        assert_eq!(decoded, namespaces);
+        // 旧写法（只有 id）→ 默认 translator
+        let (schemas, decoded) = decode_schemes("pinyin");
+        assert_eq!(schemas, vec!["pinyin"]);
+        assert_eq!(decoded.get("pinyin").map(String::as_str), Some("translator"));
+    }
+
     #[test]
     fn corrupt_manifest_is_treated_as_empty() {
         let dir = temp_dir();
-        let root = dir.path();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
         let path = manifest_path(root);
         std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
         std::fs::write(&path, "{not json").expect("write");

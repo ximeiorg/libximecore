@@ -1,3 +1,4 @@
+pub mod app_db;
 pub mod calculator;
 pub mod clipboard_store;
 pub mod imported_dict;

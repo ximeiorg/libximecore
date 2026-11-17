@@ -23,8 +23,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-/// Android ClipboardEntry v4 的 schema 版本（`PRAGMA user_version`）。
-pub const SCHEMA_VERSION: i64 = 4;
+/// 统一库（`xime.db`）的 schema 版本（`PRAGMA user_version`）。
+///
+/// 本模块的**列定义**仍对齐 Android `ClipboardEntry` v4，但整库版本由
+/// [`crate::app_db`] 统一管（v7：剪贴板 + 词库记录 + n 元组 + 安装元数据）。
+pub const SCHEMA_VERSION: i64 = crate::app_db::SCHEMA_VERSION;
 /// 普通剪贴板条目上限（Android: `MAX_ITEMS = 1000`）。
 pub const MAX_CLIPBOARD_ITEMS: i64 = 1000;
 /// 快捷发送条目上限（Android: `MAX_QUICK_SEND_ITEMS = 20`）。
@@ -85,8 +88,7 @@ const MIGRATABLE_COLUMNS: [(&str, &str); 9] = [
 /// 这是**唯一的路径来源**：输入法进程与设置程序都经由 `get_data_dirs()` 解析
 /// 用户数据目录，再取其同级 `clipboard.db`，从而保证读写落在同一个文件上。
 pub fn default_db_path() -> PathBuf {
-    let (_, user) = crate::rime_deploy::get_data_dirs();
-    user.parent().unwrap_or(&user).join("clipboard.db")
+    crate::app_db::default_db_path()
 }
 
 /// 当前时间（Unix 毫秒，对齐 Android `System.currentTimeMillis()`）。
@@ -147,9 +149,9 @@ pub struct ClipboardStore {
 impl ClipboardStore {
     /// 打开（或创建）数据库并把 schema 升级到 v4。
     pub fn open(db_path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        let conn = Connection::open(db_path)?;
-        // WAL：输入法进程与设置程序/server 多进程读写同一文件。
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        // 库文件、WAL、版本号统一由 app_db 负责（含旧 clipboard.db 改名），
+        // 这里只补自己的列——剪贴板只是 xime.db 里的一张表。
+        let conn = crate::app_db::open(db_path.as_ref())?;
         migrate_to_v4(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -159,6 +161,7 @@ impl ClipboardStore {
     /// 内存库（降级用）：磁盘库打不开时提供空实例，避免调用方 panic。
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
+        crate::app_db::ensure_schema(&conn)?;
         migrate_to_v4(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -388,8 +391,7 @@ fn migrate_to_v4(conn: &Connection) -> rusqlite::Result<()> {
     }
     conn.execute_batch(CREATE_INDEX_TEXT)?;
     conn.execute_batch(CREATE_INDEX_IMAGE_HASH)?;
-    // 旧库可能带着 v1/v2/v3 的 user_version，统一抬到 v4。
-    let _ = conn.pragma_update(None, "user_version", SCHEMA_VERSION);
+    // 版本号不在这里写：整库版本归 app_db 管（这里落成 4 会把 v7 打回去）。
     Ok(())
 }
 
@@ -780,6 +782,16 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// 剪贴板已并入统一库：路径必须指向 `xime.db`，不是旧的 `clipboard.db`。
+    #[test]
+    fn default_path_is_unified_db() {
+        let path = default_db_path();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(crate::app_db::DB_FILE)
+        );
     }
 
     /// 写侧（IME 进程）与读侧（设置程序）必须落在同一 schema 上：
