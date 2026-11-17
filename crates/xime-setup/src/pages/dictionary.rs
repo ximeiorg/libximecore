@@ -1,77 +1,282 @@
-//! 词典管理页：用户词典 + 快捷短语（rime 操作经 IPC 在 server 执行）。
+//! 词典管理页：入口页 + 三个子页面（用户词库 / 快捷短语 / 导入词库）。
 //!
-//! 版式是「页内 Tab + 数据表格」，不是设置表单：词典浏览/编辑类页面
-//! （对齐小狼毫词典管理对话框、本仓库剪贴板页）的信息结构是
-//! 「工具行（选择器 + 搜索 + 主操作）→ 表格（列头对齐 + 斑马纹行）→
-//! 页脚（统计 + 翻页 / 主操作）」，每本词典一行按钮的表单式布局装不下
-//! 这些数据，也不该用它。
-use crate::state::{Message, SettingsState};
+//! 版式对齐 Android 的「词库管理」：入口页只列三行，各自点进独立子页面。
+//! 以前这里是一排页签，等于按「数据落在哪个文件里」分类——用户得先认识
+//! `.userdb`、`custom_phrase`、`*.dict.yaml`，才知道自己要找的东西在哪个签里。
+use crate::components::settings::settings_group;
+use crate::components::widgets::{medium, semibold, text_button_muted};
+#[cfg(any(windows, feature = "dict-page"))]
+use crate::components::widgets::{button_secondary, text_button, text_button_danger};
+use crate::state::{DictSub, Message, SettingsState};
 use crate::theme::ThemeColors;
-use iced::Element;
+use iced::widget::{button, column, container, row, text, Space};
+use iced::{Alignment, Background, Element, Length};
 
 #[cfg(any(windows, feature = "dict-page"))]
 use crate::components::widgets::{
-    button_danger, button_disabled, button_primary, card_style, medium, modal_dialog,
-    pick_list_style, semibold, text_button, text_input_style,
+    button_danger, button_disabled, button_primary, card_style, pick_list_style, text_input_style,
 };
 #[cfg(any(windows, feature = "dict-page"))]
 use crate::state::{CustomPhraseState, DICT_ENTRIES_PAGE_SIZE};
 #[cfg(any(windows, feature = "dict-page"))]
-use iced::widget::{column, container, pick_list, row, text, text_input, Space};
+use iced::widget::{pick_list, text_input};
 #[cfg(any(windows, feature = "dict-page"))]
-use iced::{Alignment, Background, Color, Length};
+use iced::Color;
 
-/// Windows：真实词典管理（rime 用户词典经 IPC 操作）。
-#[cfg(any(windows, feature = "dict-page"))]
+/// 词典页：入口页或子页面（子页面顶部带「返回词库管理」）。
 pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
-    let d = &settings.dict_manage;
+    let sub = settings.dict_sub;
 
-    // 页头：标题居左、全局操作居右（同输入方案页的 header 版式）。
-    let header = row![
-        text("词典管理")
+    let mut header = row![].spacing(14).align_y(Alignment::Center);
+    if sub != DictSub::Hub {
+        header = header.push(text_button_muted("返回", colors, Message::DictSubBack));
+    }
+    header = header.push(
+        text(dict_sub_title(sub))
             .size(20)
             .font(semibold())
             .color(colors.foreground),
-        Space::new().width(Length::Fill),
-        text_button("刷新", colors, Message::DictRefresh),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
+    );
+    header = header.push(Space::new().width(Length::Fill));
+    if let Some(action) = header_action(settings, sub, colors) {
+        header = header.push(action);
+    }
 
-    let mut content = column![header, dict_tab_bar(d.tab, colors)]
+    // 弹窗不在这里叠：页面在 scrollable 里，只有内容高度，叠上来会被裁。
+    // 由 `pages::page_overlay` 交给 app 层，压在整窗上。
+    column![header, body_view(settings, sub, colors)]
         .spacing(16)
         .padding(20)
-        .width(Length::Fill);
+        .width(Length::Fill)
+        .into()
+}
 
-    content = content.push(if d.tab == 0 {
-        user_dict_view(d, colors)
-    } else {
-        phrase_view(settings, colors)
-    });
+fn dict_sub_title(sub: DictSub) -> &'static str {
+    match sub {
+        DictSub::Hub => "词库管理",
+        DictSub::UserDict => "用户词库",
+        DictSub::Phrases => "快捷短语",
+        DictSub::Import => "导入词库",
+    }
+}
 
-    let dialog = d
+fn body_view<'a>(
+    settings: &'a SettingsState,
+    sub: DictSub,
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    match sub {
+        DictSub::Hub => hub_view(settings, colors),
+        DictSub::Import => crate::pages::dict_import::view(settings, colors),
+        #[cfg(any(windows, feature = "dict-page"))]
+        DictSub::UserDict => user_dict_view(&settings.dict_manage, colors),
+        #[cfg(any(windows, feature = "dict-page"))]
+        DictSub::Phrases => phrase_view(settings, colors),
+        // 没有 dict-page 的宿主：这两行入口不可点，兜底回入口页。
+        #[cfg(not(any(windows, feature = "dict-page")))]
+        _ => hub_view(settings, colors),
+    }
+}
+
+/// 页头右侧操作（只有子页面有：各自的主操作 / 刷新）。
+fn header_action<'a>(
+    settings: &'a SettingsState,
+    sub: DictSub,
+    colors: &'a ThemeColors,
+) -> Option<Element<'a, Message>> {
+    match sub {
+        DictSub::Import => Some(crate::pages::dict_import::header_action(
+            &settings.dict_import,
+            colors,
+        )),
+        #[cfg(any(windows, feature = "dict-page"))]
+        DictSub::UserDict => Some(text_button_muted("刷新", colors, Message::DictRefresh).into()),
+        _ => None,
+    }
+}
+
+/// 同一时刻只会有一个弹窗（新增词条 / 短语编辑 / 导入）。
+pub fn overlay<'a>(
+    settings: &'a SettingsState,
+    colors: &'a ThemeColors,
+) -> Option<Element<'a, Message>> {
+    #[cfg(any(windows, feature = "dict-page"))]
+    let inner = settings
+        .dict_manage
         .browse
         .add_dialog
         .as_ref()
         .map(|draft| entry_add_dialog(draft, colors))
         .or_else(|| {
-            d.phrase
+            settings
+                .dict_manage
+                .phrase
                 .as_ref()
                 .and_then(|phrase| phrase.dialog.as_ref())
                 .map(|dialog| phrase_dialog_view(dialog, colors))
         });
-    modal_dialog(content.into(), dialog, colors)
+    #[cfg(not(any(windows, feature = "dict-page")))]
+    let inner: Option<Element<'a, Message>> = None;
+
+    inner.or_else(|| {
+        settings
+            .dict_import
+            .dialog
+            .then(|| crate::pages::dict_import::dialog(settings, colors))
+    })
 }
 
-/// 页内 Tab 栏：用户词典 / 快捷短语。
-#[cfg(any(windows, feature = "dict-page"))]
-fn dict_tab_bar<'a>(active: usize, colors: &'a ThemeColors) -> Element<'a, Message> {
-    crate::components::widgets::tab_bar(
-        &["用户词典", "快捷短语"],
-        active,
+// ---- 入口页（对齐 Android「词库管理」的三行入口） ----
+
+fn hub_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    let mut rows: Vec<Element<'a, Message>> = Vec::new();
+
+    #[cfg(any(windows, feature = "dict-page"))]
+    let (user_sub, phrase_sub, user_ready) = {
+        let d = &settings.dict_manage;
+        let user = if d.dicts.is_empty() {
+            "输入时自动积累的词条".to_string()
+        } else {
+            format!("输入时自动积累的词条 · {} 本词典", d.dicts.len())
+        };
+        let phrase = match d.phrase.as_ref() {
+            Some(phrase) if !phrase.entries.is_empty() => {
+                format!("补充方案码表之外的常用短语 · {} 条", phrase.entries.len())
+            }
+            _ => "补充方案码表之外的常用短语".to_string(),
+        };
+        (user, phrase, true)
+    };
+    #[cfg(not(any(windows, feature = "dict-page")))]
+    let (user_sub, phrase_sub, user_ready) = (
+        "由输入法维护的词条（当前宿主未接入）".to_string(),
+        "由输入法维护的自定义短语（当前宿主未接入）".to_string(),
+        false,
+    );
+
+    rows.push(hub_row(
+        "用户词库",
+        user_sub,
+        user_ready,
+        Message::DictSubOpen(DictSub::UserDict),
         colors,
-        Message::DictTab,
-    )
+    ));
+    rows.push(hub_divider(colors));
+    rows.push(hub_row(
+        "快捷短语",
+        phrase_sub,
+        user_ready,
+        Message::DictSubOpen(DictSub::Phrases),
+        colors,
+    ));
+    rows.push(hub_divider(colors));
+
+    let import_sub = if settings.dict_import.items.is_empty() {
+        "把其他输入法的词库转换成 Rime 词典".to_string()
+    } else {
+        format!(
+            "把其他输入法的词库转换成 Rime 词典 · 已导入 {} 本",
+            settings.dict_import.items.len()
+        )
+    };
+    rows.push(hub_row(
+        "导入词库",
+        import_sub,
+        true,
+        Message::DictSubOpen(DictSub::Import),
+        colors,
+    ));
+
+    column![
+        settings_group(
+            "词库内容",
+            Some("三类内容分开维护：用户词库随输入自动长大，快捷短语手写，导入词库由外部文件生成。"),
+            colors,
+            rows,
+        ),
+        footnote(colors),
+    ]
+    .spacing(16)
+    .width(Length::Fill)
+    .into()
+}
+
+/// 入口行：标题 + 副标题 + 右箭头，整行可点（hover 变底色）。
+fn hub_row<'a>(
+    title: &'a str,
+    subtitle: String,
+    enabled: bool,
+    on_press: Message,
+    colors: &'a ThemeColors,
+) -> Element<'a, Message> {
+    let palette = *colors;
+    let body = row![
+        column![
+            text(title).size(14).font(medium()).color(if enabled {
+                palette.foreground
+            } else {
+                palette.foreground_faint
+            }),
+            text(subtitle).size(12).color(palette.foreground_muted),
+        ]
+        .spacing(3)
+        .width(Length::Fill),
+        text("›")
+            .size(16)
+            .color(if enabled {
+                palette.foreground_muted
+            } else {
+                palette.foreground_faint
+            }),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .padding([10, 6])
+    .width(Length::Fill);
+
+    if !enabled {
+        return body.into();
+    }
+
+    button(body)
+        .on_press(on_press)
+        .padding(0)
+        .width(Length::Fill)
+        .style(move |_theme, status| {
+            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: hovered.then_some(Background::Color(palette.surface_hover)),
+                text_color: palette.foreground,
+                border: iced::border::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..button::Style::default()
+            }
+        })
+        .into()
+}
+
+/// 入口行之间的细线（与卡片内容同宽）。
+fn hub_divider<'a>(colors: &'a ThemeColors) -> Element<'a, Message> {
+    let palette = *colors;
+    container(Space::new().width(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(move |_| container::Style {
+            background: Some(Background::Color(palette.border)),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+/// 入口页脚注：指路到方案词表（静态词表属于方案本身）。
+fn footnote(colors: &ThemeColors) -> Element<'_, Message> {
+    text("方案自带的静态词表不在词库里，在「输入方案 → 方案词表」中查看。".to_string())
+        .size(12)
+        .color(colors.foreground_muted)
+        .width(Length::Fill)
+        .into()
 }
 
 // ---- 表格件（列头 / 斑马纹行 / 定宽单元格 / 行内按钮） ----
@@ -90,18 +295,35 @@ fn cell<'a>(value: String, width: f32, colors: &ThemeColors) -> Element<'a, Mess
 /// 定宽列头单元格（与 `cell` 同宽，表头与数据行天然对齐）。
 #[cfg(any(windows, feature = "dict-page"))]
 fn head_cell<'a>(label: &'a str, width: f32, colors: &ThemeColors) -> Element<'a, Message> {
-    text(label.to_string())
-        .size(12)
-        .font(medium())
-        .color(colors.foreground_muted)
-        .width(Length::Fixed(width))
-        .into()
+    container(
+        text(label.to_string())
+            .size(12)
+            .font(medium())
+            .color(colors.foreground_muted),
+    )
+    .width(Length::Fixed(width))
+    .align_x(iced::alignment::Horizontal::Right)
+    .into()
+}
+
+/// 右对齐的数据单元格（数字列用：频率、权重这类右对齐才好纵向比较）。
+#[cfg(any(windows, feature = "dict-page"))]
+fn cell_right<'a>(value: String, width: f32, colors: &ThemeColors) -> Element<'a, Message> {
+    container(
+        text(value)
+            .size(13)
+            .color(colors.foreground),
+    )
+    .width(Length::Fixed(width))
+    .align_x(iced::alignment::Horizontal::Right)
+    .into()
 }
 
 /// 表头行：弹性首列 + 若干定宽列 + 右对齐的操作列。
 #[cfg(any(windows, feature = "dict-page"))]
 fn table_header<'a>(
     first_label: &'a str,
+    first_width: Option<f32>,
     columns: &[(&'a str, f32)],
     action_width: f32,
     colors: &ThemeColors,
@@ -110,7 +332,10 @@ fn table_header<'a>(
         .size(12)
         .font(medium())
         .color(colors.foreground_muted)
-        .width(Length::Fill)]
+        .width(match first_width {
+            Some(width) => Length::Fixed(width),
+            None => Length::Fill,
+        })]
     .spacing(8)
     .align_y(Alignment::Center);
     for (label, width) in columns {
@@ -126,30 +351,52 @@ fn table_header<'a>(
         .width(Length::Fixed(action_width))
         .align_x(iced::alignment::Horizontal::Right),
     );
-    container(head).width(Length::Fill).padding([8, 14]).into()
+    let palette = *colors;
+    column![
+        container(head)
+            .width(Length::Fill)
+            .padding([0, 14])
+            .height(Length::Fixed(34.0))
+            .align_y(iced::alignment::Vertical::Center),
+        container(Space::new().width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |_| container::Style {
+                background: Some(Background::Color(palette.border)),
+                ..container::Style::default()
+            }),
+    ]
+    .width(Length::Fill)
+    .into()
 }
 
-/// 斑马纹数据行：偶数行淡底色，与卡片底色区分。
+/// 数据行：定高 + 底部 1px 分隔线。
+///
+/// 原来用斑马纹（隔行浅灰底）：卡片本身就是浅色面，两种浅色叠在一起只剩
+/// 「花」，行与行的关系反而不清楚。改分隔线后视线不被色块打断。
 #[cfg(any(windows, feature = "dict-page"))]
 fn zebra_row<'a>(
     content: Element<'a, Message>,
-    index: usize,
-    colors: &ThemeColors,
+    _index: usize,
+    colors: &'a ThemeColors,
 ) -> Element<'a, Message> {
     let colors = *colors;
-    let tinted = index % 2 == 1;
-    container(content)
-        .width(Length::Fill)
-        .padding([6, 14])
-        .style(move |_| container::Style {
-            background: if tinted {
-                Some(Background::Color(colors.surface_variant))
-            } else {
-                None
-            },
-            ..container::Style::default()
-        })
-        .into()
+    column![
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fixed(36.0))
+            .padding([0, 14])
+            .align_y(iced::alignment::Vertical::Center),
+        container(Space::new().width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(move |_| container::Style {
+                background: Some(Background::Color(colors.border)),
+                ..container::Style::default()
+            }),
+    ]
+    .width(Length::Fill)
+    .into()
 }
 
 /// 表格空态行（居中弱化文案）。
@@ -226,7 +473,7 @@ fn hint_line<'a>(value: String, color: Color) -> Element<'a, Message> {
 /// 用户词典 Tab：词典下拉 + 搜索 + 词条表格 + 整本操作。
 #[cfg(any(windows, feature = "dict-page"))]
 fn user_dict_view<'a>(
-    d: &crate::state::DictManageState,
+    d: &'a crate::state::DictManageState,
     colors: &'a ThemeColors,
 ) -> Element<'a, Message> {
     let browse = &d.browse;
@@ -254,6 +501,7 @@ fn user_dict_view<'a>(
     } else {
         pick_list(dict_options, current, Message::DictSelect).text_size(14).padding([8, 10])
             .style(move |_theme, status| pick_list_style(colors, status))
+        .menu_style(crate::components::widgets::pick_list_menu_style(colors))
             .placeholder("选择词典")
             .width(Length::Fixed(180.0))
             .into()
@@ -266,13 +514,15 @@ fn user_dict_view<'a>(
     items = items.push(
         row![
             selector,
-            text_input("搜索词条或编码…", &browse.query).size(14).padding([8, 10])
-                .on_input(Message::DictQueryChanged)
-                .style(move |_t, s| text_input_style(colors, s))
-                .width(Length::Fill),
+            crate::components::widgets::search_input(
+                "搜索词条或编码",
+                &browse.query,
+                Message::DictQueryChanged,
+                colors,
+            ),
             add_button,
         ]
-        .spacing(8)
+        .spacing(10)
         .align_y(Alignment::Center),
     );
 
@@ -293,7 +543,7 @@ fn user_dict_view<'a>(
             let cell: Element<'a, Message> = if ops_locked {
                 button_disabled(label, colors)
             } else {
-                text_button(label, colors, message).into()
+                button_secondary(label, colors, message).into()
             };
             ops = ops.push(cell);
         }
@@ -311,7 +561,7 @@ fn user_dict_view<'a>(
     }
 
     // 词条表：词（弹性）+ 编码 + 频率 + 操作。
-    let header = table_header("词", &[("编码", 110.0), ("频率", 70.0)], 180.0, colors);
+    let header = table_header("词", None, &[("编码", 150.0), ("频率", 80.0)], 120.0, colors);
     let mut body: Vec<Element<'a, Message>> = Vec::new();
     for (index, entry) in browse.page_entries().iter().enumerate() {
         let actions: Element<'a, Message> = if browse.writing {
@@ -331,28 +581,27 @@ fn user_dict_view<'a>(
             ));
             confirm.into()
         } else {
-            row_button(
+            text_button_danger(
                 "删除",
                 colors,
                 Message::DictEntryDeleteRequest(entry.word.clone(), entry.code.clone()),
             )
+            .into()
         };
-        let mut line = row![
+        let line = row![
             text(entry.word.clone())
                 .size(13)
                 .font(medium())
                 .color(colors.foreground)
                 .width(Length::Fill),
-            cell(entry.code.clone(), 110.0, colors),
-            cell(entry.commits.to_string(), 70.0, colors),
+            cell(entry.code.clone(), 150.0, colors),
+            cell_right(entry.commits.to_string(), 80.0, colors),
+            container(actions)
+                .width(Length::Fixed(120.0))
+                .align_x(iced::alignment::Horizontal::Right),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        line = line.push(
-            container(actions)
-                .width(Length::Fixed(180.0))
-                .align_x(iced::alignment::Horizontal::Right),
-        );
         body.push(zebra_row(line.into(), index, colors));
     }
     let empty = if browse.dict.is_empty() {
@@ -364,7 +613,8 @@ fn user_dict_view<'a>(
     } else if browse.loading {
         Some("正在读取词条…".to_string())
     } else if browse.error.is_some() {
-        None
+        // 失败时别只留一行表头：表格里给一句「没读到」，具体原因在状态行。
+        Some("没有读到词条".to_string())
     } else if browse.entries.is_empty() && browse.loaded {
         if browse.query.trim().is_empty() {
             Some("这本词典还没有词条；打字造词自动积累，或点「新增词条」手动添加".to_string())
@@ -489,7 +739,8 @@ fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
             }).text_size(14).padding([8, 10])
             .placeholder("选择方案")
             .width(Length::Fixed(180.0))
-            .style(move |_theme, status| pick_list_style(colors, status)),
+            .style(move |_theme, status| pick_list_style(colors, status))
+        .menu_style(crate::components::widgets::pick_list_menu_style(colors)),
         );
     }
     toolbar = toolbar.push(Space::new().width(Length::Fill));
@@ -530,7 +781,7 @@ fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
     }
 
     // 短语表：短语（弹性）+ 编码 + 权重 + 操作。
-    let header = table_header("短语", &[("编码", 110.0), ("权重", 70.0)], 180.0, colors);
+    let header = table_header("短语", None, &[("编码", 150.0), ("权重", 80.0)], 120.0, colors);
     let busy = phrase.saving || phrase.loading;
     let mut body: Vec<Element<'a, Message>> = Vec::new();
     for (index, entry) in phrase.entries.iter().enumerate() {
@@ -547,7 +798,11 @@ fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
             confirm.into()
         } else {
             let mut actions = row![].spacing(8);
-            actions = actions.push(row_button("编辑", colors, Message::DictPhraseEdit(index)));
+            actions = actions.push(text_button_muted(
+                "编辑",
+                colors,
+                Message::DictPhraseEdit(index),
+            ));
             actions = actions.push(row_button(
                 "删除",
                 colors,
@@ -559,22 +814,20 @@ fn phrase_view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
             Some(weight) => weight.to_string(),
             None => "—".to_string(),
         };
-        let mut line = row![
+        let line = row![
             text(entry.word.clone())
                 .size(13)
                 .font(medium())
                 .color(colors.foreground)
                 .width(Length::Fill),
-            cell(entry.code.clone(), 110.0, colors),
-            cell(weight, 70.0, colors),
+            cell(entry.code.clone(), 150.0, colors),
+            cell_right(weight, 80.0, colors),
+            container(actions)
+                .width(Length::Fixed(120.0))
+                .align_x(iced::alignment::Horizontal::Right),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        line = line.push(
-            container(actions)
-                .width(Length::Fixed(180.0))
-                .align_x(iced::alignment::Horizontal::Right),
-        );
         body.push(zebra_row(line.into(), index, colors));
     }
     let empty = if busy {
@@ -731,27 +984,4 @@ fn phrase_dialog_view<'a>(
     ]
     .spacing(8)
     .into()
-}
-
-/// 非 Windows 且未启用 dict-page：占位（rime 操作由宿主经回调注入）。
-#[cfg(not(any(windows, feature = "dict-page")))]
-pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Element<'a, Message> {
-    use crate::components::settings::{settings_group, settings_item, settings_page};
-    use crate::components::widgets::label;
-
-    settings_page(
-        "词典管理",
-        colors,
-        vec![settings_group(
-            "用户词典",
-            Some("管理用户词库"),
-            colors,
-            vec![settings_item(
-                "用户词典",
-                Some("用户词典由 Rime 引擎自动维护"),
-                colors,
-                label("Rime 自动管理", colors),
-            )],
-        )],
-    )
 }

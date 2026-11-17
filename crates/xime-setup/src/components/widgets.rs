@@ -1,7 +1,7 @@
 use crate::theme::ThemeColors;
 use iced::widget::{
-    button, container, opaque, row, stack, text, toggler, toggler::Status as TogglerStatus,
-    Button,
+    button, container, opaque, row, stack, svg, text, text_input, toggler,
+    toggler::Status as TogglerStatus, Button,
 };
 use iced::{border, Alignment, Background, Border, Color, Element, Length, Shadow, Vector};
 
@@ -329,10 +329,12 @@ pub fn text_input_style(
     let (border_color, border_width) = match status {
         iced::widget::text_input::Status::Focused { .. } => (colors.primary, 1.5),
         iced::widget::text_input::Status::Hovered => (colors.border_strong, 1.0),
-        _ => (Color::TRANSPARENT, 1.0),
+        // 未聚焦也留边框：没有框的输入框和下拉摆在一行里，只有一条灰底，
+        // 分不清哪个能点、哪个能打字。
+        _ => (colors.border, 1.0),
     };
     iced::widget::text_input::Style {
-        background: Background::Color(colors.surface_variant),
+        background: Background::Color(colors.surface),
         border: Border {
             color: border_color,
             width: border_width,
@@ -480,6 +482,140 @@ pub fn text_button<'a, Message: Clone + 'a>(
     .on_press(on_press)
 }
 
+/// 次要文字按钮：颜色比主色文字按钮弱一档（页头「返回 / 刷新」这类）。
+pub fn text_button_muted<'a, Message: Clone + 'a>(
+    label: impl Into<String>,
+    colors: &ThemeColors,
+    on_press: Message,
+) -> Button<'a, Message> {
+    let colors = *colors;
+    button(vcenter(
+        text(label.into())
+            .size(14)
+            .font(medium())
+            .color(colors.foreground_muted)
+            .into(),
+    ))
+    .padding([0, 10])
+    .height(CONTROL_HEIGHT)
+    .style(move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: hovered.then_some(Background::Color(colors.surface_variant)),
+            text_color: if hovered {
+                colors.foreground
+            } else {
+                colors.foreground_muted
+            },
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: border::radius(RADIUS_SM),
+            },
+            ..button::Style::default()
+        }
+    })
+    .on_press(on_press)
+}
+
+/// 表格行内的危险文字按钮（删除）：平时中性，悬停才变红。
+pub fn text_button_danger<'a, Message: Clone + 'a>(
+    label: impl Into<String>,
+    colors: &ThemeColors,
+    on_press: Message,
+) -> Button<'a, Message> {
+    let colors = *colors;
+    button(vcenter(
+        text(label.into())
+            .size(13)
+            .font(medium())
+            .color(colors.foreground_muted)
+            .into(),
+    ))
+    .padding([0, 8])
+    .height(Length::Fixed(26.0))
+    .style(move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: hovered.then_some(Background::Color(colors.error_dim)),
+            text_color: if hovered {
+                colors.on_error
+            } else {
+                colors.foreground_muted
+            },
+            border: Border {
+                color: Color::TRANSPARENT,
+                width: 0.0,
+                radius: border::radius(RADIUS_SM),
+            },
+            ..button::Style::default()
+        }
+    })
+    .on_press(on_press)
+}
+
+/// 搜索框：放大镜 + 去壳输入框 + 外层描边。
+///
+/// `text_input` 自己的背景是 `surface_variant`、Active 时不描边，摆在表单里
+/// 就是一条灰底——用户根本认不出那是搜索框（真事）。这里把外框交给
+/// container，输入框本身透明，左边配一个放大镜图标。
+pub fn search_input<'a, Message: Clone + 'a>(
+    placeholder: &'a str,
+    value: &'a str,
+    on_input: impl Fn(String) -> Message + 'a,
+    colors: &ThemeColors,
+) -> Element<'a, Message> {
+    let colors = *colors;
+    let handle = svg::Handle::from_memory(
+        crate::Assets::get("icons/search.svg")
+            .map(|file| file.data.into_owned())
+            .unwrap_or_default(),
+    );
+    let body = row![
+        svg(handle)
+            .width(Length::Fixed(15.0))
+            .height(Length::Fixed(15.0))
+            .style(move |_theme, _status| svg::Style {
+                color: Some(colors.foreground_muted),
+            }),
+        text_input(placeholder, value)
+            .size(14)
+            .padding([0, 0])
+            .on_input(on_input)
+            .style(move |_theme, _status| iced::widget::text_input::Style {
+                background: Background::Color(Color::TRANSPARENT),
+                border: Border {
+                    color: Color::TRANSPARENT,
+                    width: 0.0,
+                    radius: border::radius(0.0),
+                },
+                icon: colors.foreground_muted,
+                placeholder: colors.foreground_faint,
+                value: colors.foreground,
+                selection: colors.selection,
+            }),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .padding([0, 12]);
+
+    container(body)
+        .width(Length::Fill)
+        .height(Length::Fixed(CONTROL_HEIGHT))
+        // 容器默认顶部对齐：不显式居中，放大镜和文字会一起贴顶。
+        .align_y(iced::alignment::Vertical::Center)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(colors.surface)),
+            border: Border {
+                color: colors.border,
+                width: 1.0,
+                radius: border::radius(RADIUS_MD),
+            },
+            ..iced::widget::container::Style::default()
+        })
+        .into()
+}
+
 /// 中间省略的长值：UUID / 路径这类东西缩短后仍要能认出两头，
 /// 直接截尾会把最有信息量的部分（设备尾号、末级目录）切掉。
 pub fn shorten_middle(value: &str, max_chars: usize) -> String {
@@ -592,11 +728,13 @@ pub fn pick_list_style(
     let border_color = match status {
         iced::widget::pick_list::Status::Opened { .. } => colors.primary,
         iced::widget::pick_list::Status::Hovered => colors.border_strong,
-        iced::widget::pick_list::Status::Active => Color::TRANSPARENT,
+        // Active 也要有边框：没有边框的下拉在表单里像一行普通文字，
+        // 和旁边的输入框不成一套控件。
+        iced::widget::pick_list::Status::Active => colors.border,
     };
     iced::widget::pick_list::Style {
         text_color: colors.foreground,
-        background: Background::Color(colors.surface_variant),
+        background: Background::Color(colors.surface),
         border: Border {
             color: border_color,
             width: 1.0,
@@ -604,6 +742,33 @@ pub fn pick_list_style(
         },
         handle_color: colors.foreground_muted,
         placeholder_color: colors.foreground_muted,
+    }
+}
+
+/// 下拉菜单样式：浮层卡片 + 阴影 + 浅色选中项。
+///
+/// iced 默认拿主题调色板的 primary 当选中底色。我们的主题是品牌绿，下拉里
+/// 只有一个选项时整块菜单就是一片绿，压在表单上非常突兀。这里改成与卡片
+/// 同色的浮层，选中项用 surface_variant（和表单里的浅色面一致）。
+pub fn pick_list_menu_style(
+    colors: &ThemeColors,
+) -> impl Fn(&iced::Theme) -> iced::overlay::menu::Style + 'static {
+    let colors = *colors;
+    move |_theme| iced::overlay::menu::Style {
+        background: Background::Color(colors.surface),
+        border: Border {
+            color: colors.border,
+            width: 1.0,
+            radius: border::radius(RADIUS_MD),
+        },
+        text_color: colors.foreground,
+        selected_text_color: colors.foreground,
+        selected_background: Background::Color(colors.surface_variant),
+        shadow: Shadow {
+            color: Color::from_rgba8(0x18, 0x18, 0x1b, 0.16),
+            offset: Vector::new(0.0, 6.0),
+            blur_radius: 18.0,
+        },
     }
 }
 

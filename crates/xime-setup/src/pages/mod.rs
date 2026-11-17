@@ -1,6 +1,7 @@
 pub mod about;
 pub mod appearance;
 pub mod dictionary;
+pub mod dict_import;
 pub mod hotkeys;
 pub mod input_schema;
 pub mod plugins;
@@ -257,6 +258,24 @@ pub fn page_content<'a>(
         #[cfg(feature = "voice-page")]
         "语音转文本" => voice::view(settings, colors),
         _ => about::view(settings, colors),
+    }
+}
+
+/// 页面级弹窗：叠在整窗上，而不是叠在页面内容里。
+///
+/// 叠在页面里的问题：`scrollable` 的内容高度就是内容本身的高度，底页只有
+/// 一张卡片高时，遮罩与弹窗会被裁到那个高度——导入弹窗内容一多就露不出
+/// 底部按钮。叠在整窗上就不依赖底页多高。
+pub fn page_overlay<'a>(
+    settings: &'a SettingsState,
+    page: usize,
+    colors: &'a ThemeColors,
+) -> Option<Element<'a, Message>> {
+    let items = sidebar_items();
+    let page = page.min(items.len().saturating_sub(1));
+    match items[page].1 {
+        "词典" => dictionary::overlay(settings, colors),
+        _ => None,
     }
 }
 

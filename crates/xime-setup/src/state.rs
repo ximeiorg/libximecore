@@ -393,16 +393,23 @@ pub struct PhraseSaveResult {
     pub entries: Vec<CustomPhraseRow>,
 }
 
+/// 词典回调：只带路径的（恢复快照）。
+#[cfg(any(windows, feature = "dict-page"))]
+type DictPathNotify = fn(&str) -> Result<(), String>;
+/// 词典回调：带路径 + 词典名的（导出 / 导入文本），返回处理的词条数。
+#[cfg(any(windows, feature = "dict-page"))]
+type DictIoNotify = fn(&str, &str) -> Result<i32, String>;
+
 #[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_LIST: OnceLock<fn() -> Option<DictListResult>> = OnceLock::new();
 #[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_BACKUP: OnceLock<fn(&str) -> bool> = OnceLock::new();
 #[cfg(any(windows, feature = "dict-page"))]
-static NOTIFY_DICT_RESTORE: OnceLock<fn(&str) -> Result<(), String>> = OnceLock::new();
+static NOTIFY_DICT_RESTORE: OnceLock<DictPathNotify> = OnceLock::new();
 #[cfg(any(windows, feature = "dict-page"))]
-static NOTIFY_DICT_EXPORT: OnceLock<fn(&str, &str) -> Result<i32, String>> = OnceLock::new();
+static NOTIFY_DICT_EXPORT: OnceLock<DictIoNotify> = OnceLock::new();
 #[cfg(any(windows, feature = "dict-page"))]
-static NOTIFY_DICT_IMPORT: OnceLock<fn(&str, &str) -> Result<i32, String>> = OnceLock::new();
+static NOTIFY_DICT_IMPORT: OnceLock<DictIoNotify> = OnceLock::new();
 #[cfg(any(windows, feature = "dict-page"))]
 static NOTIFY_DICT_ENTRIES: OnceLock<fn(&str, &str) -> Option<DictEntriesResult>> = OnceLock::new();
 
@@ -985,9 +992,14 @@ pub enum Message {
     /// 词典管理：从文本导入词典（词典名，弹文件对话框）。
     #[cfg(any(windows, feature = "dict-page"))]
     DictImport(String),
-    /// 词典管理：切换页内 Tab（0=用户词典 1=快捷短语）。
-    #[cfg(any(windows, feature = "dict-page"))]
-    DictTab(usize),
+    /// 词典管理：进入子页面（入口页 → 用户词库 / 快捷短语 / 导入词库）。
+    DictSubOpen(DictSub),
+    /// 词典管理：子页面返回入口页。
+    DictSubBack,
+    /// 词库导入：打开导入弹窗。
+    DictImportDialogOpen,
+    /// 词库导入：关闭导入弹窗。
+    DictImportDialogCancel,
     /// 词典管理：下拉切换当前浏览的词典（立即重读该词典词条）。
     #[cfg(any(windows, feature = "dict-page"))]
     DictSelect(String),
@@ -1066,6 +1078,34 @@ pub enum Message {
     /// 方案词表：词条列表翻页。
     #[cfg(any(windows, feature = "dict-page"))]
     SchemaDictPage(usize),
+    /// 词库导入：重读已导入列表（并按已装方案刷新可挂载候选）。
+        DictImportRefresh,
+    /// 词库导入：浏览并选择词库文件。
+        DictImportBrowse,
+    /// 词库导入：手填路径变化。
+        DictImportPathChanged(String),
+    /// 词库导入：解析选中的文件（只出预览，不写文件）。
+        DictImportParse,
+    /// 词库导入：切换目标方案（多选）。
+        DictImportToggleScheme(String),
+    /// 词库导入：导入并部署。
+        DictImportSubmit,
+    /// 词库导入：启用/停用某本已导入词库。
+        DictImportSetEnabled(String, bool),
+    /// 词库导入：打开「更改挂载方案」编辑器。
+        DictImportRebindOpen(String),
+    /// 词库导入：编辑器里勾选方案。
+        DictImportRebindToggle(String),
+    /// 词库导入：取消改挂。
+        DictImportRebindCancel,
+    /// 词库导入：保存改挂。
+        DictImportRebindSubmit,
+    /// 词库导入：请求删除（两步确认）。
+        DictImportDeleteRequest(String),
+    /// 词库导入：取消删除。
+        DictImportDeleteCancel,
+    /// 词库导入：确认删除。
+        DictImportDeleteConfirm(String),
     /// 设备关联：切换配对方向（0 显示码 / 1 输入码）。
     #[cfg(feature = "pair-page")]
     PairTab(usize),
@@ -1151,6 +1191,10 @@ pub struct SettingsState {
     /// 词典管理（用户词典列表 + 备份/恢复/导出/导入）。
     #[cfg(any(windows, feature = "dict-page"))]
     pub dict_manage: DictManageState,
+    /// 外部词库导入（搜狗/百度/fcitx5 等格式 → 派生 .dict.yaml）。
+    pub dict_import: DictImportState,
+    /// 词典页当前子页面（`DictSub::Hub` = 三行入口页）。
+    pub dict_sub: DictSub,
     /// 全局页内消息条（show_message 写入，5 秒自动过期）。
     pub ui_message: Option<(String, std::time::Instant)>,
     #[cfg(target_os = "linux")]
@@ -1200,12 +1244,18 @@ impl SettingsState {
             speech_server: crate::speech_models::SpeechModelState::default(),
             #[cfg(any(windows, feature = "dict-page"))]
             dict_manage: DictManageState::default(),
+            dict_import: DictImportState::default(),
+            dict_sub: DictSub::Hub,
             ui_message: None,
             #[cfg(target_os = "linux")]
             sync: SyncState::default(),
         };
         state.load_color_schemes();
         state.load_schemas();
+                {
+            let schemes = state.scheme_options();
+            state.dict_import.refresh(&schemes);
+        }
         state.load_schema_config();
         state.refresh_installed_plugins();
         state.start_load_market();
@@ -1538,6 +1588,9 @@ impl SettingsState {
                 Ok(msg) => self.show_message(msg),
                 Err(e) => self.show_message(format!("部署失败: {}", e)),
             }
+            // 部署跑完，「已生效 / 待部署」徽章要跟着变（table.bin 刚生成）。
+            let schemes = self.scheme_options();
+            self.dict_import.refresh(&schemes);
         }
     }
 
@@ -1775,6 +1828,13 @@ impl SettingsState {
         }
         #[cfg(any(windows, feature = "dict-page"))]
         self.dict_manage.poll();
+                {
+            let schemes = self.scheme_options();
+            if self.dict_import.poll(&schemes) {
+                // 词库文件变了：部署后才会编译出 table.bin，否则新词库里没有词。
+                self.start_deploy();
+            }
+        }
         #[cfg(any(windows, feature = "dict-page"))]
         self.poll_schema_dict();
         #[cfg(all(feature = "voice-page", windows))]
@@ -1784,6 +1844,15 @@ impl SettingsState {
         // 本地模型状态：只在本页可见时真的发 IPC（见 SpeechModelState::poll）。
         #[cfg(feature = "voice-page")]
         self.speech_server.poll();
+    }
+
+    /// 已装方案（id, 展示名）：词库导入页用它列目标方案与翻译记录里的 id。
+        pub fn scheme_options(&self) -> Vec<(String, String)> {
+        self.input_schema
+            .available_schemas
+            .iter()
+            .map(|info| (info.schema_id.clone(), info.name.clone()))
+            .collect()
     }
 
     // ---- 方案词表（输入方案页「方案词表」tab，只读浏览） ----
@@ -1865,7 +1934,7 @@ impl SettingsState {
                 Some(result) => SchemaDictTaskResult::Entries { schema_id, result },
                 None => SchemaDictTaskResult::Failed {
                     schema_id,
-                    reason: "读取方案词表失败（输入法服务未运行？）".to_string(),
+                    reason: "读取方案词表失败（输入法未响应或词库被占用）".to_string(),
                 },
             };
             *SCHEMA_DICT_OUTCOME
@@ -4443,7 +4512,7 @@ impl RimeSyncState {
             self.reload();
             Some(Ok("用户资料同步完成".to_string()))
         } else {
-            Some(Err("用户资料同步失败（输入法服务未运行？）".to_string()))
+            Some(Err("用户资料同步失败（输入法未响应）".to_string()))
         }
     }
 }
@@ -4563,7 +4632,7 @@ static DICT_TASK_OUTCOME: std::sync::Mutex<Option<DictTaskResult>> = std::sync::
 /// 页面外层已经是滚动容器（`pages::scrollable_content`），整页铺几百行会让
 /// 每帧构建变慢，所以这里沿用剪贴板页的分页做法。
 #[cfg(any(windows, feature = "dict-page"))]
-pub const DICT_ENTRIES_PAGE_SIZE: usize = 50;
+pub const DICT_ENTRIES_PAGE_SIZE: usize = 20;
 
 /// 关键词输入的防抖时长：打字停下后才真正去扫一遍词库。
 #[cfg(any(windows, feature = "dict-page"))]
@@ -4667,7 +4736,7 @@ impl DictBrowseState {
         };
         if self.truncated() {
             summary.push_str(&format!(
-                "（命中超过 {DICT_ENTRIES_MAX} 条，只列出前 {DICT_ENTRIES_MAX} 条，请补充关键词）"
+                "（命中 {DICT_ENTRIES_MAX} 条以上，只列出前 {DICT_ENTRIES_MAX} 条；缩小关键词可看全）"
             ));
         }
         summary
@@ -4796,7 +4865,7 @@ impl SchemaDictState {
         };
         if self.truncated() {
             summary.push_str(&format!(
-                "（命中超过 {DICT_ENTRIES_MAX} 条，只列出前 {DICT_ENTRIES_MAX} 条，请补充关键词）"
+                "（命中 {DICT_ENTRIES_MAX} 条以上，只列出前 {DICT_ENTRIES_MAX} 条；缩小关键词可看全）"
             ));
         }
         summary
@@ -4849,8 +4918,6 @@ pub struct DictManageState {
     pub busy: Option<&'static str>,
     /// 最近一次操作的结果消息。
     pub message: Option<String>,
-    /// 页内当前 Tab（0=用户词典 1=快捷短语）。
-    pub tab: usize,
     /// 用户词典 Tab 的词条浏览状态（常驻；`dict` = 当前选中词典，
     /// 空 = 尚未选中——列表到达时自动选第一本）。
     pub browse: DictBrowseState,
@@ -4869,7 +4936,6 @@ impl Default for DictManageState {
             sync_dir: String::new(),
             busy: None,
             message: None,
-            tab: 0,
             browse: DictBrowseState::default(),
             phrase: None,
         };
@@ -4894,7 +4960,7 @@ impl DictManageState {
             let result = match notify_dict_list() {
                 Some(r) => DictTaskResult::List(r),
                 None => {
-                    DictTaskResult::Message("获取词典列表失败（输入法服务未运行？）".to_string())
+                    DictTaskResult::Message("获取词典列表失败（输入法未响应或词库被占用）".to_string())
                 }
             };
             Self::submit(result);
@@ -4912,7 +4978,7 @@ impl DictManageState {
             let msg = if ok {
                 format!("已备份 {dict} 快照到同步目录")
             } else {
-                format!("备份 {dict} 失败（输入法服务未运行？）")
+                format!("备份 {dict} 失败（输入法未响应或词库被占用）")
             };
             Self::submit(DictTaskResult::Message(msg));
         });
@@ -5026,7 +5092,7 @@ impl DictManageState {
                 },
                 None => DictTaskResult::EntriesFailed {
                     dict: dict.clone(),
-                    reason: "读取词条失败（输入法服务未运行？）".to_string(),
+                    reason: "读取词条失败（输入法未响应或词库被占用）".to_string(),
                 },
             };
             Self::submit(result);
@@ -5153,7 +5219,7 @@ impl DictManageState {
                 None => DictWriteResult {
                     dict: dict.clone(),
                     ok: false,
-                    message: "写入词条失败（输入法服务未运行？）".to_string(),
+                    message: "写入词条失败（输入法未响应或词库被占用）".to_string(),
                 },
             };
             *DICT_WRITE_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
@@ -5349,7 +5415,7 @@ impl DictManageState {
                 Some(result) => PhraseTaskResult::Loaded { schema_id, result },
                 None => PhraseTaskResult::Failed {
                     schema_id,
-                    reason: "读取快捷短语失败（输入法服务未运行？）".to_string(),
+                    reason: "读取快捷短语失败（输入法未响应或词库被占用）".to_string(),
                 },
             };
             *PHRASE_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
@@ -5374,7 +5440,7 @@ impl DictManageState {
                 Some(result) => PhraseTaskResult::Saved { schema_id, result },
                 None => PhraseTaskResult::Failed {
                     schema_id,
-                    reason: "保存快捷短语失败（输入法服务未运行？）".to_string(),
+                    reason: "保存快捷短语失败（输入法未响应或词库被占用）".to_string(),
                 },
             };
             *PHRASE_OUTCOME.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
@@ -5854,6 +5920,437 @@ fn random_password() -> String {
     getrandom::fill(&mut buf).expect("getrandom");
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+}
+
+// ------------------------------------------------------------------
+// 词库导入（外部词库 → 派生 .dict.yaml + 方案 packs）
+// ------------------------------------------------------------------
+
+/// 词典页的子页面。
+///
+/// 对齐 Android「词库管理」：入口页只列三行（用户词库 / 快捷短语 / 导入词库），
+/// 点进去才是独立子页面——三个页签把「哪块数据在哪个文件里」摊在顶上，
+/// 用户得先认识 `.userdb` / `custom_phrase` / `*.dict.yaml` 才知道点哪个。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DictSub {
+    /// 入口页（三行入口）。
+    #[default]
+    Hub,
+    /// 用户词库：输入时自动积累的词条。
+    UserDict,
+    /// 快捷短语：手写的 custom_phrase。
+    Phrases,
+    /// 导入词库：外部词库转 .dict.yaml。
+    Import,
+}
+
+/// 词库导入的解析预览：常驻编译（纯文件操作，不依赖宿主 IPC 回调）。
+#[derive(Clone, Debug, Default)]
+pub struct LexiconPreview {
+    /// 格式名（如「搜狗细胞词库」）。
+    pub format_name: String,
+    /// 编码体系（如「拼音」）。
+    pub code_system: String,
+    pub entry_count: usize,
+    pub skipped: usize,
+    pub duplicates: usize,
+    /// 前几条词条，给用户确认「这就是我要的词库」。
+    pub samples: Vec<(String, String)>,
+}
+
+/// 导入成功后交给 UI 的结果。
+pub struct ImportDone {
+    pub display_name: String,
+    pub entry_count: usize,
+    pub path: String,
+}
+
+enum ImportTask {
+    Preview(Result<LexiconPreview, String>),
+    Import(Result<ImportDone, String>),
+    Modify(Result<String, String>),
+}
+
+static IMPORT_TASK_OUTCOME: OnceLock<Mutex<Option<ImportTask>>> = OnceLock::new();
+
+fn import_task_outcome() -> &'static Mutex<Option<ImportTask>> {
+    IMPORT_TASK_OUTCOME.get_or_init(|| Mutex::new(None))
+}
+
+fn submit_import_task(task: ImportTask) {
+    *import_task_outcome()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(task);
+}
+
+fn rime_user_dir() -> std::path::PathBuf {
+    get_data_dirs().1
+}
+
+/// 预览里最多列几条词条。
+const PREVIEW_SAMPLES: usize = 5;
+
+/// 词库导入页状态。
+#[derive(Clone, Debug, Default)]
+pub struct DictImportState {
+    /// 待导入的文件路径（可手填，也可由文件对话框填入）。
+    pub path: String,
+    /// 正在解析（后台）。
+    pub parsing: bool,
+    pub preview: Option<LexiconPreview>,
+    pub preview_error: Option<String>,
+    /// 所有已安装方案（id, 名称），用于把记录里的方案 id 翻成名称。
+    pub schemes: Vec<(String, String)>,
+    /// 能挂拼音词库的方案（只列这些，避免选完才报错）。
+    pub compatible: Vec<(String, String)>,
+    /// 本次导入要挂的方案（空 = 只生成 dict.yaml）。
+    pub selected: Vec<String>,
+    /// 已导入词库（manifest.json）。
+    pub items: Vec<xime_config::imported_dict::ImportedDict>,
+    /// 在途操作（import / toggle / delete）。
+    pub busy: Option<&'static str>,
+    pub notice: Option<String>,
+    pub error: Option<String>,
+    /// 待确认删除的词库 id（两步确认）。
+    pub delete_confirm: Option<String>,
+    /// 每本词库是否已编译出 `build/<id>.table.bin`（没编译 = 部署还没跑过）。
+    pub compiled: std::collections::HashMap<String, bool>,
+    /// 正在改挂方案（Some = 打开该词库的挂载编辑器）。
+    pub rebind_target: Option<String>,
+    /// 改挂编辑器里的勾选。
+    pub rebind_selected: Vec<String>,
+    /// 导入弹窗是否打开（列表页只放「导入词库」按钮，表单在弹窗里）。
+    pub dialog: bool,
+}
+
+impl DictImportState {
+    /// 重读已导入列表，并按当前已装方案刷新「可挂载」候选。
+    pub fn refresh(&mut self, schemes: &[(String, String)]) {
+        let user_dir = rime_user_dir();
+        self.schemes = schemes.to_vec();
+        self.items = xime_config::imported_dict::list(&user_dir);
+        self.compiled = self
+            .items
+            .iter()
+            .map(|item| {
+                let table = user_dir.join("build").join(format!("{}.table.bin", item.id));
+                (item.id.clone(), table.is_file())
+            })
+            .collect();
+        self.compatible = schemes
+            .iter()
+            .filter(|(id, _)| {
+                xime_config::imported_dict::schema_accepts(
+                    &user_dir,
+                    id,
+                    xime_lexicon::CodeSystem::Pinyin,
+                )
+            })
+            .cloned()
+            .collect();
+        self.selected.retain(|id| self.compatible.iter().any(|(cid, _)| cid == id));
+        // 记录里的方案可能已经被卸载，这里只保留还装着的，免得界面显示幽灵方案。
+        for item in &mut self.items {
+            item.attached_schemas.retain(|id| schemes.iter().any(|(sid, _)| sid == id));
+        }
+    }
+
+    /// 方案 id → 展示名（找不到就回落到 id）。
+    pub fn scheme_name(&self, id: &str) -> String {
+        self.schemes
+            .iter()
+            .find(|(sid, _)| sid == id)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    /// 记录的挂载方案，拼成一行文案。
+    pub fn attach_label(&self, item: &xime_config::imported_dict::ImportedDict) -> String {
+        if item.attached_schemas.is_empty() {
+            return "未挂载".to_string();
+        }
+        item.attached_schemas
+            .iter()
+            .map(|id| self.scheme_name(id))
+            .collect::<Vec<_>>()
+            .join("、")
+    }
+
+    /// 手填/选择路径：清掉上一个文件的解析结果。
+    /// 打开导入弹窗（清掉上一轮的解析结果，避免误导入上一次的文件）。
+    pub fn open_dialog(&mut self) {
+        self.dialog = true;
+        self.preview = None;
+        self.preview_error = None;
+        self.error = None;
+        self.notice = None;
+    }
+
+    /// 关闭导入弹窗（在途任务不打断，结果照旧回到列表）。
+    pub fn cancel_dialog(&mut self) {
+        self.dialog = false;
+        self.preview = None;
+        self.preview_error = None;
+        self.error = None;
+    }
+
+    pub fn set_path(&mut self, value: String) {
+        if self.path == value {
+            return;
+        }
+        self.path = value;
+        self.preview = None;
+        self.preview_error = None;
+        self.notice = None;
+        self.error = None;
+    }
+
+    /// 后台解析：只读文件、出预览，不写任何东西。
+    pub fn start_parse(&mut self, path: String) {
+        if self.parsing || self.busy.is_some() {
+            return;
+        }
+        let trimmed = path.trim().to_string();
+        if trimmed.is_empty() {
+            self.preview_error = Some("先选一个词库文件".to_string());
+            return;
+        }
+        self.set_path(trimmed.clone());
+        self.parsing = true;
+        self.preview_error = None;
+        std::thread::spawn(move || {
+            let result = xime_config::imported_dict::parse_preview(std::path::Path::new(&trimmed))
+                .map(|parsed| LexiconPreview {
+                    format_name: parsed.format_name.to_string(),
+                    code_system: parsed.code_system.label().to_string(),
+                    entry_count: parsed.entries.len(),
+                    skipped: parsed.skipped,
+                    duplicates: parsed.duplicates,
+                    samples: parsed
+                        .entries
+                        .iter()
+                        .take(PREVIEW_SAMPLES)
+                        .map(|entry| (entry.word.clone(), entry.code.clone()))
+                        .collect(),
+                })
+                .map_err(|error| error.to_string());
+            submit_import_task(ImportTask::Preview(result));
+        });
+    }
+
+    /// 切换目标方案（多选：一份词库可以同时挂到多个拼音方案上）。
+    pub fn toggle_scheme(&mut self, id: String) {
+        if let Some(index) = self.selected.iter().position(|existing| existing == &id) {
+            self.selected.remove(index);
+        } else if self.compatible.iter().any(|(cid, _)| cid == &id) {
+            self.selected.push(id);
+        }
+    }
+
+    /// 后台导入：解析 → 写派生词典 → 更新清单 → 写 packs。
+    pub fn start_import(&mut self) {
+        if self.busy.is_some() || self.parsing {
+            return;
+        }
+        let path = self.path.trim().to_string();
+        if path.is_empty() {
+            self.error = Some("先选一个词库文件".to_string());
+            return;
+        }
+        if self.preview.is_none() {
+            self.error = Some("先点「解析」确认这个文件能读".to_string());
+            return;
+        }
+        self.busy = Some("import");
+        self.error = None;
+        self.notice = None;
+        let scheme_ids = self.selected.clone();
+        std::thread::spawn(move || {
+            let user_dir = rime_user_dir();
+            let result = xime_config::imported_dict::import_file(
+                &user_dir,
+                std::path::Path::new(&path),
+                &scheme_ids,
+            )
+            .map(|outcome| ImportDone {
+                display_name: outcome.record.display_name.clone(),
+                entry_count: outcome.record.entry_count,
+                path: outcome.dict_path.display().to_string(),
+            })
+            .map_err(|error| error.to_string());
+            submit_import_task(ImportTask::Import(result));
+        });
+    }
+
+    /// 启用/停用（只动 packs 托管块）。
+    pub fn start_set_enabled(&mut self, id: String, enabled: bool) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.busy = Some("toggle");
+        self.error = None;
+        self.notice = None;
+        std::thread::spawn(move || {
+            let user_dir = rime_user_dir();
+            let name = id.clone();
+            let result = xime_config::imported_dict::set_enabled(&user_dir, &id, enabled)
+                .map(|()| {
+                    if enabled {
+                        format!("已启用 {name}")
+                    } else {
+                        format!("已停用 {name}")
+                    }
+                });
+            submit_import_task(ImportTask::Modify(result));
+        });
+    }
+
+    /// 打开「更改挂载方案」编辑器，预填当前挂载。
+    pub fn start_rebind(&mut self, id: String) {
+        self.rebind_selected = self
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.attached_schemas.clone())
+            .unwrap_or_default();
+        self.rebind_target = Some(id);
+        self.error = None;
+        self.notice = None;
+    }
+
+    /// 编辑器里勾选/取消一个方案。
+    pub fn toggle_rebind_scheme(&mut self, id: String) {
+        if let Some(index) = self.rebind_selected.iter().position(|existing| existing == &id) {
+            self.rebind_selected.remove(index);
+        } else if self.compatible.iter().any(|(cid, _)| cid == &id) {
+            self.rebind_selected.push(id);
+        }
+    }
+
+    pub fn cancel_rebind(&mut self) {
+        self.rebind_target = None;
+        self.rebind_selected.clear();
+    }
+
+    /// 保存改挂结果（后台执行，之后会重新部署）。
+    pub fn submit_rebind(&mut self) {
+        let Some(id) = self.rebind_target.clone() else {
+            return;
+        };
+        if self.busy.is_some() {
+            return;
+        }
+        if self.rebind_selected.is_empty() {
+            self.error = Some("至少要选一个方案".to_string());
+            return;
+        }
+        let scheme_ids = self.rebind_selected.clone();
+        self.rebind_target = None;
+        self.busy = Some("rebind");
+        self.error = None;
+        self.notice = None;
+        let name = self
+            .items
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.display_name.clone())
+            .unwrap_or_else(|| id.clone());
+        std::thread::spawn(move || {
+            let user_dir = rime_user_dir();
+            let result = xime_config::imported_dict::rebind(&user_dir, &id, &scheme_ids)
+                .map(|()| format!("已更新「{name}」的挂载方案"));
+            submit_import_task(ImportTask::Modify(result));
+        });
+    }
+
+    /// 请求删除（进入两步确认）。
+    pub fn request_delete(&mut self, id: String) {
+        self.delete_confirm = Some(id);
+    }
+
+    pub fn cancel_delete(&mut self) {
+        self.delete_confirm = None;
+    }
+
+    /// 删除：摘 packs、删派生词典、删记录。
+    pub fn start_delete(&mut self, id: String) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.delete_confirm = None;
+        self.busy = Some("delete");
+        self.error = None;
+        self.notice = None;
+        std::thread::spawn(move || {
+            let user_dir = rime_user_dir();
+            let name = id.clone();
+            let result = xime_config::imported_dict::remove(&user_dir, &id)
+                .map(|()| format!("已删除 {name}"));
+            submit_import_task(ImportTask::Modify(result));
+        });
+    }
+
+    /// 是否正在忙（视图里用来禁用按钮）。
+    pub fn is_busy(&self) -> bool {
+        self.busy.is_some() || self.parsing
+    }
+
+    /// 轮询后台结果；返回 `true` 表示词库文件变了，需要重新部署。
+    pub fn poll(&mut self, schemes: &[(String, String)]) -> bool {
+        let outcome = import_task_outcome()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        let mut needs_deploy = false;
+        match outcome {
+            ImportTask::Preview(Ok(preview)) => {
+                self.parsing = false;
+                self.notice = Some(format!(
+                    "{}：{} 条（跳过 {}，重复 {}）",
+                    preview.format_name, preview.entry_count, preview.skipped, preview.duplicates
+                ));
+                self.preview = Some(preview);
+                self.preview_error = None;
+            }
+            ImportTask::Preview(Err(error)) => {
+                self.parsing = false;
+                self.preview = None;
+                self.preview_error = Some(error);
+            }
+            ImportTask::Import(Ok(done)) => {
+                self.busy = None;
+                needs_deploy = true;
+                // 导入完成：弹窗收起，结果留在列表里。
+                self.dialog = false;
+                self.notice = Some(format!(
+                    "已导入「{}」{} 条 → {}",
+                    done.display_name, done.entry_count, done.path
+                ));
+                self.preview = None;
+                self.path.clear();
+                self.selected.clear();
+                self.refresh(schemes);
+            }
+            ImportTask::Import(Err(error)) => {
+                self.busy = None;
+                self.error = Some(error);
+            }
+            ImportTask::Modify(Ok(message)) => {
+                self.busy = None;
+                needs_deploy = true;
+                self.notice = Some(message);
+                self.refresh(schemes);
+            }
+            ImportTask::Modify(Err(error)) => {
+                self.busy = None;
+                self.error = Some(error);
+            }
+        }
+        needs_deploy
+    }
 }
 
 // ---- 云备份（backup-page） --------------------------------------------------
@@ -8337,8 +8834,8 @@ mod dict_browse_tests {
         assert_eq!(browse.status_text(), "正在读取词条…");
 
         browse.loading = false;
-        browse.error = Some("读取词条失败（输入法服务未运行？）".to_string());
-        assert_eq!(browse.status_text(), "读取词条失败（输入法服务未运行？）");
+        browse.error = Some("读取词条失败（输入法未响应或词库被占用）".to_string());
+        assert_eq!(browse.status_text(), "读取词条失败（输入法未响应或词库被占用）");
 
         let unread = DictBrowseState::default();
         assert_eq!(unread.status_text(), "尚未读取");

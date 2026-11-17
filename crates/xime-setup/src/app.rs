@@ -652,15 +652,89 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                 file_dialog::spawn(file_dialog::Kind::Import(dict));
             }
         }
-        #[cfg(any(windows, feature = "dict-page"))]
-        Message::DictTab(i) => {
-            state.settings.dict_manage.tab = i.min(1);
-            // 进入快捷短语 Tab：首次自动为当前方案载入短语表。
-            if i == 1 && state.settings.dict_manage.phrase.is_none() {
-                if let Some((id, name)) = state.settings.selected_schema_info() {
-                    state.settings.dict_manage.phrase_open(id, name);
+        Message::DictImportRefresh => {
+            let schemes = state.settings.scheme_options();
+            state.settings.dict_import.refresh(&schemes);
+        }
+        Message::DictImportDialogOpen => {
+            state.settings.dict_import.open_dialog();
+        }
+        Message::DictImportDialogCancel => {
+            state.settings.dict_import.cancel_dialog();
+        }
+        Message::DictImportBrowse => {
+            // Windows 走原生模态对话框；其他平台走后台线程（xdg-portal / AppKit
+            // 的对话框都不该阻塞 UI 线程）。
+            #[cfg(windows)]
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("词库文件", &["scel", "bdict", "dict", "bin", "txt"])
+                    .pick_file()
+                {
+                    state
+                        .settings
+                        .dict_import
+                        .start_parse(path.display().to_string());
                 }
             }
+            #[cfg(not(windows))]
+            {
+                file_dialog::spawn(file_dialog::Kind::Lexicon);
+            }
+        }
+        Message::DictImportPathChanged(value) => {
+            state.settings.dict_import.set_path(value);
+        }
+        Message::DictImportParse => {
+            let path = state.settings.dict_import.path.clone();
+            state.settings.dict_import.start_parse(path);
+        }
+        Message::DictImportToggleScheme(id) => {
+            state.settings.dict_import.toggle_scheme(id);
+        }
+        Message::DictImportSubmit => {
+            state.settings.dict_import.start_import();
+        }
+        Message::DictImportSetEnabled(id, enabled) => {
+            state.settings.dict_import.start_set_enabled(id, enabled);
+        }
+        Message::DictImportRebindOpen(id) => {
+            state.settings.dict_import.start_rebind(id);
+        }
+        Message::DictImportRebindToggle(id) => {
+            state.settings.dict_import.toggle_rebind_scheme(id);
+        }
+        Message::DictImportRebindCancel => {
+            state.settings.dict_import.cancel_rebind();
+        }
+        Message::DictImportRebindSubmit => {
+            state.settings.dict_import.submit_rebind();
+        }
+        Message::DictImportDeleteRequest(id) => {
+            state.settings.dict_import.request_delete(id);
+        }
+        Message::DictImportDeleteCancel => {
+            state.settings.dict_import.cancel_delete();
+        }
+        Message::DictImportDeleteConfirm(id) => {
+            state.settings.dict_import.start_delete(id);
+        }
+        Message::DictSubOpen(sub) => {
+            state.settings.dict_sub = sub;
+            // 进入快捷短语：首次自动为当前方案载入短语表。
+            #[cfg(any(windows, feature = "dict-page"))]
+            {
+                if sub == crate::state::DictSub::Phrases
+                    && state.settings.dict_manage.phrase.is_none()
+                {
+                    if let Some((id, name)) = state.settings.selected_schema_info() {
+                        state.settings.dict_manage.phrase_open(id, name);
+                    }
+                }
+            }
+        }
+        Message::DictSubBack => {
+            state.settings.dict_sub = crate::state::DictSub::Hub;
         }
         #[cfg(any(windows, feature = "dict-page"))]
         Message::DictSelect(dict) => {
@@ -830,7 +904,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         Message::BackgroundPoll => {
             let started = std::time::Instant::now();
             state.settings.poll_background();
-            #[cfg(all(not(windows), feature = "dict-page"))]
+            #[cfg(not(windows))]
             poll_file_dialog(state);
             let spent = started.elapsed();
             if spent > SLOW_TICK_WARN {
@@ -916,12 +990,24 @@ fn view_inner(state: &SettingsApp) -> Element<'_, Message> {
     if conflict.is_some() {
         return crate::components::widgets::modal_dialog(page, conflict, colors);
     }
+    let import = pages::input_schema::import_dialog(&state.settings, colors);
+    if import.is_some() {
+        return crate::components::widgets::modal_dialog_sized(
+            page,
+            import,
+            colors,
+            560.0,
+            Some(500.0),
+        );
+    }
+    // 词典页的弹窗（新增词条 / 短语编辑 / 导入词库）：叠在整窗上，不跟着
+    // 页面内容的高度走。
     crate::components::widgets::modal_dialog_sized(
         page,
-        pages::input_schema::import_dialog(&state.settings, colors),
+        pages::page_overlay(&state.settings, current, colors),
         colors,
         560.0,
-        Some(500.0),
+        None,
     )
 }
 
@@ -937,7 +1023,7 @@ fn container_style(colors: &ThemeColors) -> iced::widget::container::Style {
 /// `save_file` 会冻结 UI 线程 → 后台线程选路径，结果经信箱由
 /// BackgroundPoll（250ms 节拍）回收分发。对话框进行中防重入。
 /// Windows 走原生模态（上面的 `#[cfg(windows)]` 分支），不经此模块。
-#[cfg(all(not(windows), feature = "dict-page"))]
+#[cfg(not(windows))]
 mod file_dialog {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -945,11 +1031,16 @@ mod file_dialog {
     /// 发起哪种对话框（决定后续分发到哪个词典操作）。
     pub enum Kind {
         /// 恢复：选 `.userdb.txt` 快照。
+        #[cfg(feature = "dict-page")]
         Restore,
         /// 导出：选保存路径（携带词典名）。
+        #[cfg(feature = "dict-page")]
         Export(String),
         /// 导入：选文本文件（携带词典名）。
+        #[cfg(feature = "dict-page")]
         Import(String),
+        /// 外部词库：选 `.scel` / `.bdict` / `.dict` / `.bin` / `.txt`。
+                Lexicon,
     }
 
     /// 结果信箱：Some(path) = 用户选定；None = 取消。
@@ -965,17 +1056,24 @@ mod file_dialog {
         }
         std::thread::spawn(move || {
             let picked = match &kind {
+                #[cfg(feature = "dict-page")]
                 Kind::Restore => rfd::FileDialog::new()
                     .add_filter("用户词典快照 (*.userdb.txt)", &["userdb.txt"])
                     .pick_file()
                     .map(|p| p.display().to_string()),
+                #[cfg(feature = "dict-page")]
                 Kind::Export(dict) => rfd::FileDialog::new()
                     .add_filter("文本文件 (*.txt)", &["txt"])
                     .set_file_name(format!("{dict}_export.txt"))
                     .save_file()
                     .map(|p| p.display().to_string()),
+                #[cfg(feature = "dict-page")]
                 Kind::Import(_) => rfd::FileDialog::new()
                     .add_filter("文本文件 (*.txt)", &["txt"])
+                    .pick_file()
+                    .map(|p| p.display().to_string()),
+                                Kind::Lexicon => rfd::FileDialog::new()
+                    .add_filter("词库文件", &["scel", "bdict", "dict", "bin", "txt"])
                     .pick_file()
                     .map(|p| p.display().to_string()),
             };
@@ -998,20 +1096,27 @@ mod file_dialog {
     }
 }
 
-/// BackgroundPoll 节拍里分发文件对话框结果（Linux；取消 = 无动作）。
-#[cfg(all(not(windows), feature = "dict-page"))]
+/// BackgroundPoll 节拍里分发文件对话框结果（非 Windows；取消 = 无动作）。
+#[cfg(not(windows))]
 fn poll_file_dialog(state: &mut SettingsApp) {
     if let Some((kind, path)) = file_dialog::take() {
         let settings = &mut state.settings;
         match (kind, path) {
+            #[cfg(feature = "dict-page")]
             (file_dialog::Kind::Restore, Some(path)) => {
                 settings.dict_manage.start_restore(path);
             }
+            #[cfg(feature = "dict-page")]
             (file_dialog::Kind::Export(dict), Some(path)) => {
                 settings.dict_manage.start_export(dict, path);
             }
+            #[cfg(feature = "dict-page")]
             (file_dialog::Kind::Import(dict), Some(path)) => {
                 settings.dict_manage.start_import(dict, path);
+            }
+                        (file_dialog::Kind::Lexicon, Some(path)) => {
+                // 选完文件直接解析出预览，用户不必再点一次「解析」。
+                settings.dict_import.start_parse(path);
             }
             // 用户取消：什么都不做（IN_FLIGHT 已清，可再次打开）。
             (_, None) => {}

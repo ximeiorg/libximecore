@@ -319,6 +319,7 @@ fn plugin_items<'a>(
             }).text_size(14).padding([8, 10])
             .width(Length::Fixed(180.0))
             .style(move |_theme, status| pick_list_style(colors, status))
+        .menu_style(crate::components::widgets::pick_list_menu_style(colors))
             .into(),
         ));
     }

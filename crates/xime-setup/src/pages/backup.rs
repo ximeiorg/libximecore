@@ -34,7 +34,8 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     }).text_size(14).padding([8, 10])
         // 显式宽度：Shrink 在这个位置会被左侧说明挤到只剩内边距，文字竖排。
         .width(Length::Fixed(180.0))
-        .style(move |_theme, status| pick_list_style(colors, status));
+        .style(move |_theme, status| pick_list_style(colors, status))
+        .menu_style(crate::components::widgets::pick_list_menu_style(colors));
 
     // 提供者相关配置项。
     let mut service_items: Vec<Element<'a, Message>> = vec![settings_item(
@@ -171,7 +172,8 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
         Message::BackupModeChanged(MODES.iter().position(|m| *m == chosen).unwrap_or(0) as u8)
     }).text_size(14).padding([8, 10])
         .width(Length::Fixed(180.0))
-        .style(move |_theme, status| pick_list_style(colors, status));
+        .style(move |_theme, status| pick_list_style(colors, status))
+        .menu_style(crate::components::widgets::pick_list_menu_style(colors));
     groups.push(settings_group(
         "备份设置",
         None::<String>,

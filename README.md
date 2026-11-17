@@ -20,7 +20,7 @@ XimeYi · XimeYao · Linux 桌面组件 · ximed
 │ libximecore                               │
 │  librime-sys2 → librime → xime-rime       │
 │  xime-config   xime-ipc   xime-setup-lib  │
-│  xime-plugin   xime-infer                 │
+│  xime-plugin   xime-infer   xime-lexicon  │
 │  xime-sync-store → service → server       │
 └─────────────────────┬─────────────────────┘
                       ▼
@@ -38,6 +38,7 @@ XimeYi · XimeYao · Linux 桌面组件 · ximed
 | `xime-ipc` | 输入法进程与后台守护的消息类型、`DaemonClient` trait |
 | `xime-setup-lib` | iced 跨平台设置界面（页面按 feature 门控） |
 | `xime-plugin` | QuickJS 插件运行时：`.xipk` 包、manifest、能力白名单、超时熔断 |
+| `xime-lexicon` | 外部词库解析：搜狗 `.scel` / 百度 `.bdict` / fcitx5 libime / 搜狗拼音备份等格式 |
 | `xime-infer` | 基于 candle 的本地模型推理（笔画手写识别等） |
 | `xime-infer` | 基于 candle 的本地模型推理：笔画手写识别（CPU / Metal / CUDA，按 feature 分包） |
 | `xime-sync-store` | 同步存储后端（本地、历史） |

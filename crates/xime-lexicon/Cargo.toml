@@ -1,0 +1,13 @@
+[package]
+name = "xime-lexicon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "External lexicon parsers (scel/bdict/libime/sogou) for Rime dictionary import"
+repository.workspace = true
+
+[dependencies]
+# 文本词库的 GBK / UTF-16LE 解码（搜狗、百度文本词库都是这两种编码）
+encoding_rs.workspace = true
+# libime 二进制词库的版本 2 是 zstd 压缩（可能多帧）
+zstd.workspace = true

@@ -14,6 +14,8 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 librime = { path = "../librime" }
+# 外部词库解析（搜狗/百度/fcitx5 等格式）：词库导入页与导入管线共用。
+xime-lexicon = { path = "../xime-lexicon" }
 rusqlite.workspace = true
 once_cell.workspace = true
 thiserror.workspace = true

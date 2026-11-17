@@ -25,6 +25,8 @@ iced = { version = "0.14", default-features = false, features = [
 ] }
 xime-config = { path = "../xime-config" }
 xime-plugin = { path = "../xime-plugin" }
+# 词库导入页要列出支持的格式、按编码体系筛方案。
+xime-lexicon = { path = "../xime-lexicon" }
 # 设备关联页（pair-page）：局域网 P2P 配对。可选，未启用该页的宿主不必链接。
 xime-p2p = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }

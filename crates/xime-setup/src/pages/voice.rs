@@ -160,7 +160,8 @@ fn model_card<'a>(
     .text_size(14)
     .padding([8, 10])
     .width(Length::Fixed(360.0))
-    .style(move |_theme, status| pick_list_style(colors, status));
+    .style(move |_theme, status| pick_list_style(colors, status))
+        .menu_style(crate::components::widgets::pick_list_menu_style(colors));
     items.push(row![selector].spacing(8).align_y(Alignment::Center).into());
 
     if let Some(entry) = server.selected_entry() {
