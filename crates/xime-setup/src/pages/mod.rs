@@ -117,6 +117,18 @@ pub fn pair_page_index() -> Option<usize> {
         .position(|(_, title)| *title == "设备关联")
 }
 
+/// 「剪贴板」页在侧栏里的扁平下标（没编进这个页面时 None）。
+///
+/// 进页要重读历史：设置程序是单实例长驻的，页面状态在启动时只装载一次，
+/// 用户复制内容后再切到本页，看到的仍是启动那一刻的快照——表现为
+/// 「复制了但历史里没有」，而库里其实已经写进去了。
+#[cfg(feature = "clipboard-page")]
+pub fn clipboard_page_index() -> Option<usize> {
+    sidebar_items()
+        .iter()
+        .position(|(_, title)| *title == "剪贴板")
+}
+
 /// 侧栏导航：品牌区 + 分组标题 + 各组导航项（点击仍发扁平下标）。
 pub fn sidebar(current: usize, colors: &ThemeColors) -> Element<'static, Message> {
     let groups = sidebar_groups();

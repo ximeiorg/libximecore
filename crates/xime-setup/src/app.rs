@@ -140,6 +140,17 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                 let on_voice_page = crate::pages::voice_page_index() == Some(i);
                 state.settings.speech_server.set_active(on_voice_page);
             }
+            // 剪贴板页：进页重读历史与快捷发送。
+            //
+            // 设置程序单实例长驻，这两份状态只在启动时 `load()` 一次；用户
+            // 复制内容后切到本页看到的仍是启动那一刻的快照，与库里对不上，
+            // 表现就是「复制了却不在历史里」。重读是廉价的全表扫描（默认只取
+            // 50 条），进页做一次没有负担。
+            #[cfg(feature = "clipboard-page")]
+            if crate::pages::clipboard_page_index() == Some(i) {
+                state.settings.clip_history.reload();
+                state.settings.quick_send.reload();
+            }
         }
         Message::SchemaTab(i) => {
             state.settings.input_schema.current_tab = i;
@@ -220,6 +231,17 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             }
         }
         Message::WindowEvent(event) => {
+            // 剪贴板页：窗口重新获得焦点时重读。
+            //
+            // 剪贴板的使用姿势就是「在别的应用里复制，再切回来看」，所以焦点
+            // 回来比按页轮询更贴合——停在页面上不动时也不会有多余 IO。
+            #[cfg(feature = "clipboard-page")]
+            if matches!(event, iced::window::Event::Focused)
+                && crate::pages::clipboard_page_index() == Some(state.settings.current_page)
+            {
+                state.settings.clip_history.reload();
+                state.settings.quick_send.reload();
+            }
             if let iced::window::Event::FileDropped(path) = event {
                 if state.settings.schema_import.open {
                     state
