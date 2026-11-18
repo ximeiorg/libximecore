@@ -1291,6 +1291,16 @@ impl SettingsState {
         state.start_load_market();
         state.start_load_models();
         state.start_load_plugins();
+        // 语音页的引擎状态只在「本页可见」时轮询，而 `set_active` 原本只在
+        // `PageSelected` 里调——启动页如果就是语音页（以后接了"记住上次页面"
+        // 就会这样），页面会一直停在"正在读取…"。这里补一次初始置位，条件
+        // 与 `PageSelected` 里的判定保持一致。
+        #[cfg(feature = "voice-page")]
+        if crate::pages::voice_page_index() == Some(state.current_page)
+            && state.speech_mode.mode == crate::speech_mode::SpeechMode::Local
+        {
+            state.speech_server.set_active(true);
+        }
         state
     }
 
