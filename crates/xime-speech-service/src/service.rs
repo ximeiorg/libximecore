@@ -24,10 +24,11 @@ use std::time::{Duration, Instant};
 use candle_core::DType;
 use xime_infer::DeviceKind;
 
-use crate::capture::{self, CaptureHandle};
+use crate::capture::{self, CaptureHandle, CaptureTap};
 use crate::engine::{QwenRecognizer, Recognizer};
 use crate::protocol::{ModelInfo, Status};
 use crate::registry::{Entry, Registry};
+use crate::stream::{StreamSession, StreamTuning};
 
 /// 服务配置。平台差异全部在这里，服务内部不做 `cfg(target_os)`。
 #[derive(Debug, Clone)]
@@ -68,8 +69,17 @@ struct Inner {
     selected: String,
     selected_name: String,
     text: String,
+    /// 已定稿文本：流式听写中只会追加，不会改写。
+    committed: String,
+    /// 未定稿预览：每次重解码整体替换。
+    partial: String,
+    partial_rev: u64,
     error: Option<String>,
     capture: Option<CaptureHandle>,
+    /// 流式 worker（引擎不支持流式时为 None）。
+    stream: Option<StreamWorker>,
+    /// 流式已经消费的 16 kHz 样本数。
+    stream_consumed: usize,
     listening: bool,
     transcribing: bool,
     models_rev: u64,
@@ -80,6 +90,18 @@ struct EngineSlot {
     state: Mutex<EngineState>,
     ready: Condvar,
 }
+
+/// 流式 worker 句柄。`stop` 置位后 worker 跑完最后一次窗口解码再退出。
+///
+/// 退出信号走 channel 而不是 `join()`：模型还在装载时 worker 会阻塞在引擎锁上，
+/// 而松手必须立刻响应（`listen_stop` 最多等 [`STREAM_JOIN_TIMEOUT`]）。
+struct StreamWorker {
+    stop: Arc<AtomicBool>,
+    done: std::sync::mpsc::Receiver<()>,
+}
+
+/// 松手后等流式 worker 收尾的上限（最后一轮窗口解码）。
+const STREAM_JOIN_TIMEOUT: Duration = Duration::from_millis(1500);
 
 struct EngineState {
     engine: Option<Box<dyn Recognizer>>,
@@ -112,8 +134,13 @@ impl SpeechService {
                 selected: selected.clone(),
                 selected_name,
                 text: String::new(),
+                committed: String::new(),
+                partial: String::new(),
+                partial_rev: 0,
                 error: None,
                 capture: None,
+                stream: None,
+                stream_consumed: 0,
                 listening: false,
                 transcribing: false,
                 models_rev: 0,
@@ -148,8 +175,13 @@ impl SpeechService {
                 selected,
                 selected_name,
                 text: String::new(),
+                committed: String::new(),
+                partial: String::new(),
+                partial_rev: 0,
                 error: None,
                 capture: None,
+                stream: None,
+                stream_consumed: 0,
                 listening: false,
                 transcribing: false,
                 models_rev: 0,
@@ -173,13 +205,29 @@ impl SpeechService {
 
     /// 当前状态。
     pub fn status(&self) -> Status {
-        let (models, selected, selected_name, text, error, listening, transcribing, rev, level) = {
+        let (
+            models,
+            selected,
+            selected_name,
+            text,
+            committed,
+            partial,
+            partial_rev,
+            error,
+            listening,
+            transcribing,
+            rev,
+            level,
+        ) = {
             let inner = self.inner.lock().unwrap();
             (
                 inner.models.clone(),
                 inner.selected.clone(),
                 inner.selected_name.clone(),
                 inner.text.clone(),
+                inner.committed.clone(),
+                inner.partial.clone(),
+                inner.partial_rev,
                 inner.error.clone(),
                 inner.listening,
                 inner.transcribing,
@@ -208,6 +256,9 @@ impl SpeechService {
             provider: format!("{} · {}", self.cfg.provider, self.cfg.models_dir.display()),
             text,
             level,
+            committed,
+            partial,
+            partial_rev,
             error: error.or(engine_error),
             models_rev: rev,
             models,
@@ -285,46 +336,90 @@ impl SpeechService {
     }
 
     /// 开始录音。引擎没装好也会先录，`listen_stop` 时等装载完成再识别。
-    pub fn listen_start(&self) -> Result<Status, String> {
-        {
+    ///
+    /// 引擎支持流式时同时起一个后台 worker：录音过程中逐秒编码、滚动重解码，
+    /// 定稿的文本实时写进 `status.committed`，客户端轮询即可上屏。
+    pub fn listen_start(self: &Arc<Self>) -> Result<Status, String> {
+        let already = {
             let mut inner = self.inner.lock().unwrap();
             if inner.listening {
-                return Ok(self.status());
+                true
+            } else {
+                if inner.selected.is_empty() {
+                    return Err("还没有可用的语音模型".to_string());
+                }
+                let capture = capture::start()?;
+                inner.capture = Some(capture);
+                inner.listening = true;
+                inner.transcribing = false;
+                inner.text.clear();
+                inner.committed.clear();
+                inner.partial.clear();
+                inner.partial_rev += 1;
+                inner.stream_consumed = 0;
+                inner.error = None;
+                false
             }
-            if inner.selected.is_empty() {
-                return Err("还没有可用的语音模型".to_string());
-            }
-            let capture = capture::start()?;
-            inner.capture = Some(capture);
-            inner.listening = true;
-            inner.text.clear();
-            inner.error = None;
+        };
+        if already {
+            return Ok(self.status());
         }
         if !self.engine.is_loaded() && !self.engine.is_loading() {
             self.spawn_load();
         }
+        self.spawn_stream();
         Ok(self.status())
     }
 
     /// 结束录音并异步识别；结果写进 `status.text`。
+    ///
+    /// 流式已经出过字的话，直接采用流式结果（松手只补最后不到一秒的尾巴，
+    /// 不再整段重跑一次，避免屏幕上已经落定的字被改写）。
     pub fn listen_stop(self: &Arc<Self>) -> Result<Status, String> {
-        let capture = {
+        let (capture, stream) = {
             let mut inner = self.inner.lock().unwrap();
             if !inner.listening {
                 return Err("当前没有在录音".to_string());
             }
             inner.listening = false;
             inner.transcribing = true;
-            inner.capture.take()
+            (inner.capture.take(), inner.stream.take())
         };
         let Some(capture) = capture else {
             return Err("录音句柄丢失".to_string());
         };
+
+        // 先停流式 worker（它会做最后一次窗口解码并写回结果），再收录音线程。
+        let streamed = stream.is_some();
+        if let Some(worker) = stream {
+            worker.stop.store(true, Ordering::Relaxed);
+            // 超时就不等了：worker 持有 Arc，收尾完成后自行退出，不会泄漏状态
+            // （它写的都是文本字段，此时 listening 已经置 false）。
+            let _ = worker.done.recv_timeout(STREAM_JOIN_TIMEOUT);
+        }
+
         let pcm = capture.stop();
+        let streamed_text = {
+            let inner = self.inner.lock().unwrap();
+            inner.committed.clone()
+        };
+
+        if streamed && !streamed_text.is_empty() {
+            let mut inner = self.inner.lock().unwrap();
+            inner.transcribing = false;
+            inner.text = inner.committed.clone();
+            inner.partial.clear();
+            inner.partial_rev += 1;
+            inner.last_used = Instant::now();
+            drop(inner);
+            return Ok(self.status());
+        }
+
         if pcm.len() < capture::TARGET_RATE as usize / 5 {
             let mut inner = self.inner.lock().unwrap();
             inner.transcribing = false;
             inner.error = Some("没有录到声音".to_string());
+            drop(inner);
             return Ok(self.status());
         }
 
@@ -346,6 +441,145 @@ impl SpeechService {
             })
             .map_err(|e| format!("启动识别线程失败：{e}"))?;
         Ok(self.status())
+    }
+
+    /// 起流式 worker。引擎不支持流式（或已被占用）时静默跳过，`listen_stop`
+    /// 会退回整段识别。
+    fn spawn_stream(self: &Arc<Self>) {
+        let tap = {
+            let inner = self.inner.lock().unwrap();
+            inner.capture.as_ref().map(|c| c.tap())
+        };
+        let Some(tap) = tap else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let service = Arc::clone(self);
+        let flag = Arc::clone(&stop);
+        let spawn = thread::Builder::new()
+            .name("xime-asr-stream".to_string())
+            .spawn(move || {
+                service.stream_loop(tap, flag);
+                let _ = done_tx.send(());
+            });
+        match spawn {
+            Ok(_) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.stream = Some(StreamWorker { stop, done });
+            }
+            Err(error) => {
+                // 线程起不来不影响录音：退回整段识别。
+                eprintln!("[xime-speech] 启动流式线程失败：{error}");
+            }
+        }
+    }
+
+    /// 流式 worker 主循环：按整秒读增量音频 → 编码 → 滚动重解码 → 写回状态。
+    fn stream_loop(self: &Arc<Self>, tap: CaptureTap, stop: Arc<AtomicBool>) {
+        // 模型可能还在装载：`with` 会等，期间 stop 了就退出。
+        let tuning = match self.cfg.device {
+            DeviceKind::Cpu => StreamTuning::cpu(),
+            _ => StreamTuning::gpu(),
+        };
+        let mut session = StreamSession::new(tuning.clone());
+        let rate = tap.device_rate();
+        let per_sec = rate as usize;
+        eprintln!(
+            "[xime-speech] 流式 worker 启动：后端 {:?}，窗口 {:.1}s，设备采样率 {rate}",
+            self.cfg.device, tuning.window_secs
+        );
+        let mut cursor = 0usize;
+        let mut raw_acc: Vec<f32> = Vec::new();
+        let mut consumed16 = 0usize;
+        let mut reported: Option<String> = None;
+
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let (chunk, new_cursor) = tap.read_since(cursor);
+            cursor = new_cursor;
+            raw_acc.extend_from_slice(&chunk);
+
+            // 只按整秒切：重采样在非整秒边界会引入相位不连续，而且音频塔本来就是
+            // 1 秒一个 chunk，按整秒对齐刚好与它重合。
+            let mut pcm16: Vec<f32> = Vec::new();
+            while raw_acc.len() >= per_sec {
+                let block: Vec<f32> = raw_acc.drain(..per_sec).collect();
+                if rate == capture::TARGET_RATE {
+                    pcm16.extend_from_slice(&block);
+                } else {
+                    match xime_infer::asr::audio::resample(&block, rate, capture::TARGET_RATE) {
+                        Ok(block) => pcm16.extend(block),
+                        Err(error) => {
+                            let error = format!("重采样失败：{error}");
+                            if reported.as_deref() != Some(error.as_str()) {
+                                eprintln!("[xime-speech] {error}");
+                                reported = Some(error);
+                            }
+                        }
+                    }
+                }
+            }
+            if pcm16.is_empty() {
+                // 没有新音频也要转一圈：停顿定稿靠这里推进。
+                thread::sleep(Duration::from_millis(60));
+                let level = tap.level();
+                let _ = self
+                    .engine
+                    .with(|engine| session.feed(engine, &[], level, Instant::now()))
+                    .map(|progress| {
+                        if progress.any() {
+                            self.publish(&session, consumed16, false);
+                        }
+                    });
+                continue;
+            }
+            consumed16 += pcm16.len();
+            let level = tap.level();
+            let fed = self
+                .engine
+                .with(|engine| session.feed(engine, &pcm16, level, Instant::now()));
+            match fed {
+                Ok(progress) => {
+                    if progress.any() {
+                        self.publish(&session, consumed16, false);
+                    }
+                }
+                Err(error) => {
+                    if reported.as_deref() != Some(error.as_str()) {
+                        reported = Some(error.clone());
+                        let mut inner = self.inner.lock().unwrap();
+                        inner.error = Some(error);
+                    }
+                }
+            }
+            // 一轮解码本身就要几十到几百毫秒；这里只让出极短的间隙，
+            // 真正节流在 StreamSession 里（按 min_interval 判 due）。
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        // 收尾：把尾巴编码进去、跑最后一轮，结果全部定稿。
+        if !session.committed().is_empty() || consumed16 > 0 {
+            let _ = self.engine.with(|engine| session.finish(engine));
+            self.publish(&session, consumed16, true);
+        }
+    }
+
+    /// 把会话文本写进状态。`final_round` 时同时落 `text`。
+    fn publish(&self, session: &StreamSession, consumed16: usize, final_round: bool) {
+        let committed = session.committed().to_string();
+        let partial = session.partial();
+        let rev = session.partial_rev();
+        let mut inner = self.inner.lock().unwrap();
+        inner.committed = committed.clone();
+        inner.partial = partial;
+        inner.partial_rev = rev;
+        inner.stream_consumed = consumed16;
+        if final_round {
+            inner.text = committed;
+        }
     }
 
     /// 直接识别一段 16 kHz PCM（测试与离线试听用）。
@@ -376,7 +610,14 @@ impl SpeechService {
 
     /// 退出前清理。
     pub fn shutdown(&self) {
-        let capture = self.inner.lock().unwrap().capture.take();
+        let (capture, stream) = {
+            let mut inner = self.inner.lock().unwrap();
+            (inner.capture.take(), inner.stream.take())
+        };
+        if let Some(worker) = stream {
+            worker.stop.store(true, Ordering::Relaxed);
+            let _ = worker.done.recv_timeout(STREAM_JOIN_TIMEOUT);
+        }
         drop(capture); // drop 会断开通道，采集线程自行退出
         self.engine.unload();
     }

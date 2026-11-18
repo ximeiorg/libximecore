@@ -152,7 +152,42 @@ pub fn build_prompt(
     audio_end: u32,
     language: Option<&str>,
 ) -> Result<PromptIds, InferError> {
+    build_prompt_with_context(tok, audio_start, audio_end, language, None)
+}
+
+/// 同上，额外把 `context` 塞进 system 段（Qwen3-ASR 的上下文偏置）。
+///
+/// 官方 chat template 的 system 段默认是空的：
+///
+/// ```text
+/// <|im_start|>system\n<|im_end|>\n
+/// ```
+///
+/// 流式识别时把**上一段已定稿的文本**放进去，等于告诉模型「接着这里往下写」，
+/// 能明显压低重解码窗口开头几个字的抖动（换行、重新断句、把上半句重打一遍）。
+pub fn build_prompt_with_context(
+    tok: &AsrTokenizer,
+    audio_start: u32,
+    audio_end: u32,
+    language: Option<&str>,
+    context: Option<&str>,
+) -> Result<PromptIds, InferError> {
     let mut ids = prompt_ids(audio_start, audio_end);
+
+    if let Some(context) = context.map(str::trim).filter(|c| !c.is_empty()) {
+        let ctx = tok.encode(context)?;
+        if !ctx.is_empty() {
+            // 插在 `system\n` 之后、`<|im_end|>` 之前；按 token 值定位，改动
+            // `prompt_ids` 的结构时不会静默插错位置。
+            let at = ids
+                .prefix
+                .iter()
+                .position(|t| *t == TOKEN_IM_END)
+                .unwrap_or(ids.prefix.len());
+            ids.prefix.splice(at..at, ctx);
+        }
+    }
+
     if let Some(lang) = language {
         let mut prefill = tok.encode(&format!("language {lang}"))?;
         prefill.push(TOKEN_ASR_TEXT);

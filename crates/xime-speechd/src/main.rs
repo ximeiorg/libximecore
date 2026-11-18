@@ -65,7 +65,7 @@ impl Args {
 用法: xime-speechd --socket <路径> --models <模型根目录> [选项]
 
 选项:
-  --device cpu|metal|cuda   推理后端（默认 cpu）
+  --device cpu|metal|cuda   推理后端（默认自动探测，GPU 不可用则 CPU）
   --dtype f32|f16|bf16      权重精度（默认 f32；Metal 建议 f16）
   --idle-secs <秒>           空闲多久卸载模型（默认 300）
   --help                     显示这段说明
@@ -76,7 +76,9 @@ impl Args {
     fn parse(args: impl Iterator<Item = String>) -> Result<Option<Self>, String> {
         let mut socket = std::env::var("XIME_SPEECH_SOCKET").ok();
         let mut models = std::env::var_os("XIME_SPEECH_MODELS").map(PathBuf::from);
-        let mut device = "cpu".to_string();
+        // 不指定就探测：装了 cuda/metal 版本且显卡可用时走 GPU（流式窗口能开大），
+        // 否则落回 CPU。显式 `--device` 仍然优先。
+        let mut device: Option<String> = None;
         let mut dtype = "f32".to_string();
         let mut idle_secs = 300u64;
 
@@ -86,7 +88,7 @@ impl Args {
                 "--help" | "-h" => return Ok(None),
                 "--socket" => socket = Some(next_value(&mut args, &flag)?),
                 "--models" => models = Some(next_value(&mut args, &flag)?.into()),
-                "--device" => device = next_value(&mut args, &flag)?,
+                "--device" => device = Some(next_value(&mut args, &flag)?),
                 "--dtype" => dtype = next_value(&mut args, &flag)?,
                 "--idle-secs" => {
                     idle_secs = next_value(&mut args, &flag)?
@@ -100,7 +102,10 @@ impl Args {
         Ok(Some(Self {
             socket: socket.ok_or("缺少 --socket（或 XIME_SPEECH_SOCKET）")?,
             models: models.ok_or("缺少 --models（或 XIME_SPEECH_MODELS）")?,
-            device: parse_device(&device)?,
+            device: match device.as_deref() {
+                Some(value) => parse_device(value)?,
+                None => DeviceKind::detect(),
+            },
             dtype: parse_dtype(&dtype)?,
             idle_secs,
         }))

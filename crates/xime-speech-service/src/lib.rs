@@ -22,6 +22,8 @@ pub mod engine;
 pub mod registry;
 #[cfg(feature = "server")]
 pub mod service;
+#[cfg(feature = "server")]
+pub mod stream;
 
 #[cfg(feature = "server")]
 pub use candle_core::DType;
@@ -32,5 +34,7 @@ pub use protocol::{ModelInfo, Request, Response, Status, PROTOCOL_VERSION};
 pub use registry::{format_size, Entry, Registry};
 #[cfg(feature = "server")]
 pub use service::{ServiceConfig, SpeechService};
+#[cfg(feature = "server")]
+pub use stream::{Progress, StreamSession, StreamTuning};
 #[cfg(feature = "server")]
 pub use xime_infer::DeviceKind;

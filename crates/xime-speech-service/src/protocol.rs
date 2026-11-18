@@ -45,10 +45,18 @@ pub struct Status {
     pub model_ready: bool,
     /// 推理后端说明，例如 `CPU · qwen3-asr-0.6b`。
     pub provider: String,
-    /// 最近一次识别结果。
+    /// 最近一次识别结果（整段识别用；流式听写中是定稿部分的全文）。
     pub text: String,
     /// 输入电平 0-100（只在 listening 时有意义；其余状态为 0）。
     pub level: u8,
+    /// 本次听写中**已定稿**的文本：模型已经不会再改它，客户端应当立刻上屏。
+    ///
+    /// 流式听写按「稳定前缀」推进定稿，所以这个字段单调变长；松手后等于全文。
+    pub committed: String,
+    /// 未定稿的预览文本：随重解码变化，客户端显示为 preedit（会整体被替换）。
+    pub partial: String,
+    /// `partial` 的修订号。值没变就不必重画 preedit。
+    pub partial_rev: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// 模型集合变化计数（客户端据此决定要不要重拉列表）。

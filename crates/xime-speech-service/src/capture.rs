@@ -7,7 +7,7 @@
 //! 录音在守护进程里做，不在输入法/设置进程里做：麦克风权限与「谁在录音」
 //! 必须是同一个进程，否则 TCC 授权会落到错误的 bundle 上。
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -27,6 +27,12 @@ pub struct CaptureHandle {
     join: JoinHandle<Vec<f32>>,
     /// 实时输入电平 0-100（音频回调里更新，UI 轮询读取）。
     level: Arc<AtomicU8>,
+    /// 已采集的原始样本数（设备采样率、单声道）。音频回调里更新。
+    raw_len: Arc<AtomicUsize>,
+    /// 原始样本本体。流式识别在录音过程中按需增量读取，不复制整段。
+    raw: Arc<Mutex<Vec<f32>>>,
+    /// 设备采样率。起流后才确定，线程写入。
+    rate: Arc<AtomicU32>,
 }
 
 impl CaptureHandle {
@@ -35,12 +41,88 @@ impl CaptureHandle {
         self.level.load(Ordering::Relaxed)
     }
 
+    /// 设备采样率（流式增量读取需要自己重采样到 16 kHz）。
+    pub fn device_rate(&self) -> u32 {
+        self.rate.load(Ordering::Relaxed)
+    }
+
+    /// 读取自 `cursor` 之后新增的原始样本（**设备采样率**、单声道）。
+    ///
+    /// 返回样本与新的游标。流式会话每轮调一次，只有新增部分被复制。
+    pub fn read_since(&self, cursor: usize) -> (Vec<f32>, usize) {
+        let raw = match self.raw.lock() {
+            Ok(raw) => raw,
+            Err(_) => return (Vec::new(), cursor),
+        };
+        let total = raw.len();
+        if cursor >= total {
+            return (Vec::new(), total);
+        }
+        (raw[cursor..].to_vec(), total)
+    }
+
     /// 结束录音，等待线程退出并取回 16 kHz 单声道 PCM。
     pub fn stop(self) -> Vec<f32> {
         let _ = self.stop_tx.send(());
         let pcm = self.join.join().unwrap_or_default();
         self.level.store(0, Ordering::Relaxed);
         pcm
+    }
+
+    /// 取一个可跨线程持有的只读视图，供流式识别在录音过程中增量取样。
+    pub fn tap(&self) -> CaptureTap {
+        CaptureTap {
+            raw: self.raw.clone(),
+            raw_len: self.raw_len.clone(),
+            level: self.level.clone(),
+            rate: self.rate.clone(),
+        }
+    }
+}
+
+/// 录音的只读视图。
+///
+/// `CaptureHandle::stop` 会消费句柄，但流式识别要在录音**期间**反复取新增样本，
+/// 所以把共享缓冲的读路径单独抽出来：两边同时读，互不影响。
+#[derive(Clone)]
+pub struct CaptureTap {
+    raw: Arc<Mutex<Vec<f32>>>,
+    raw_len: Arc<AtomicUsize>,
+    level: Arc<AtomicU8>,
+    rate: Arc<AtomicU32>,
+}
+
+impl CaptureTap {
+    /// 实时输入电平 0-100。
+    pub fn level(&self) -> u8 {
+        self.level.load(Ordering::Relaxed)
+    }
+
+    /// 设备采样率（增量样本是设备采样率，需自行重采样到 16 kHz）。
+    pub fn device_rate(&self) -> u32 {
+        self.rate.load(Ordering::Relaxed)
+    }
+
+    /// 已采集的样本总数（设备采样率口径）。
+    pub fn len(&self) -> usize {
+        self.raw_len.load(Ordering::Relaxed)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 读取自 `cursor` 之后新增的原始样本，返回样本与建议的新游标。
+    pub fn read_since(&self, cursor: usize) -> (Vec<f32>, usize) {
+        let raw = match self.raw.lock() {
+            Ok(raw) => raw,
+            Err(_) => return (Vec::new(), cursor),
+        };
+        let total = raw.len();
+        if cursor >= total {
+            return (Vec::new(), total);
+        }
+        (raw[cursor..].to_vec(), total)
     }
 }
 
@@ -62,18 +144,31 @@ pub fn start() -> Result<CaptureHandle, String> {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
     let level = Arc::new(AtomicU8::new(0));
+    // 缓冲放在线程外面，句柄要能与录音线程同时读（流式增量取样本）。
+    let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let raw_len = Arc::new(AtomicUsize::new(0));
+    let rate = Arc::new(AtomicU32::new(TARGET_RATE));
 
     let thread_level = level.clone();
+    let thread_samples = samples.clone();
+    let thread_len = raw_len.clone();
+    let thread_rate = rate.clone();
     let join = thread::Builder::new()
         .name("xime-mic".to_string())
         .spawn(move || {
-            let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
-            let result = run_stream(samples.clone(), &ready_tx, &stop_rx, thread_level);
+            let result = run_stream(
+                thread_samples.clone(),
+                &ready_tx,
+                &stop_rx,
+                thread_level,
+                thread_len,
+                thread_rate,
+            );
             if let Err(error) = result {
                 // 起流失败要把原因送回去；起流成功后错误只影响停止时机。
                 let _ = ready_tx.send(Err(error));
             }
-            let raw = samples.lock().map(|s| s.clone()).unwrap_or_default();
+            let raw = thread_samples.lock().map(|s| s.clone()).unwrap_or_default();
             raw
         })
         .map_err(|e| format!("创建录音线程失败：{e}"))?;
@@ -83,6 +178,9 @@ pub fn start() -> Result<CaptureHandle, String> {
             stop_tx,
             join,
             level,
+            raw_len,
+            raw: samples,
+            rate,
         }),
         Ok(Err(error)) => {
             let _ = join.join();
@@ -103,6 +201,8 @@ fn run_stream(
     ready: &mpsc::Sender<Result<(), String>>,
     stop_rx: &mpsc::Receiver<()>,
     level: Arc<AtomicU8>,
+    raw_len: Arc<AtomicUsize>,
+    rate_out: Arc<AtomicU32>,
 ) -> Result<(), String> {
     let host = cpal::default_host();
     let device = host
@@ -115,11 +215,13 @@ fn run_stream(
     let config: cpal::StreamConfig = supported.into();
     let channels = config.channels as usize;
     let rate = config.sample_rate.0;
+    rate_out.store(rate, Ordering::Relaxed);
 
-    let cap = TARGET_RATE * MAX_SECS;
+    let cap = (TARGET_RATE * MAX_SECS) as usize * (rate as usize / TARGET_RATE as usize).max(1);
     let push = {
         let samples = samples.clone();
         let level = level.clone();
+        let raw_len = raw_len.clone();
         move |interleaved: &[f32]| {
             // 电平用原始交错样本算 RMS：设备采样率/声道数不影响 dBFS 读数。
             if !interleaved.is_empty() {
@@ -128,7 +230,6 @@ fn run_stream(
                 level.store(level_from_rms(rms), Ordering::Relaxed);
             }
             if let Ok(mut buffer) = samples.lock() {
-                let cap = (cap as usize) * (rate as usize / TARGET_RATE as usize).max(1);
                 if buffer.len() >= cap {
                     return;
                 }
@@ -137,6 +238,8 @@ fn run_stream(
                         .chunks(channels.max(1))
                         .map(|frame| frame.iter().sum::<f32>() / channels.max(1) as f32),
                 );
+                // 流式识别按「已写入多少」增量取样本，游标由这个长度决定。
+                raw_len.store(buffer.len(), Ordering::Relaxed);
             }
         }
     };
@@ -152,7 +255,6 @@ fn run_stream(
         }
         cpal::SampleFormat::I16 => {
             // i16 转成 f32 再走同一条缓冲路径。
-            let push = push;
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
@@ -165,7 +267,6 @@ fn run_stream(
             )
         }
         cpal::SampleFormat::U16 => {
-            let push = push;
             device.build_input_stream(
                 &config,
                 move |data: &[u16], _| {
@@ -200,6 +301,8 @@ fn run_stream(
     };
     if let Ok(mut buffer) = samples.lock() {
         *buffer = resampled;
+        // 录音结束后缓冲变成 16 kHz，长度口径跟着换，读游标的调用方不会越界。
+        raw_len.store(buffer.len(), Ordering::Relaxed);
     }
     Ok(())
 }

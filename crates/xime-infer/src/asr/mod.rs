@@ -43,7 +43,7 @@ use candle_nn::VarBuilder;
 pub use config::{AsrConfig, AudioTowerConfig, TextConfig, WeightLayout};
 pub use decoder::Decoder;
 pub use encoder::Encoder;
-use tokenizer::{build_prompt, parse_output, AsrTokenizer};
+use tokenizer::{build_prompt, build_prompt_with_context, parse_output, AsrTokenizer};
 
 use crate::asr::audio::{log_mel, AudioFrontend};
 use crate::device::DeviceKind;
@@ -259,20 +259,65 @@ impl Qwen3Asr {
         // ---- 音频塔 ----
         let t_enc = Instant::now();
         let audio_embeds = self.encode_from(pcm, valid_frames)?;
-        let (n_audio, _) = audio_embeds.dims2()?;
         let encode_ms = t_enc.elapsed().as_secs_f64() * 1000.0;
+
+        let mut out = self.decode_audio_embeds(&audio_embeds, None, audio_ms, language)?;
+        out.encode_ms = encode_ms;
+        Ok(out)
+    }
+
+    /// 用**已有的**音频特征解码，不碰音频塔。
+    ///
+    /// 流式识别的核心入口：录音中每秒把新音频过一遍音频塔，把特征累积起来，
+    /// 然后反复调用本方法重解码。音频塔按 chunk（1 秒）独立做卷积、位置编码
+    /// 逐 chunk 复用同一张表，所以「逐秒编码再拼接」与「整段一次编码」等价；
+    /// 重解码只需要付解码器的钱，编码是增量付的。
+    ///
+    /// - `audio`：`[tokens, d_model]`，来自 [`Self::encode`] 或分块拼接；
+    /// - `context`：上一段已定稿文本，注入 prompt 的 system 段（见
+    ///   [`build_prompt_with_context`]）；流式窗口滑动的接缝靠它衔接；
+    /// - `audio_ms`：本次窗口对应的音频时长，仅用于回填 [`Transcript`]。
+    ///
+    /// 返回值的 `encode_ms` 恒为 0（本方法不编码），耗时看 `decode_ms`。
+    pub fn decode_embeds(
+        &mut self,
+        audio: &Tensor,
+        context: Option<&str>,
+        audio_ms: f64,
+    ) -> Result<Transcript, InferError> {
+        let language = self.language.clone();
+        self.decode_audio_embeds(audio, context, audio_ms, language)
+    }
+
+    fn decode_audio_embeds(
+        &mut self,
+        audio: &Tensor,
+        context: Option<&str>,
+        audio_ms: f64,
+        language: Option<String>,
+    ) -> Result<Transcript, InferError> {
+        let (n_audio, _) = audio.dims2().map_err(|_| {
+            InferError::Config(format!(
+                "音频特征应为 [tokens, d_model]，实际 {:?}",
+                audio.dims()
+            ))
+        })?;
+        if n_audio == 0 {
+            return Err(InferError::EmptyAudio);
+        }
 
         // ---- 拼 prompt ----
         let t_dec = Instant::now();
-        let prompt = build_prompt(
+        let prompt = build_prompt_with_context(
             &self.tokenizer,
             self.cfg.audio_start_token_id,
             self.cfg.audio_end_token_id,
             language.as_deref(),
+            context,
         )?;
         let prefix = self.embed_ids(&prompt.prefix)?;
         let suffix = self.embed_ids(&prompt.suffix)?;
-        let audio = audio_embeds.unsqueeze(0)?;
+        let audio = audio.unsqueeze(0)?;
         let prompt_embeds = Tensor::cat(&[&prefix, &audio, &suffix], 1)?;
         let prompt_len = prompt_embeds.dims()[1];
 
@@ -300,7 +345,7 @@ impl Qwen3Asr {
             text: parsed.text,
             language,
             audio_ms,
-            encode_ms,
+            encode_ms: 0.0,
             decode_ms,
             audio_tokens: n_audio,
             text_tokens: output.len(),
