@@ -557,7 +557,7 @@ fn notify_phrase_save(schema_id: &str, entries: &[CustomPhraseRow]) -> Option<Ph
     NOTIFY_PHRASE_SAVE.get().and_then(|f| f(schema_id, entries))
 }
 
-fn notify_daemon_reload_plugins() {
+pub(crate) fn notify_daemon_reload_plugins() {
     if let Some(f) = NOTIFY_RELOAD_PLUGINS.get() {
         f();
     }
@@ -981,6 +981,27 @@ pub enum Message {
     /// 本地模型：复制试听文本到剪贴板。
     #[cfg(feature = "voice-page")]
     SpeechModelCopy,
+    /// 本地模型：导入用户自己的模型权重（宿主弹目录选择并落盘）。
+    #[cfg(feature = "voice-page")]
+    SpeechModelImport,
+    /// 语音输入：切换本地 / 在线模式。
+    #[cfg(feature = "voice-page")]
+    SpeechModeChanged(crate::speech_mode::SpeechMode),
+    /// 语音输入：选择在线语音插件（下标）。
+    #[cfg(feature = "voice-page")]
+    SpeechPluginSelected(usize),
+    /// 语音输入：编辑在线插件的配置项（key, value）。
+    #[cfg(feature = "voice-page")]
+    SpeechFieldChanged(String, String),
+    /// 语音输入：语种（本地与在线共用）。
+    #[cfg(feature = "voice-page")]
+    SpeechLanguageChanged(String),
+    /// 语音输入：上屏方式。
+    #[cfg(feature = "voice-page")]
+    SpeechCommitChanged(crate::speech_mode::CommitMode),
+    /// 语音输入：测试在线插件连接。
+    #[cfg(feature = "voice-page")]
+    SpeechPluginTest,
     /// 词典管理：刷新（重读词典列表，选中词典不变）。
     #[cfg(any(windows, feature = "dict-page"))]
     DictRefresh,
@@ -1192,6 +1213,9 @@ pub struct SettingsState {
     /// 本地离线模型（server 侧引擎）的镜像：模型列表 / 下载进度 / 试听。
     #[cfg(feature = "voice-page")]
     pub speech_server: crate::speech_models::SpeechModelState,
+    /// 语音输入模式（本地 / 在线）+ 在线插件的配置表单。
+    #[cfg(feature = "voice-page")]
+    pub speech_mode: crate::speech_mode::SpeechUiState,
     /// 词典管理（用户词典列表 + 备份/恢复/导出/导入）。
     #[cfg(any(windows, feature = "dict-page"))]
     pub dict_manage: DictManageState,
@@ -1246,6 +1270,8 @@ impl SettingsState {
             speech: SpeechState::default(),
             #[cfg(feature = "voice-page")]
             speech_server: crate::speech_models::SpeechModelState::default(),
+            #[cfg(feature = "voice-page")]
+            speech_mode: crate::speech_mode::SpeechUiState::default(),
             #[cfg(any(windows, feature = "dict-page"))]
             dict_manage: DictManageState::default(),
             dict_import: DictImportState::default(),
@@ -1849,6 +1875,9 @@ impl SettingsState {
         // 本地模型状态：只在本页可见时真的发 IPC（见 SpeechModelState::poll）。
         #[cfg(feature = "voice-page")]
         self.speech_server.poll();
+        // 在线插件的 schema / 测试结果（后台线程 → UI）。
+        #[cfg(feature = "voice-page")]
+        self.speech_mode.poll();
     }
 
     /// 已装方案（id, 展示名）：词库导入页用它列目标方案与翻译记录里的 id。
@@ -4025,8 +4054,12 @@ pub(crate) fn fetch_market_index(path: &str) -> Result<String, String> {
     Err(last_err)
 }
 
-#[cfg(any(feature = "clipboard-page", feature = "backup-page"))]
-fn config_base_dir() -> std::path::PathBuf {
+#[cfg(any(
+    feature = "clipboard-page",
+    feature = "backup-page",
+    feature = "voice-page"
+))]
+pub(crate) fn config_base_dir() -> std::path::PathBuf {
     let (_, user_data_dir) = get_data_dirs();
     user_data_dir
         .parent()
@@ -6481,8 +6514,12 @@ struct BackupWebDavSection {
     remote_dir: Option<String>,
 }
 
-#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
-fn backup_plugins_root() -> std::path::PathBuf {
+#[cfg(any(
+    feature = "backup-page",
+    feature = "clipboard-page",
+    feature = "voice-page"
+))]
+pub(crate) fn backup_plugins_root() -> std::path::PathBuf {
     config_base_dir().join("plugins")
 }
 
@@ -6521,15 +6558,23 @@ fn scan_backup_plugins() -> Vec<BackupProvider> {
 }
 
 /// 插件配置文件（host.config 同一文件：plugins/config/<id>.yaml）。
-#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
-fn plugin_config_path(id: &str) -> std::path::PathBuf {
+#[cfg(any(
+    feature = "backup-page",
+    feature = "clipboard-page",
+    feature = "voice-page"
+))]
+pub(crate) fn plugin_config_path(id: &str) -> std::path::PathBuf {
     backup_plugins_root()
         .join("config")
         .join(format!("{id}.yaml"))
 }
 
-#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
-fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
+#[cfg(any(
+    feature = "backup-page",
+    feature = "clipboard-page",
+    feature = "voice-page"
+))]
+pub(crate) fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
     let path = plugin_config_path(id);
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Default::default();
@@ -6553,8 +6598,12 @@ fn read_plugin_config(id: &str) -> std::collections::BTreeMap<String, String> {
     map
 }
 
-#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
-fn write_plugin_config(id: &str, map: &std::collections::BTreeMap<String, String>) {
+#[cfg(any(
+    feature = "backup-page",
+    feature = "clipboard-page",
+    feature = "voice-page"
+))]
+pub(crate) fn write_plugin_config(id: &str, map: &std::collections::BTreeMap<String, String>) {
     let path = plugin_config_path(id);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -6576,8 +6625,12 @@ fn write_plugin_config(id: &str, map: &std::collections::BTreeMap<String, String
 }
 
 /// 按需加载插件运行时（一操作一实例，onLoad 幂等）。
-#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
-fn load_plugin_runtime(
+#[cfg(any(
+    feature = "backup-page",
+    feature = "clipboard-page",
+    feature = "voice-page"
+))]
+pub(crate) fn load_plugin_runtime(
     dir: &std::path::Path,
     id: &str,
 ) -> Result<xime_plugin::PluginRuntime, String> {
@@ -7053,6 +7106,16 @@ pub struct MarketSchemaState {
     pub updated_at: String,
 }
 
+impl MarketSchemaState {
+    /// 当前平台可见的条目数（页脚「共 N 个」要和列表一致）。
+    pub fn available_count(&self) -> usize {
+        self.schemas
+            .iter()
+            .filter(|s| s.runs_on_current_platform())
+            .count()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SchemaImportState {
     pub open: bool,
@@ -7130,6 +7193,16 @@ pub struct MarketModelState {
     pub updated_at: String,
 }
 
+impl MarketModelState {
+    /// 当前平台可见的条目数（页脚「共 N 个」要和列表一致）。
+    pub fn available_count(&self) -> usize {
+        self.models
+            .iter()
+            .filter(|m| m.runs_on_current_platform())
+            .count()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct MarketPluginState {
     pub plugins: Vec<MarketPlugin>,
@@ -7148,6 +7221,16 @@ pub struct MarketPluginState {
     pub selected_tag: Option<String>,
     /// 索引更新时间。
     pub updated_at: String,
+}
+
+impl MarketPluginState {
+    /// 当前平台可见的条目数（页脚「共 N 个」要和列表一致）。
+    pub fn available_count(&self) -> usize {
+        self.plugins
+            .iter()
+            .filter(|p| p.runs_on_current_platform())
+            .count()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -7197,10 +7280,16 @@ pub struct MarketPlugin {
 impl MarketPlugin {
     /// 当前平台是否可安装（未声明 `platforms` 视为通用插件）。
     pub fn runs_on_current_platform(&self) -> bool {
-        self.platforms.is_empty()
-            || xime_plugin::platform_matches(&self.platforms, xime_plugin::current_platform())
+        platforms_allow_current(&self.platforms)
     }
+}
 
+/// 商店条目的平台判定：未声明视为通用，声明了才按列表匹配（大小写不敏感）。
+///
+/// 与插件安装门禁 [`xime_plugin::PluginManifest::runs_on_platform`] 同一语义：
+/// 存量条目大多没写 `platforms`，直接丢会让商店看起来空了一半。
+fn platforms_allow_current(platforms: &[String]) -> bool {
+    platforms.is_empty() || xime_plugin::platform_matches(platforms, xime_plugin::current_platform())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -7244,10 +7333,21 @@ pub struct MarketSchema {
     pub dependencies: Option<Vec<String>>,
     #[serde(default)]
     pub app_version: Option<String>,
+    /// 目标平台，逐个写明：`android` / `macos` / `windows` / `linux`。
+    /// 缺省视为通用（存量条目兼容）。
+    #[serde(default)]
+    pub platforms: Vec<String>,
     #[serde(default)]
     pub license: Option<String>,
     #[serde(default)]
     pub warning: Option<String>,
+}
+
+impl MarketSchema {
+    /// 当前平台是否可用（未声明 `platforms` 视为通用条目）。
+    pub fn runs_on_current_platform(&self) -> bool {
+        platforms_allow_current(&self.platforms)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -7304,10 +7404,21 @@ pub struct MarketModel {
     pub current_version: Option<String>,
     #[serde(default)]
     pub versions: Vec<MarketModelVersion>,
+    /// 目标平台，逐个写明：`android` / `macos` / `windows` / `linux`。
+    /// 缺省视为通用（存量条目兼容）。
+    #[serde(default)]
+    pub platforms: Vec<String>,
     #[serde(default)]
     pub license: Option<String>,
     #[serde(default)]
     pub warning: Option<String>,
+}
+
+impl MarketModel {
+    /// 当前平台是否可用（未声明 `platforms` 视为通用条目）。
+    pub fn runs_on_current_platform(&self) -> bool {
+        platforms_allow_current(&self.platforms)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -8462,6 +8573,82 @@ models:
         assert_eq!(handwriting.category, "handwriting");
         assert_eq!(handwriting.author, "");
         assert!(handwriting.versions[0].files[0].sha256.is_none());
+    }
+
+    /// 商店三个 Tab 用同一套平台规则：声明了按列表匹配，未声明视为通用。
+    /// 与插件安装门禁（`runs_on_platform`）保持一致，避免「商店能点、安装报错」。
+    #[test]
+    fn store_indexes_filter_by_platform() {
+        let schemas_yaml = r#"
+index_version: 1
+updated_at: '2026-11-18'
+schemas:
+- id: pc
+  name: 桌面方案
+  author: x
+  type: remote
+  platforms: [android, macos, windows, linux]
+  versions: []
+- id: android-only
+  name: 仅安卓
+  author: x
+  type: remote
+  platforms: [android]
+  versions: []
+- id: legacy
+  name: 未声明
+  author: x
+  type: remote
+  versions: []
+"#;
+        let schema_index: SchemaIndex = serde_yaml::from_str(schemas_yaml).unwrap();
+        assert_eq!(schema_index.schemas[0].platforms.len(), 4);
+        assert!(schema_index.schemas[0].runs_on_current_platform());
+        assert!(
+            schema_index.schemas[2].runs_on_current_platform(),
+            "存量条目视为通用"
+        );
+
+        let models_yaml = r#"
+index_version: 1
+updated_at: '2026-11-18'
+models:
+- id: pc
+  name: 桌面模型
+  category: asr
+  type: remote
+  platforms: [macos, windows, linux]
+  versions: []
+- id: android-only
+  name: 仅安卓
+  category: asr
+  type: remote
+  platforms: [android]
+  versions: []
+"#;
+        let model_index: ModelIndex = serde_yaml::from_str(models_yaml).unwrap();
+        assert_eq!(
+            model_index.models[0].platforms,
+            vec!["macos", "windows", "linux"]
+        );
+        assert!(model_index.models[0].runs_on_current_platform());
+
+        if xime_plugin::current_platform() != "android" {
+            assert!(
+                !schema_index.schemas[1].runs_on_current_platform(),
+                "仅安卓的方案不该出现在桌面商店"
+            );
+            assert!(
+                !model_index.models[1].runs_on_current_platform(),
+                "仅安卓的模型不该出现在桌面商店"
+            );
+        }
+
+        // 页脚数字跟着过滤走：不能显示索引总数而列表里少一半。
+        let mut schemas = MarketSchemaState::default();
+        schemas.schemas = schema_index.schemas;
+        let expected = if xime_plugin::current_platform() == "android" { 3 } else { 2 };
+        assert_eq!(schemas.available_count(), expected);
     }
 
     const SCHEMA_INDEX_YAML: &str = r#"

@@ -173,6 +173,7 @@ static NOTIFY_SPEECH_DELETE: OnceLock<ModelActionFn> = OnceLock::new();
 static NOTIFY_SPEECH_SELECT: OnceLock<ModelActionFn> = OnceLock::new();
 static NOTIFY_SPEECH_TEST_START: OnceLock<PlainActionFn> = OnceLock::new();
 static NOTIFY_SPEECH_TEST_STOP: OnceLock<PlainActionFn> = OnceLock::new();
+static NOTIFY_SPEECH_IMPORT: OnceLock<PlainActionFn> = OnceLock::new();
 
 /// 设置宿主的「读语音状态」回调。
 pub fn set_notify_speech_status(f: StatusFn) {
@@ -204,6 +205,13 @@ pub fn set_notify_speech_test_stop(f: PlainActionFn) {
     let _ = NOTIFY_SPEECH_TEST_STOP.set(f);
 }
 
+/// 设置宿主的「导入本地模型」回调（弹目录选择、复制权重、注册模型）。
+///
+/// 导入是宿主动作：设置程序不碰模型目录结构，也不做下载/解包。
+pub fn set_notify_speech_import(f: PlainActionFn) {
+    let _ = NOTIFY_SPEECH_IMPORT.set(f);
+}
+
 fn notify_status() -> Option<SpeechServerStatus> {
     NOTIFY_SPEECH_STATUS.get().and_then(|f| f())
 }
@@ -217,6 +225,16 @@ fn notify_model_action(
 
 fn notify_plain(slot: &OnceLock<PlainActionFn>) -> Option<SpeechServerStatus> {
     slot.get().and_then(|f| f())
+}
+
+/// 宿主是否接入了本地语音引擎（注册了状态回调）。
+///
+/// 不是每个平台都有本地引擎宿主：Windows 由 `winxime-server` 承载，macOS 目前
+/// 还没有（本地识别要等 IME 进程接入 `xime-infer`）。没接入时页面要如实说
+/// 「当前平台未接入」，而不是假装「服务未运行」——后者会让用户去修一个不存在
+/// 的服务。
+pub fn local_engine_registered() -> bool {
+    NOTIFY_SPEECH_STATUS.get().is_some()
 }
 
 /// 设置页「语音转文本」区的 server 侧镜像（250ms 轮询刷新）。
@@ -474,6 +492,22 @@ impl SpeechModelState {
                 }
             }
             None => self.set_message("输入法服务未运行，无法切换".to_string()),
+        }
+    }
+
+    /// 导入用户自己的模型权重（回调归宿主；没有回调时给出落盘说明）。
+    pub fn import(&mut self) {
+        match notify_plain(&NOTIFY_SPEECH_IMPORT) {
+            Some(status) => {
+                let failed = status.error.is_some();
+                self.apply(status);
+                if !failed {
+                    self.set_message("已导入本地模型".to_string());
+                }
+            }
+            None => self.set_message(
+                "当前平台没有导入入口：把模型目录放到模型根目录后重启输入法".to_string(),
+            ),
         }
     }
 

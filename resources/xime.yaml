@@ -15,8 +15,8 @@ xime_index:
   # 方案 / 插件 / 模型市场索引基址（ximeiorg/xime-index），按顺序尝试直到成功。
   # 可替换为自建代理 / 镜像；末尾需 /。
   base_urls:
-    - "https://cdn.jsdelivr.net/gh/ximeiorg/xime-index@master/"
-    - "https://fastly.jsdelivr.net/gh/ximeiorg/xime-index@master/"
+    # - "https://cdn.jsdelivr.net/gh/ximeiorg/xime-index@master/"
+    # - "https://fastly.jsdelivr.net/gh/ximeiorg/xime-index@master/"
     - "https://index.ximei.me/"
     - "https://raw.githubusercontent.com/ximeiorg/xime-index/refs/heads/main/"
 

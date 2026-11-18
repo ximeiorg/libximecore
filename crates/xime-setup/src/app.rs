@@ -137,7 +137,9 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             // 本地模型状态只在本页可见时轮询（进页立刻拉一次，离开就停）。
             #[cfg(feature = "voice-page")]
             {
-                let on_voice_page = crate::pages::voice_page_index() == Some(i);
+                // 在线模式下不需要轮询本地引擎：省掉每 250ms 一次无意义 IPC。
+                let on_voice_page = crate::pages::voice_page_index() == Some(i)
+                    && state.settings.speech_mode.mode == crate::speech_mode::SpeechMode::Local;
                 state.settings.speech_server.set_active(on_voice_page);
             }
             // 剪贴板页：进页重读历史与快捷发送。
@@ -604,6 +606,40 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             } else {
                 state.settings.show_message("没有可复制的文本".to_string());
             }
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechModelImport => {
+            state.settings.speech_server.import();
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechModeChanged(mode) => {
+            state.settings.speech_mode.set_mode(mode);
+            // 切回本地时立即拉一次状态，别等下一次进页。
+            let on_page =
+                crate::pages::voice_page_index() == Some(state.settings.current_page)
+                    && state.settings.speech_mode.mode
+                        == crate::speech_mode::SpeechMode::Local;
+            state.settings.speech_server.set_active(on_page);
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechPluginSelected(index) => {
+            state.settings.speech_mode.select_plugin(index);
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechFieldChanged(key, value) => {
+            state.settings.speech_mode.set_field(key, value);
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechLanguageChanged(language) => {
+            state.settings.speech_mode.set_language(language);
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechCommitChanged(commit) => {
+            state.settings.speech_mode.set_commit(commit);
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechPluginTest => {
+            state.settings.speech_mode.start_test();
         }
         #[cfg(any(windows, feature = "dict-page"))]
         Message::DictRefresh => {

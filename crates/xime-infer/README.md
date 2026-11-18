@@ -53,6 +53,36 @@ cargo build --release -p xime-infer
       --test asr_parity -- --ignored --test-threads=1
   ```
 
+### 打包两个 flavor（纯 CPU / GPU）
+
+同一份源码，只差 feature；**不需要运行期开关**，也不会把 GPU 依赖带进 CPU 包。
+实际只有三种组合：`CPU`、`CPU + metal`（macOS）、`CPU + cuda`（Windows/Linux）。
+
+| 产物 | 命令 |
+| --- | --- |
+| 纯 CPU（macOS 建议带 BLAS） | `cargo build --release -p xime-infer --features accelerate` |
+| CPU + Metal（macOS） | `cargo build --release -p xime-infer --features metal` |
+| CPU + CUDA（Windows/Linux） | `cargo build --release -p xime-infer --features cuda` |
+
+- CPU flavor 的依赖树里**没有** `cudarc` / `objc2-metal`：
+  `cargo tree -p xime-infer | grep -Ei 'cudarc|metal'` 为空。
+- GPU flavor 的 CUDA 产物要自带 cudart / cuBLAS，且不能与 CPU 产物混用。
+- `DeviceKind::GPU_COMPILED` 是编译期常量，宿主可以据此显示「GPU 加速已启用」。
+
+**宿主接入**：依赖写 `default-features = false`，打包脚本按平台从命令行打开依赖的
+feature，**不用改宿主 Cargo.toml**：
+
+```toml
+[dependencies]
+xime-infer = { path = "../libximecore/crates/xime-infer", default-features = false }
+```
+
+```bash
+cargo build --release -p ximeyi                                  # 纯 CPU 包
+cargo build --release -p ximeyi --features xime-infer/metal      # macOS GPU 包
+cargo build --release -p ximeyi --features xime-infer/cuda       # Windows/Linux GPU 包
+```
+
 ## 笔画手写识别
 
 以 [`ochwpro`](https://github.com/ximeiorg/ochwpro) 训练仓为准：

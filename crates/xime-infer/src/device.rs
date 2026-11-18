@@ -30,6 +30,9 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
+    /// 本次构建是否带 GPU 后端。宿主可用它做界面/诊断，不触发任何初始化。
+    pub const GPU_COMPILED: bool = cfg!(any(feature = "metal", feature = "cuda"));
+
     /// 编译期决定的后端：**构建时开了哪个 GPU feature 就用哪个**。
     ///
     /// 与 [`DeviceKind::detect`] 的区别：这里不探测、不初始化、不耗时，也不回退；

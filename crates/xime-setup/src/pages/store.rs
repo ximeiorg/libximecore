@@ -198,7 +198,7 @@ fn schemes_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
     }
     if store.loaded {
         column = column.push(footer(
-            store.schemas.len(),
+            store.available_count(),
             "方案",
             &store.updated_at,
             colors,
@@ -209,8 +209,16 @@ fn schemes_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
 }
 
 fn schema_list<'a>(store: &'a MarketSchemaState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    // 只列当前平台能装的：索引里 `platforms: [android]` 的方案在桌面端不出现，
+    // 否则安装了也是错的架构/文件。
+    let available: Vec<&MarketSchema> = store
+        .schemas
+        .iter()
+        .filter(|s| s.runs_on_current_platform())
+        .collect();
+
     let mut tags: Vec<String> = Vec::new();
-    for schema in &store.schemas {
+    for schema in &available {
         for tag in &schema.tags {
             if !tags.contains(tag) {
                 tags.push(tag.clone());
@@ -218,9 +226,8 @@ fn schema_list<'a>(store: &'a MarketSchemaState, colors: &'a ThemeColors) -> Ele
         }
     }
 
-    let schemas: Vec<&MarketSchema> = store
-        .schemas
-        .iter()
+    let schemas: Vec<&MarketSchema> = available
+        .into_iter()
         .filter(|s| {
             store
                 .selected_tag
@@ -231,7 +238,11 @@ fn schema_list<'a>(store: &'a MarketSchemaState, colors: &'a ThemeColors) -> Ele
         .collect();
 
     if schemas.is_empty() {
-        return center_msg(colors, "没有匹配的方案");
+        return if store.schemas.is_empty() {
+            center_msg(colors, "没有匹配的方案")
+        } else {
+            center_msg(colors, "当前平台暂无可用的方案")
+        };
     }
 
     let mut list = column![].spacing(8).width(Length::Fill);
@@ -430,7 +441,7 @@ fn models_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Eleme
     }
     if store.loaded {
         column = column.push(footer(
-            store.models.len(),
+            store.available_count(),
             "模型",
             &store.updated_at,
             colors,
@@ -441,15 +452,21 @@ fn models_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Eleme
 }
 
 fn model_list<'a>(store: &'a MarketModelState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    // 与插件/方案同一规则：未声明 platforms 的存量条目视为通用。
+    let available: Vec<&MarketModel> = store
+        .models
+        .iter()
+        .filter(|m| m.runs_on_current_platform())
+        .collect();
+
     let tags: Vec<String> = MODEL_CATEGORIES
         .iter()
-        .filter(|(key, _)| store.models.iter().any(|m| m.category == *key))
+        .filter(|(key, _)| available.iter().any(|m| m.category == *key))
         .map(|(_, label)| label.to_string())
         .collect();
 
-    let models: Vec<&MarketModel> = store
-        .models
-        .iter()
+    let models: Vec<&MarketModel> = available
+        .into_iter()
         .filter(|m| {
             store
                 .selected_tag
@@ -460,7 +477,11 @@ fn model_list<'a>(store: &'a MarketModelState, colors: &'a ThemeColors) -> Eleme
         .collect();
 
     if models.is_empty() {
-        return center_msg(colors, "没有匹配的模型");
+        return if store.models.is_empty() {
+            center_msg(colors, "没有匹配的模型")
+        } else {
+            center_msg(colors, "当前平台暂无可用的模型")
+        };
     }
 
     let mut list = column![].spacing(8).width(Length::Fill);
@@ -652,7 +673,7 @@ fn plugins_tab<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Elem
     }
     if store.loaded {
         column = column.push(footer(
-            store.plugins.len(),
+            store.available_count(),
             "插件",
             &store.updated_at,
             colors,

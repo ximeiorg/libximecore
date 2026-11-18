@@ -14,12 +14,22 @@ pub mod speech;
 #[cfg(feature = "voice-page")]
 pub mod speech_models;
 
+/// 语音输入模式（本地 / 在线插件）与在线插件的配置表单。
+#[cfg(feature = "voice-page")]
+pub mod speech_mode;
+
 pub use app::{run, run_with, SettingsApp};
 #[cfg(feature = "voice-page")]
+#[cfg(feature = "voice-page")]
+pub use speech_mode::{
+    read_config as read_speech_config, write_config as write_speech_config, CommitMode,
+    SpeechConfig, SpeechMode, SpeechPluginInfo, SpeechUiState, LANGUAGES as SPEECH_LANGUAGES,
+};
+#[cfg(feature = "voice-page")]
 pub use speech_models::{
-    set_notify_speech_delete, set_notify_speech_download, set_notify_speech_select,
-    set_notify_speech_status, set_notify_speech_test_start, set_notify_speech_test_stop,
-    SpeechModelEntry, SpeechModelState, SpeechServerStatus,
+    local_engine_registered, set_notify_speech_delete, set_notify_speech_download, set_notify_speech_import,
+    set_notify_speech_select, set_notify_speech_status, set_notify_speech_test_start,
+    set_notify_speech_test_stop, SpeechModelEntry, SpeechModelState, SpeechServerStatus,
 };
 pub use state::SettingsState;
 pub use state::{

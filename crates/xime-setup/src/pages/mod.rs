@@ -51,7 +51,7 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
         ),
     ];
 
-    // 「智能」组：智能联想 + 语音转文本（各条目自门控）。
+    // 「智能」组：智能联想 + 语音输入（各条目自门控）。
     #[cfg(any(feature = "smart-suggestion-page", feature = "voice-page"))]
     groups.push((
         "智能",
@@ -59,7 +59,7 @@ pub fn sidebar_groups() -> Vec<(&'static str, Vec<(&'static str, &'static str)>)
             #[cfg(feature = "smart-suggestion-page")]
             ("icons/thinking.svg", "智能联想"),
             #[cfg(feature = "voice-page")]
-            ("icons/mic.svg", "语音转文本"),
+            ("icons/mic.svg", "语音输入"),
         ],
     ));
 
@@ -95,7 +95,7 @@ pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// 「语音转文本」页在侧栏里的扁平下标（没编进这个页面时 None）。
+/// 「语音输入」页在侧栏里的扁平下标（没编进这个页面时 None）。
 ///
 /// 用标题反查下标而不是写死数字：侧栏分组顺序是会变的（这页现在就在「输入」
 /// 分组里），写死迟早错位，而且错位是静默的（轮询挂到别的页上）。
@@ -103,7 +103,14 @@ pub fn sidebar_items() -> Vec<(&'static str, &'static str)> {
 pub fn voice_page_index() -> Option<usize> {
     sidebar_items()
         .iter()
-        .position(|(_, title)| *title == "语音转文本")
+        .position(|(_, title)| *title == "语音输入")
+}
+
+/// 「扩展商店」页在侧栏里的扁平下标（语音页「去扩展商店」用）。
+pub fn store_page_index() -> Option<usize> {
+    sidebar_items()
+        .iter()
+        .position(|(_, title)| *title == "扩展商店")
 }
 
 /// 「设备关联」页在侧栏里的扁平下标（没编进这个页面时 None）。
@@ -268,7 +275,7 @@ pub fn page_content<'a>(
         #[cfg(feature = "backup-page")]
         "同步与备份" => backup::view(settings, colors),
         #[cfg(feature = "voice-page")]
-        "语音转文本" => voice::view(settings, colors),
+        "语音输入" => voice::view(settings, colors),
         _ => about::view(settings, colors),
     }
 }

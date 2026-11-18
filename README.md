@@ -58,7 +58,9 @@ cargo build
 
 - `librime/` 为 submodule；系统存在 librime 时走 pkg-config，否则 CMake 现场编译，并自动拉取 rime-lua 插件。
 - `xime-infer`（candle）不在 `default-members`（编译较重），单独构建/测试：
-  `cargo test -p xime-infer`；macOS GPU 用 `--features metal`。
+  `cargo test -p xime-infer`。后端按平台选 feature：macOS 用 `metal`，
+  Windows/Linux 用 `cuda`，不传就是纯 CPU 包；宿主直接
+  `cargo build -p <app> --features xime-infer/metal`（Windows/Linux 用 `cuda`）。
 - 使用预编译库跑测试（macOS 用 `DYLD_LIBRARY_PATH`，Linux 用 `LD_LIBRARY_PATH`）：
 
   ```bash
