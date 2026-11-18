@@ -1,0 +1,21 @@
+[package]
+name = "xime-speechd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "语音识别守护进程（xime-speech-service 的进程入口）"
+
+[[bin]]
+name = "xime-speechd"
+path = "src/main.rs"
+
+[features]
+default = []
+metal = ["xime-speech-service/metal"]
+cuda = ["xime-speech-service/cuda"]
+accelerate = ["xime-speech-service/accelerate"]
+
+[dependencies]
+xime-speech-service = { path = "../xime-speech-service" }
+serde_json.workspace = true

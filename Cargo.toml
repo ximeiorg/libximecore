@@ -9,6 +9,8 @@ members = [
     "crates/xime-plugin",
     "crates/xime-lexicon",
     "crates/xime-infer",
+    "crates/xime-speech-service",
+    "crates/xime-speechd",
     "crates/xime-setup",
     # ---- 同步服务 ----
     "crates/xime-sync-store",

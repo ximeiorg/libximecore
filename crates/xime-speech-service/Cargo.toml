@@ -1,0 +1,32 @@
+[package]
+name = "xime-speech-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "本地语音识别服务内核：模型目录、会话状态机、录音、JSON-line 协议"
+
+[features]
+# 默认带服务端（守护进程用）。客户端（输入法/设置页）应关掉：
+#   xime-speech-service = { ..., default-features = false }
+# 这样不会把 candle / cpal 链进 UI 进程。
+default = ["server"]
+server = ["dep:xime-infer", "dep:candle-core", "dep:cpal"]
+# 语音识别后端（转发给 xime-infer）。macOS 用 metal，Windows/Linux 用 cuda。
+metal = ["server", "xime-infer/metal"]
+cuda = ["server", "xime-infer/cuda"]
+accelerate = ["server", "xime-infer/accelerate"]
+
+[dependencies]
+# 仅服务端需要：引擎与录音。客户端只用 protocol + transport。
+xime-infer = { path = "../xime-infer", optional = true }
+candle-core = { version = "0.11.1", optional = true }
+cpal = { version = "0.16", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# 本地 IPC：Unix socket 与 Windows 命名管道同一套 API（三平台一致）
+interprocess = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
