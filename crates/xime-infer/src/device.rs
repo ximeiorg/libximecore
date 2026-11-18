@@ -1,7 +1,15 @@
 //! 推理后端选择。
 //!
-//! feature 决定「这个包能表达什么」：CPU 包没有 `Metal`/`Cuda` 变体，误用在编译期
-//! 被挡下；GPU 包在运行期仍可显式选 `Cpu`，初始化失败也能退回 CPU。
+//! **后端由 feature 决定**，不靠运行期猜平台：
+//!
+//! | 平台 | feature | [`DeviceKind::platform_default`] |
+//! | --- | --- | --- |
+//! | macOS | `metal` | `Metal` |
+//! | Windows / Linux（NVIDIA） | `cuda` | `Cuda` |
+//! | 任意 | 无 | `Cpu` |
+//!
+//! feature 也决定「这个包能表达什么」：CPU 包没有 `Metal`/`Cuda` 变体，误用在编译期
+//! 被挡下；GPU 包在运行期仍可显式选 `Cpu`，初始化失败也能退回 CPU（[`DeviceKind::detect`]）。
 
 use candle_core::Device;
 
@@ -22,6 +30,28 @@ pub enum DeviceKind {
 }
 
 impl DeviceKind {
+    /// 编译期决定的后端：**构建时开了哪个 GPU feature 就用哪个**。
+    ///
+    /// 与 [`DeviceKind::detect`] 的区别：这里不探测、不初始化、不耗时，也不回退；
+    /// 适合「打包时就决定了 flavor」的宿主。GPU 初始化失败仍会在 [`DeviceKind::build`]
+    /// 报错，由调用方决定是否回退。
+    ///
+    /// 注意 `metal` 与 `cuda` 互斥（同时开启是编译错误），所以这里不会有歧义。
+    #[cfg(feature = "cuda")]
+    pub const fn platform_default() -> Self {
+        Self::Cuda
+    }
+
+    #[cfg(all(feature = "metal", not(feature = "cuda")))]
+    pub const fn platform_default() -> Self {
+        Self::Metal
+    }
+
+    #[cfg(not(any(feature = "metal", feature = "cuda")))]
+    pub const fn platform_default() -> Self {
+        Self::Cpu
+    }
+
     /// 探测可用后端：GPU 初始化失败时**静默回退 CPU**。
     ///
     /// 输入法不能因为显卡驱动异常而不可用，所以这里不返回错误。
@@ -75,6 +105,18 @@ impl std::fmt::Display for DeviceKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_default_matches_feature() {
+        let expected = if cfg!(feature = "cuda") {
+            "cuda"
+        } else if cfg!(all(feature = "metal", target_os = "macos")) {
+            "metal"
+        } else {
+            "cpu"
+        };
+        assert_eq!(DeviceKind::platform_default().as_str(), expected);
+    }
 
     #[test]
     fn cpu_builds() {

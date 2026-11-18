@@ -4,15 +4,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "本地模型推理（candle）：笔画手写识别等，CPU / Metal / CUDA"
+description = "本地模型推理（candle）：手写识别、Qwen3-ASR 语音识别，CPU / Metal / CUDA"
 
 [features]
+# 后端按平台用 feature 区分（三平台对应三个 flavor，互斥）：
+#   macOS            → metal      （Apple Silicon / Intel Mac GPU）
+#   Windows / Linux  → cuda       （仅 NVIDIA；其他 GPU 走 CPU）
+#   任意             → 默认 CPU   （macOS 可加 accelerate）
 default = []
-# Apple GPU。非 macOS 开启会在编译期失败（candle 的约束），由宿主按平台选择。
+# Apple GPU。仅 macOS；非 macOS 开启是编译错误。
 metal = ["candle-core/metal", "candle-nn/metal"]
-# NVIDIA GPU。CUDA 版与 CPU 版需用独立 target 目录（同 xime-speech 的分包纪律）。
+# NVIDIA GPU。Windows/Linux 用 nvcc 构建；macOS 无驱动，开启是编译错误。
+# CUDA flavor 与 CPU flavor 的运行时依赖不同，打包要分开。
 cuda = ["candle-core/cuda", "candle-nn/cuda"]
-# macOS CPU 上的 BLAS 加速（可选）。
+# macOS CPU 上的 BLAS 加速（ASR 解码必需，否则慢 3 倍）。
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
 
 [dependencies]
@@ -21,6 +26,14 @@ candle-nn = "0.11.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Qwen3-ASR 的分词器（BPE + byte-level）。不带 onig/progressbar：纯 Rust，无 C 依赖。
+tokenizers = { version = "0.23", default-features = false }
+# WAV 解码（16k 单声道重采样由 audio.rs 负责）。
+hound = "3"
+# 麦克风常见 44.1k/48k → 16k 的带限重采样；精度影响识别率，不用线性插值凑合。
+rubato = "0.16"
+# mel 频谱。n_fft=400 不是 2 的幂，需要通用长度 FFT（rustfft 支持 Bluestein）。
+rustfft = "6"
 
 [lib]
 # candle-nn 把 candle-core 重命名为 `candle`，rustdoc --test 只收到 `--extern
