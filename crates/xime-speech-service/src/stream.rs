@@ -39,6 +39,14 @@ pub const CHUNK_SAMPLES: usize = 16_000;
 /// 段间文本去重时最多回看的字符数。
 const MAX_OVERLAP_CHARS: usize = 12;
 
+/// 送进 prompt 的上文最多保留的字符数。
+///
+/// 已定稿文本是单调增长的，如果整段塞进 system 段，prompt 会随听写时长线性
+/// 变长：几分钟后每轮解码从几百毫秒涨到几秒，最后甚至超出模型的上下文预算
+/// 直接解码失败（表现为「越说越卡，然后一个字不出」）。模型只需要看到紧邻
+/// 窗口的那一小段上文就能接着写，尾部 160 字足够。
+const CONTEXT_CHARS: usize = 160;
+
 /// 流式参数。按后端能力选 [`StreamTuning::gpu`] / [`StreamTuning::cpu`]。
 #[derive(Debug, Clone)]
 pub struct StreamTuning {
@@ -155,6 +163,14 @@ impl StreamSession {
         &self.committed
     }
 
+    /// 上一轮解码的失败原因（成功后自动清空）。
+    ///
+    /// 由 worker 暴露给服务状态：解码一直失败时必须让用户看见「识别出错」，
+    /// 否则表现就是「说半天不出字，也不知道是没录上还是没识别」。
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// 未定稿预览：当前段里还没稳定的尾巴，客户端画成 preedit。
     pub fn partial(&self) -> String {
         if self.hyp.starts_with(&self.stable) {
@@ -166,11 +182,6 @@ impl StreamSession {
 
     pub fn partial_rev(&self) -> u64 {
         self.partial_rev
-    }
-
-    /// 最近一次解码失败的原因（成功后清空）。
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
     }
 
     /// 喂一段 16 kHz PCM 与当前输入电平，按需触发一轮重解码。
@@ -232,7 +243,8 @@ impl StreamSession {
         }
 
         let window = self.window_tensor()?;
-        let hyp = match engine.decode_window(&window, &self.committed) {
+        let context = context_tail(&self.committed);
+        let hyp = match engine.decode_window(&window, &context) {
             Ok(hyp) => {
                 self.error = None;
                 normalize(&hyp)
@@ -298,7 +310,8 @@ impl StreamSession {
         }
         if !self.blocks.is_empty() {
             let window = self.window_tensor()?;
-            if let Ok(hyp) = engine.decode_window(&window, &self.committed) {
+            let context = context_tail(&self.committed);
+            if let Ok(hyp) = engine.decode_window(&window, &context) {
                 let hyp = normalize(&hyp);
                 if hyp.chars().count() >= self.hyp.chars().count() {
                     self.hyp = hyp;
@@ -356,6 +369,15 @@ impl StreamSession {
         }
         self.committed.push_str(text);
     }
+}
+
+/// 取上文末尾 `CONTEXT_CHARS` 个字符作为 prompt 上下文。
+fn context_tail(committed: &str) -> String {
+    let count = committed.chars().count();
+    if count <= CONTEXT_CHARS {
+        return committed.to_string();
+    }
+    committed.chars().skip(count - CONTEXT_CHARS).collect()
 }
 
 /// 拼接两段文本时是否需要在中间补空格。

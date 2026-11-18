@@ -501,6 +501,10 @@ impl SpeechService {
             let (chunk, new_cursor) = tap.read_since(cursor);
             cursor = new_cursor;
             raw_acc.extend_from_slice(&chunk);
+            // 已取走的样本立刻从录音缓冲里裁掉：缓冲因此恒定在「最近
+            // KEEP_SECS 秒」，长听写不会把它撑满（旧实现在攒满 30 秒后
+            // 就不再接收新音频，表现为说一会儿突然一个字都不出）。
+            tap.trim_before(cursor.saturating_sub(rate as usize * capture::KEEP_SECS as usize));
 
             // 只按整秒切：重采样在非整秒边界会引入相位不连续，而且音频塔本来就是
             // 1 秒一个 chunk，按整秒对齐刚好与它重合。
@@ -577,6 +581,9 @@ impl SpeechService {
         inner.partial = partial;
         inner.partial_rev = rev;
         inner.stream_consumed = consumed16;
+        // 解码失败也要露出来：只写日志的话，客户端看到的就是「一直不出字」。
+        // 成功一轮就自动清空，所以偶发失败不会一直挂着。
+        inner.error = session.error().map(str::to_string);
         if final_round {
             inner.text = committed;
         }
