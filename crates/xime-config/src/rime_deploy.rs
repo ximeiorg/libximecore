@@ -384,6 +384,10 @@ fn copy_changed_files(
 }
 
 /// 首装全量复制（递归）。返回失败的文件描述。
+///
+/// `*.custom.yaml` 一律不复制：它是**用户定制**（启用列表、按键、符号表），
+/// 首装判定是「用户目录里没有 `*.schema.yaml`」，而这在双目录模型下恰恰是
+/// 常态——照搬会把用户改好的 `default.custom.yaml` 整份盖掉。
 fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Vec<String> {
     let mut failures = Vec::new();
     let Ok(entries) = std::fs::read_dir(src) else {
@@ -396,12 +400,19 @@ fn copy_dir_contents(src: &std::path::Path, dst: &std::path::Path) -> Vec<String
         if ft.is_dir() {
             let _ = std::fs::create_dir_all(&dest);
             failures.extend(copy_dir_contents(&entry.path(), &dest));
-        } else if let Err(e) = copy_preserving_mtime(&entry.path(), &dest) {
-            failures.push(format!(
-                "{} -> {}: {e}",
-                entry.path().display(),
-                dest.display()
-            ));
+        } else {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            // 定制文件与系统垃圾（.DS_Store）不随包分发。
+            if name.contains("custom") || name.starts_with('.') {
+                continue;
+            }
+            if let Err(e) = copy_preserving_mtime(&entry.path(), &dest) {
+                failures.push(format!(
+                    "{} -> {}: {e}",
+                    entry.path().display(),
+                    dest.display()
+                ));
+            }
         }
     }
     failures
@@ -440,6 +451,32 @@ mod bundled_deploy_tests {
         // 二次调用幂等（都存在 → 走升级路径 → 内容相同不复制）。
         ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
         assert!(rime.join("wubi86.schema.yaml").exists());
+    }
+
+    /// 双目录模型下，老用户目录里本来就没有 `*.schema.yaml`，「首装」判定同样
+    /// 成立：全量复制绝不能顺手盖掉用户改好的 `default.custom.yaml`（启用列表、
+    /// 按键、符号表都在里面），也不该把 `.DS_Store` 之类带进来。
+    #[test]
+    fn first_install_never_touches_user_custom_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let rime = tmp.path().join("rime");
+        make_source(&src);
+        std::fs::write(src.join("default.custom.yaml"), "patch:\n  源里: 1\n").unwrap();
+        std::fs::write(src.join(".DS_Store"), "junk").unwrap();
+        std::fs::create_dir_all(&rime).unwrap();
+        let mine = "patch:\n  schema_list:\n    - schema: wubi86\n";
+        std::fs::write(rime.join("default.custom.yaml"), mine).unwrap();
+
+        ensure_bundled_rime_data(std::slice::from_ref(&src), &rime);
+
+        assert_eq!(
+            std::fs::read_to_string(rime.join("default.custom.yaml")).unwrap(),
+            mine,
+            "用户定制不能被首装复制覆盖"
+        );
+        assert!(!rime.join(".DS_Store").exists(), "系统垃圾不随包分发");
+        assert!(rime.join("wubi86.schema.yaml").exists(), "方案要复制进来");
     }
 
     #[test]

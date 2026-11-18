@@ -335,6 +335,8 @@ impl SchemaManifest {
     /// - 只认 seed 里存在且 rime 目录里也存在的文件；用户删掉的内置文件不会复活。
     /// - seed 文件备份的是 **seed 原版**（不是用户改过的当前文件），便于恢复。
     /// - 旧注册表里被误登记为 builtin 的用户文件转成 local，不删除原文件。
+    /// - 返回**新登记**的文件数：原本就在 builtin 清单里的不重复计数，所以重复
+    ///   调用（每次重扫都会调）返回 0。
     pub fn seed_builtin_from(&self, seed_dirs: &[PathBuf]) -> Result<usize, String> {
         let mut seed: BTreeMap<String, PathBuf> = BTreeMap::new();
         for dir in seed_dirs {
@@ -353,6 +355,10 @@ impl SchemaManifest {
         let mut registry = self.load_registry();
         // 只认安装包 seed：旧 builtin 里不是 seed 的文件（历史遗留/用户手放）
         // 交给 local，不删原文件。
+        let known: std::collections::HashSet<String> = registry
+            .get(BUILTIN_PACKAGE_ID)
+            .map(|entry| entry.files.iter().cloned().collect())
+            .unwrap_or_default();
         let mut entry = PackageEntry::default();
         let mut added = 0usize;
         for (rel, src) in &seed {
@@ -363,7 +369,9 @@ impl SchemaManifest {
             let Some(hash) = sha256_file(&dest) else {
                 continue;
             };
-            added += 1;
+            if !known.contains(rel) {
+                added += 1;
+            }
             entry.files.push(rel.clone());
             entry.sha256.insert(rel.clone(), hash);
             self.copy_seed_to_backup(rel, src);

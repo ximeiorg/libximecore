@@ -3093,7 +3093,10 @@ fn load_schema_snapshot() -> SchemaSnapshot {
                 .map(|entry| entry.files.iter().any(|f| f.ends_with(".schema.yaml")))
                 .unwrap_or(false);
             let builtin_has_schema = builtin_in_user_dir || shared_has_schema;
-            builtin_cleanable = builtin_in_user_dir;
+            // 内置方案文件进了用户目录才有得清理；但随包方案同时还在共享目录
+            // 里，删掉用户目录的副本清不掉它们（方案列表照样会读共享目录），
+            // 那种情况下不提供这个动作，免得点了没反应。
+            builtin_cleanable = builtin_in_user_dir && !shared_has_schema;
             // 备份里得真有方案文件才算「可还原」：目录里只剩 `.DS_Store`
             // 时 `is_empty()` 为 false，会把空备份报成可还原。
             let backup_has_schema = manifest

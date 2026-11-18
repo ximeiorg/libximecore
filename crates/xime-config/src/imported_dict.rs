@@ -180,6 +180,10 @@ fn load_all(conn: &Connection) -> Result<Vec<ImportedDict>, String> {
         .query_map([], |row| {
             let schemes: String = row.get(5)?;
             let (attached_schemas, namespaces) = decode_schemes(&schemes);
+            // 没挂任何方案就不可能处于启用状态：旧记录/迁移数据里存在
+            // `enabled = 1` + 空方案，界面据此显示「停用」，可这条词库其实
+            // 从来没生效过，点下去也不会改任何文件。
+            let enabled = row.get::<_, i64>(7)? != 0 && !attached_schemas.is_empty();
             Ok(ImportedDict {
                 id: row.get(0)?,
                 display_name: row.get(1)?,
@@ -191,7 +195,7 @@ fn load_all(conn: &Connection) -> Result<Vec<ImportedDict>, String> {
                 format_name: row.get(3)?,
                 source_name: row.get(8)?,
                 code_system: row.get(4)?,
-                enabled: row.get::<_, i64>(7)? != 0,
+                enabled,
             })
         })
         .map_err(|e| format!("查询导入记录失败：{e}"))?;
@@ -1075,6 +1079,29 @@ mod tests {
         let listed = list(root);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, outcome.record.id);
+    }
+
+    /// 没挂方案的记录不可能「已启用」：库里的旧值（enabled=1 + 空方案）读出来
+    /// 要归零，否则界面显示「停用」，点下去什么都不会改。
+    #[test]
+    fn enabled_without_schemes_reads_as_disabled() {
+        let dir = temp_dir();
+        let root_path = rime_root(&dir);
+        let root = root_path.as_path();
+        import_parsed(
+            root,
+            &parsed(vec![entry("你好", "ni hao")]),
+            Path::new("/tmp/a.scel"),
+            &[],
+        )
+        .expect("import");
+
+        let mut items = list(root);
+        items[0].enabled = true;
+        save_manifest(root, &items).expect("save");
+
+        assert!(items[0].attached_schemas.is_empty());
+        assert!(!list(root)[0].enabled);
     }
 
     #[test]
