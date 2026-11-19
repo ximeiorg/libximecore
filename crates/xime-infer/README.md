@@ -1,14 +1,21 @@
 # xime-infer
 
-基于 [candle](https://github.com/huggingface/candle) 的本地模型推理，当前有两个模型族：
+基于 [candle](https://github.com/huggingface/candle) 的本地模型推理，当前有两个模型族、三个模型：
 
 | 模块 | 模型 | 用途 |
 | --- | --- | --- |
 | [`stroke`] | StrokeTransformer（1.72M） | 笔画手写识别 |
-| [`asr`] | Qwen3-ASR-0.6B / 1.7B | 离线语音识别 |
+| [`asr::qwen3_asr`] | Qwen3-ASR-0.6B / 1.7B | 离线语音识别（支持按秒分块编码） |
+| [`asr::fun_asr`] | Fun-ASR-Nano-2512（800M） | 离线语音识别（中文方言更强，只能整段） |
 
 [`stroke`]: src/stroke
-[`asr`]: src/asr
+[`asr::qwen3_asr`]: src/asr/qwen3_asr
+[`asr::fun_asr`]: src/asr/fun_asr
+
+两个语音模型族**各自一套代码**（config / 前处理 / 编码器 / 文本解码器 / 分词器都在自己的
+目录里），只在 `asr::AsrOptions`、`asr::Transcript`、家族识别、单实例闸门、WAV I/O 这些
+与模型无关的部分共用。前处理与 prompt 约定差异太大（log-mel vs fbank、
+`<|audio_pad|>` vs 纯文本指令），共享实现只会让改一边必须验证另一边。
 
 设计边界：本 crate 只做**推理**（装载、前处理、解码），模型下载/校验/解压归宿主；
 不依赖 librime；识别器由调用方 worker 线程独占（`transcribe` 需要 `&mut self`，内部有 KV cache）。
@@ -44,8 +51,9 @@ cargo build --release -p xime-infer
   CPU），其余用 CPU（Metal 解码是 dispatch-bound，实测不比 CPU 快，却占 1.6 GB）。
 - CUDA flavor 的**运行期依赖**（cudart / cuBLAS）要随安装包分发；与 CPU flavor
   不能共用同一份产物。
-- 本仓库只在 Apple M1 上验证过 CPU 与 Metal；**CUDA 路径按 candle 的后端能力接入，
-  未在本机编译/跑过**（macOS 无 nvcc）。CUDA 机器上先跑：
+- 本仓库的 CPU 与 Metal 在 Apple M1 上验证；**CUDA 路径已在 Linux + RTX 4060 Ti
+  （CUDA 13.4 / cudarc 0.19）上编译并跑过真实权重**，输出 token 与 CPU 逐位相同。
+  CUDA 机器上自检：
 
   ```bash
   XIME_ASR_MODEL_DIR=/path/to/Qwen3-ASR-0.6B XIME_ASR_DEVICE=cuda \
@@ -139,9 +147,10 @@ let out = asr.transcribe_wav(Path::new("a.wav"))?;
 println!("{:?} {}", out.language, out.text);     // Some("Chinese") 今天天气不错……
 ```
 
-> **一个进程只允许一个实例**。每个实例常驻 1.6 GB（f16）/ 3.1 GB（f32）权重；
-> 并发装载两个实例会在 macOS 上触发 `IOGPUGroupMemory` 内核断言（直接 panic 重启）。
-> `from_dir_with` 用进程级闸门挡下第二个实例，返回 `InferError::AsrBusy`。
+> **一个进程只允许一个 ASR 实例**（两个族共用同一道闸门）。每个实例常驻 1.6 GB（f16）
+> / 3.1 GB（f32）权重；并发装载两个实例会在 macOS 上触发 `IOGPUGroupMemory` 内核断言
+> （直接 panic 重启）。`from_dir_with` 用进程级闸门挡下第二个实例，返回
+> `InferError::AsrBusy`。换模型要走「先卸载、再装载」，服务层的 `select()` 就是这么做的。
 >
 > **默认后端**：CPU 包 / Metal 包用 CPU（Metal 解码是逐 token 的 dispatch-bound，
 > 并不比 CPU 快，却要占 1.6 GB 显存）；CUDA 包用 `detect()`，探测成功即 CUDA。
@@ -194,6 +203,115 @@ XIME_ASR_MODEL_DIR=/path/to/model \
 
 `target/asr-test/` 下放测试音频（`jfk.wav` 与 `say -v Tingting` 生成的 `zh.wav`/`zh48.wav`，
 该目录被根 `.gitignore` 的 `/target` 覆盖，不入库）。
+
+## 语音识别（Fun-ASR-Nano）
+
+第二族，代码在 `src/asr/fun_asr/`，与 Qwen3-ASR **零共享**。上游只有 FunASR 格式的
+`model.pt`，本 crate 吃 transformers 布局的 safetensors，所以模型目录要先转换：
+
+```bash
+# 依赖 torch + safetensors；--self-test 只验键名映射，不读权重
+python3 tools/convert_fun_asr_nano.py \
+  --model_path /path/to/Fun-ASR-Nano-2512 \
+  --output_path  ~/.config/xime/models/fun-asr-nano
+```
+
+源目录按 ModelScope 原始仓库（`FunAudioLLM/Fun-ASR-Nano-2512`）摆放：`config.yaml` +
+`model.pt` + `Qwen3-0.6B/`（后者只有分词器与 config，**没有**权重——LLM 权重就在
+`model.pt` 的 `llm.*` 里）。脚本做的事：
+
+| 产物 | 来源 |
+| --- | --- |
+| `model.safetensors` | `model.pt` 的 1627 个张量（fused QKV 按行切三份，CTC 旁支 86 个丢弃） |
+| `config.json` | 由 `config.yaml` 生成（`audio_config` / `adaptor_config` / `text_config`） |
+| `processor_config.json` | 由 `frontend_conf` 生成（25/10 ms、80 mel、LFR 7/6） |
+| `tokenizer.json` | 复制自 `Qwen3-0.6B/` |
+
+```rust
+use std::path::Path;
+use xime_infer::asr::fun_asr::FunAsrNano;
+
+let mut asr = FunAsrNano::from_dir(Path::new("/path/to/fun-asr-nano"))?;
+asr.warmup()?;                                    // 同样别放按键路径
+let out = asr.transcribe_wav(Path::new("a.wav"))?;
+println!("{}", out.text);                         // 纯文本，语种由 prompt 指定
+```
+
+与 Qwen3-ASR 的差别（选型看这张表）：
+
+| | Qwen3-ASR | Fun-ASR-Nano |
+| --- | --- | --- |
+| 前处理 | Whisper 式 128 维 log-mel | Kaldi fbank 80 维 + LFR(7/6) → 560 维 |
+| 音频编码 | 18 层窗口注意力（104 token 窗口） | 70 层整段双向注意力（SAN-M + FSMN） |
+| 输出 | `language X<asr_text>文本` | 纯文本（语种写进「语音转写成中文：」） |
+| 流式 | 支持（按 1 秒分块编码） | **不支持** |
+| 音频 token | 13 / 秒 | 16.7 / 秒（60 ms 一帧，不做降采样） |
+
+**为什么不支持流式**：LFR 要跨帧拼（叠 7 跳 6），分块边界会截断窗口；注意力又是整段
+双向的，改一段就全变。要流式请继续用 Qwen3-ASR——服务层 `engine::load` 按
+`config.json` 自动派发，`FunAsrRecognizer` 的 `supports_streaming()` 返回 `false`，
+流式路径会直接跳过。
+
+边界：单次 ≤ 30 秒；位置编码表 2049 帧（约 123 秒）；输出不做时间戳。
+
+### 与官方对拍
+
+**已用真实权重验证过**：ModelScope `FunAudioLLM/Fun-ASR-Nano-2512` 的 `model.pt`
+（2,127,426,538 字节）转出 1541 个张量 / 985M 参数，再用 transformers 的
+`FunAsrNanoForConditionalGeneration` 吃**同一份 safetensors** 逐层比：
+
+```bash
+# 1) Rust 侧导出中间量（前处理特征 / 编码器输出 / prompt id / 生成 id）
+XIME_ASR_DUMP=/tmp/dump XIME_ASR_DUMP_IDS=/tmp/dump/ids.txt \
+  cargo run --release -p xime-infer --example fun_asr_transcribe \
+  -- ~/.config/xime/models/fun-asr-nano-2512 example/zh16k.wav 中文
+
+# 2) 参考实现三段对拍（需要 pip install torch safetensors transformers）
+python3 tools/fun_asr_reference.py ~/.config/xime/models/fun-asr-nano-2512 \
+  example/zh16k.wav --dump /tmp/dump
+```
+
+官方 `example/zh.mp3`（5.6 s）与 `en.mp3`（7.2 s）的结果：
+
+| 层 | 指标 | 中文 | 英文 |
+| --- | --- | --- | --- |
+| 前处理（fbank+LFR） | 相对 RMS | 1.0e-3 | 1.2e-3 |
+| 编码器 + 投影 | 相对 RMS / 余弦 | 3.0e-4 / 1.000000 | 7.1e-4 / 1.000000 |
+| 贪心解码 | token id | 11/11 逐位相同 | 20/20 逐位相同 |
+| 文本 | | `开饭时间早上九点至下午五点。` | `The tribal chieftain called for the boy, and presented him with fifty pieces of gold.` |
+
+- 前处理的残差集中在能量贴近 `f32::EPSILON` 的静音 bin（占 0.2%，log 域把 1e-8 级
+  舍入放大成 0.5），不是公式差异；编码器输出与 token 序列都不受影响。
+- 「开饭」不是错字：官方 README 的示例传了热词 `开放时间`，不给提示时模型自己选的
+  就是「开饭」，参考实现逐位相同。本实现暂无热词通道，走的是同一条 prompt。
+- 编码器输出相对 RMS 3e-4 来自 bf16 权重（8 bit 尾数）；CPU 上按 f32 计算不影响。
+
+回归用 `fun_asr_parity`（5 条，`#[ignore]`，同一份权重跑过全部通过）：音频 token 数
+必须等于 `ceil(mel帧数 / 6)`、输出不含 `<asr_text>` 标记、30 秒上限与空音频按预期报错、
+第二个实例被闸门挡下。服务层的派发另有 `xime-speech-service/tests/engine_smoke.rs`
+（同样 `#[ignore]`）验证「模型目录 → `engine::load` → 文本」。
+
+### 实测（release，f32，贪心解码）
+
+| 后端 | 音频 | 装载 | 预热 | 编码 | 解码 | 合计 / 实时率 |
+| --- | --- | --- | --- | --- | --- | --- |
+| CPU（Ryzen 5 7600X，6 核） | 中文 5.6 s | 1.5 s | 7.4 s | 7.3 s | 2.0 s | 9.3 s / **1.66×** |
+| CPU | 英文 7.2 s | — | — | 7.3 s | 3.2 s | 10.5 s / **1.47×** |
+| CUDA（RTX 4060 Ti 16G，CUDA 13.4） | 中文 5.6 s | 0.45 s | 0.8 s | 0.66 s | 0.15 s | 0.81 s / **0.14×** |
+
+编码是大头（70 层 × 16.7 token/秒、整段双向注意力，CPU 上约 42 GFLOP；GPU 上同一个
+序列只要 0.66 s）。整段识别的使用姿势是「松手后上屏」：CPU 上 1.5–1.7 倍实时勉强可用，
+GPU 上 7 倍实时很宽裕。CUDA 路径与 CPU 路径输出的 token 序列逐位相同。
+
+实现上的对齐要点（都已在代码注释里写明）：
+
+- 编码器第一层输入 560 维 ≠ hidden 512，所以**两处跳连都不加**；只有第 50、70 层末尾
+  接 `final_layernorm`。
+- 位置编码宽度是 **560**（不是 512），`sin` 在前半、`cos` 在后半，位置从 1 起算；
+  特征先乘 `sqrt(512)` 再加位置。
+- FSMN 跑在**没按头切开**的 `v` 上：`depthwise_conv(pad(v)) + v`，核 11、左右各补 5。
+- fbank 不乘 32768（官方 FunASR 前端乘、HF 前端不乘）：log 域整体平移会在第一层
+  LayerNorm 减均值时消掉。
 
 ## 移植踩过的坑
 

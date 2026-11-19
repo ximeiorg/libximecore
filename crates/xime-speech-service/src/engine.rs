@@ -1,7 +1,9 @@
 //! 识别引擎抽象。
 //!
-//! 生产实现包 [`xime_infer::asr::Qwen3Asr`]；测试可以塞一个假引擎，
-//! 这样状态机、协议、模型目录都能在没有 1.6 GB 权重的情况下测。
+//! 生产实现有两个：`candle` 侧的 [`xime_infer::asr::Qwen3Asr`]（流式友好）与
+//! [`xime_infer::asr::fun_asr::FunAsrNano`]（中文方言更强，只能整段识别）。
+//! 用 [`load`] 按模型目录的 `config.json` 自动选，宿主不需要知道型号差异。
+//! 测试可以塞一个假引擎，这样状态机、协议、模型目录都能在没有 1.6 GB 权重的情况下测。
 //!
 //! 引擎有两种工作方式，服务层按能力择优：
 //!
@@ -13,7 +15,7 @@
 use std::path::Path;
 
 use candle_core::{DType, Tensor};
-use xime_infer::asr::{AsrOptions, Qwen3Asr};
+use xime_infer::asr::{fun_asr::FunAsrNano, AsrFamily, AsrOptions, Qwen3Asr};
 use xime_infer::DeviceKind;
 
 /// 一段已编码的音频特征，`[tokens, d_model]`。
@@ -41,6 +43,17 @@ pub trait Recognizer: Send {
     /// （Qwen3-ASR 走 prompt 的 system 段），让窗口接缝处的用词连贯。
     fn decode_window(&mut self, _window: &AudioBlock, _context: &str) -> Result<String, String> {
         Err("该引擎不支持窗口解码".to_string())
+    }
+}
+
+/// 按模型目录装载引擎：看 `config.json` 是哪个家族。
+///
+/// 调用方（`spawn_load`）在后台线程里跑，装载失败只写进状态，不影响守护进程。
+pub fn load(dir: &Path, device: DeviceKind, dtype: DType) -> Result<Box<dyn Recognizer>, String> {
+    let family = AsrFamily::detect(dir).map_err(|e| format!("读取模型配置失败：{e}"))?;
+    match family {
+        AsrFamily::Qwen3Asr => Ok(Box::new(QwenRecognizer::load(dir, device, dtype)?)),
+        AsrFamily::FunAsrNano => Ok(Box::new(FunAsrRecognizer::load(dir, device, dtype)?)),
     }
 }
 
@@ -85,6 +98,37 @@ impl Recognizer for QwenRecognizer {
         // 时长只用于 Transcript 的统计字段，流式侧不需要。
         self.asr
             .decode_embeds(window, Some(context), 0.0)
+            .map(|out| out.text)
+            .map_err(|e| format!("识别失败：{e}"))
+    }
+}
+
+/// Fun-ASR-Nano 实现。
+///
+/// **只做整段识别**：它的前处理要跨帧拼 LFR、编码器是整段双向注意力，分块编码
+/// 与整段编码不等价（详见 `xime_infer::asr::fun_asr` 的模块文档）。服务层靠
+/// [`Recognizer::supports_streaming`] 判定，录音期间不出预览，松手后一次性上屏。
+pub struct FunAsrRecognizer {
+    asr: FunAsrNano,
+}
+
+impl FunAsrRecognizer {
+    pub fn load(dir: &Path, device: DeviceKind, dtype: DType) -> Result<Self, String> {
+        let options = AsrOptions {
+            device,
+            dtype,
+            ..Default::default()
+        };
+        let asr =
+            FunAsrNano::from_dir_with(dir, options).map_err(|e| format!("装载模型失败：{e}"))?;
+        Ok(Self { asr })
+    }
+}
+
+impl Recognizer for FunAsrRecognizer {
+    fn transcribe(&mut self, pcm: &[f32]) -> Result<String, String> {
+        self.asr
+            .transcribe(pcm)
             .map(|out| out.text)
             .map_err(|e| format!("识别失败：{e}"))
     }

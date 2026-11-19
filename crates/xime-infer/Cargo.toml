@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "本地模型推理（candle）：手写识别、Qwen3-ASR 语音识别，CPU / Metal / CUDA"
+description = "本地模型推理（candle）：手写识别、Qwen3-ASR / Fun-ASR-Nano 语音识别，CPU / Metal / CUDA"
 
 [features]
 # 后端按平台用 feature 区分（三平台对应三个 flavor，互斥）：

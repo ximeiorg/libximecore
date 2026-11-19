@@ -25,7 +25,7 @@ use candle_core::DType;
 use xime_infer::DeviceKind;
 
 use crate::capture::{self, CaptureHandle, CaptureTap};
-use crate::engine::{QwenRecognizer, Recognizer};
+use crate::engine::{self, Recognizer};
 use crate::protocol::{ModelInfo, Status};
 use crate::registry::{Entry, Registry};
 use crate::stream::{StreamSession, StreamTuning};
@@ -446,6 +446,12 @@ impl SpeechService {
     /// 起流式 worker。引擎不支持流式（或已被占用）时静默跳过，`listen_stop`
     /// 会退回整段识别。
     fn spawn_stream(self: &Arc<Self>) {
+        // 已知不支持流式的引擎（如 Fun-ASR-Nano）连线程都不必起：整段识别更快，
+        // 也避免录音期间反复报「不支持分块编码」。模型还在装载时先照常起线程，
+        // worker 会在装载结束后自行判断并退出。
+        if self.engine.streaming_capability() == Some(false) {
+            return;
+        }
         let tap = {
             let inner = self.inner.lock().unwrap();
             inner.capture.as_ref().map(|c| c.tap())
@@ -477,7 +483,15 @@ impl SpeechService {
 
     /// 流式 worker 主循环：按整秒读增量音频 → 编码 → 滚动重解码 → 写回状态。
     fn stream_loop(self: &Arc<Self>, tap: CaptureTap, stop: Arc<AtomicBool>) {
-        // 模型可能还在装载：`with` 会等，期间 stop 了就退出。
+        // 模型可能还在装载：`with` 会等到装载结束。不支持流式的引擎在这里直接退场，
+        // `listen_stop` 见 committed 为空就会退回整段识别。
+        let streamable = self
+            .engine
+            .with(|engine| Ok(engine.supports_streaming()))
+            .unwrap_or(false);
+        if !streamable {
+            return;
+        }
         let tuning = match self.cfg.device {
             DeviceKind::Cpu => StreamTuning::cpu(),
             _ => StreamTuning::gpu(),
@@ -672,11 +686,11 @@ impl SpeechService {
         let spawned = thread::Builder::new()
             .name("xime-asr-load".to_string())
             .spawn(move || {
-                let loaded = QwenRecognizer::load(&dir, device, dtype);
+                let loaded = engine::load(&dir, device, dtype);
                 let mut state = slot.state.lock().unwrap();
                 match loaded {
                     Ok(engine) => {
-                        state.engine = Some(Box::new(engine));
+                        state.engine = Some(engine);
                         state.error = None;
                     }
                     Err(error) => {
@@ -698,6 +712,15 @@ impl SpeechService {
 }
 
 impl EngineSlot {
+    /// 已装载引擎是否支持流式；未装载（或正在装载）时返回 `None`，不阻塞调用方。
+    fn streaming_capability(&self) -> Option<bool> {
+        let state = self.state.lock().ok()?;
+        state
+            .engine
+            .as_ref()
+            .map(|engine| engine.supports_streaming())
+    }
+
     fn is_loaded(&self) -> bool {
         self.state
             .lock()

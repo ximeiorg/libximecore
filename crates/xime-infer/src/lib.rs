@@ -8,7 +8,12 @@
 //!
 //! 两个模型族：
 //! - [`stroke`]：笔画手写识别（StrokeTransformer，小 transformer）。
-//! - [`asr`]：Qwen3-ASR 语音识别（Whisper 式音频编码器 + Qwen3 文本解码器）。
+//! - [`asr`]：语音识别，按模型分目录：
+//!   - [`asr::qwen3_asr`]：Qwen3-ASR（Whisper 式 log-mel + 18 层音频塔 + Qwen3 解码器）；
+//!   - [`asr::fun_asr`]：Fun-ASR-Nano（Kaldi fbank + 70 层 SAN-M + Qwen3-0.6B 解码器）。
+//!
+//!   两族**各自一套** config / 前处理 / 编码器 / 文本解码器 / 分词器，只在
+//!   [`asr::AsrOptions`] / [`asr::Transcript`] 这类与模型无关的类型上共用。
 
 // 包型 feature 是互斥的：GPU flavor 与平台一一对应，误组合在编译期挡下。
 //
@@ -75,10 +80,10 @@ pub enum InferError {
     /// 没有任何音频采样点。
     #[error("没有音频采样点")]
     EmptyAudio,
-    /// 同一进程已有 Qwen3-ASR 实例。
-    #[error("已有 Qwen3-ASR 实例在运行：{0}")]
+    /// 同一进程已有 ASR 实例（两个族共用同一道闸门）。
+    #[error("已有 ASR 实例在运行：{0}")]
     AsrBusy(String),
-    /// 音频超过模型单次可处理的时长（Qwen3-ASR 训练/推理窗口为 30 秒）。
+    /// 音频超过模型单次可处理的时长（两族都是 30 秒窗口）。
     #[error("音频 {secs:.1} 秒超过单次上限 {max:.0} 秒")]
     AudioTooLong { secs: f32, max: f32 },
 }
