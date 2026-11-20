@@ -138,14 +138,30 @@ impl AsrFamily {
         if fun_asr::FunAsrConfig::is_fun_asr(root) {
             return Ok(Self::FunAsrNano);
         }
-        // 剩余情况按 Qwen3-ASR 处理，但要求它有 audio_config，否则连报错都看不懂。
-        if root.get("audio_config").is_some() {
+        // Qwen3-ASR 有两套布局，都得认：
+        //   `-hf`（transformers 转换版）：`audio_config` 在顶层；
+        //   原始版（ModelScope 首发，用户实际装的就是这个）：嵌在 `thinker_config`。
+        // 只认顶层会让原始版直接报「不是任何一种」——这种错最难查，因为文件明明
+        // 是好的，只是它在更深一层。
+        if has_qwen3_audio_config(root) {
             return Ok(Self::Qwen3Asr);
         }
         Err(InferError::Config(
-            "config.json 既不是 Qwen3-ASR 也不是 Fun-ASR-Nano（缺 audio_config）".into(),
+            "config.json 既不是 Qwen3-ASR 也不是 Fun-ASR-Nano\
+             （顶层与 thinker_config 里都没有 audio_config）"
+                .into(),
         ))
     }
+}
+
+/// Qwen3-ASR 的判据：`audio_config` 在顶层（`-hf` 版）或 `thinker_config` 里
+/// （ModelScope 原始版）。
+fn has_qwen3_audio_config(root: &serde_json::Value) -> bool {
+    root.get("audio_config").is_some()
+        || root
+            .get("thinker_config")
+            .and_then(|thinker| thinker.get("audio_config"))
+            .is_some()
 }
 
 /// 进程级单实例闸门。
@@ -245,5 +261,25 @@ mod tests {
 
         let none = serde_json::json!({ "model_type": "foo" });
         assert!(AsrFamily::from_json(&none).is_err());
+    }
+
+    /// ModelScope 原始 Qwen3-ASR 的 `config.json`：`audio_config` 在
+    /// `thinker_config` 里，顶层没有。只认顶层会让这个真实布局识别失败。
+    #[test]
+    fn family_detection_accepts_nested_thinker_config() {
+        let raw = serde_json::json!({
+            "architectures": ["Qwen3ASRForConditionalGeneration"],
+            "model_type": "qwen3_asr",
+            "thinker_config": {
+                "model_type": "qwen3_asr",
+                "audio_config": { "d_model": 1024 },
+                "text_config": { "hidden_size": 1024 }
+            }
+        });
+        assert_eq!(AsrFamily::from_json(&raw).unwrap(), AsrFamily::Qwen3Asr);
+
+        // 深度不够（thinker_config 里也没有）仍然要报错，别把垃圾配置当 Qwen3
+        let broken = serde_json::json!({ "model_type": "qwen3_asr", "thinker_config": {} });
+        assert!(AsrFamily::from_json(&broken).is_err());
     }
 }
