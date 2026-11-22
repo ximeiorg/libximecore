@@ -28,160 +28,14 @@ use crate::state::{
 /// 操作提示的存活时间（与本地模型页一致，别做两套节奏）。
 const MESSAGE_TTL: Duration = Duration::from_secs(5);
 
-/// 语音输入用哪个引擎。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeechMode {
-    /// 本地模型：权重在本机，离线。
-    #[default]
-    Local,
-    /// 在线模型：ASR 插件调云端 API。
-    Online,
-}
-
-impl SpeechMode {
-    /// 分段选择器的文案，顺序与 [`Self::index`] 一致。
-    pub const LABELS: [&'static str; 2] = ["本地模型", "在线模型"];
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::Local => 0,
-            Self::Online => 1,
-        }
-    }
-
-    /// 越界索引一律落到「本地」：索引来自界面，不值得为它引错误态。
-    pub fn from_index(i: usize) -> Self {
-        if i == 1 {
-            Self::Online
-        } else {
-            Self::Local
-        }
-    }
-
-    /// 一句话说明（分段下面那行，告诉用户两种模式的差别）。
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Local => "模型下载到本机，离线运行，语音不出电脑",
-            Self::Online => "由扩展商店的语音插件调用云端 API，需要联网，按插件表单配置",
-        }
-    }
-}
-
-/// 识别完成后怎么上屏。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommitMode {
-    /// 识别完直接上屏（说完即所得，适合短句）。
-    #[default]
-    Direct,
-    /// 先进候选栏，确认后再上屏（长句/需要改字时更稳）。
-    Candidate,
-}
-
-impl CommitMode {
-    pub const LABELS: [&'static str; 2] = ["直接上屏", "先进候选"];
-
-    pub fn index(self) -> usize {
-        match self {
-            Self::Direct => 0,
-            Self::Candidate => 1,
-        }
-    }
-
-    pub fn from_index(i: usize) -> Self {
-        if i == 1 {
-            Self::Candidate
-        } else {
-            Self::Direct
-        }
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            Self::Direct => "说完停顿后直接输入到当前窗口",
-            Self::Candidate => "识别结果进候选栏，按空格确认、Esc 丢弃",
-        }
-    }
-}
-
-/// 语种选项：`(配置值, 下拉文案)`。本地引擎与在线插件共用这一套取值。
-pub const LANGUAGES: [(&str, &str); 4] = [
-    ("auto", "自动识别"),
-    ("zh", "中文"),
-    ("en", "English"),
-    ("yue", "粤语"),
-];
-
-/// 配置值 → 下拉文案（未知值按自动识别显示，避免界面出现空选项）。
-pub fn language_label(code: &str) -> &'static str {
-    LANGUAGES
-        .iter()
-        .find(|(value, _)| *value == code)
-        .map(|(_, label)| *label)
-        .unwrap_or("自动识别")
-}
-
-/// `speech.toml`：模式 + 当前插件 + 通用项。
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-pub struct SpeechConfig {
-    /// 本地 / 在线（二选一）。
-    pub mode: SpeechMode,
-    /// 在线模式下选中的插件 id；空 = 还没选。
-    pub plugin_id: String,
-    /// 语种：`auto` / `zh` / `en` / `yue`。
-    pub language: String,
-    /// 上屏方式。
-    pub commit: CommitMode,
-}
-
-impl Default for SpeechConfig {
-    fn default() -> Self {
-        Self {
-            mode: SpeechMode::Local,
-            plugin_id: String::new(),
-            language: "auto".to_string(),
-            commit: CommitMode::Direct,
-        }
-    }
-}
-
-impl SpeechConfig {
-    /// 修掉手写配置里的越界值：界面不能显示一个不存在的选项。
-    pub fn normalized(mut self) -> Self {
-        if !LANGUAGES.iter().any(|(code, _)| *code == self.language) {
-            self.language = "auto".to_string();
-        }
-        self.plugin_id = self.plugin_id.trim().to_string();
-        self
-    }
-}
-
-/// `speech.toml` 路径（配置目录根，与 clipboard_sync.toml 同层）。
-pub fn config_path() -> PathBuf {
-    config_base_dir().join("speech.toml")
-}
-
-/// 读配置；文件不存在或损坏时回落默认值（本地模型）。
-pub fn read_config() -> SpeechConfig {
-    let Ok(content) = std::fs::read_to_string(config_path()) else {
-        return SpeechConfig::default();
-    };
-    toml::from_str::<SpeechConfig>(&content)
-        .unwrap_or_default()
-        .normalized()
-}
-
-/// 写配置（宿主按 mtime 热加载，切换即时生效）。
-pub fn write_config(cfg: &SpeechConfig) {
-    if let Ok(content) = toml::to_string(cfg) {
-        if let Some(parent) = config_path().parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(config_path(), content);
-    }
-}
+// 模式 / 上屏方式 / 语种 / `speech.toml` 的读写全部在 libximecore 的
+// `xime_config::speech_config`：设置程序与各平台输入法必须读同一份实现，
+// 否则「设置里关了、输入法还照录」（同剪贴板库 D21 的教训）。这里只做转出，
+// 让设置页继续用 `crate::speech_mode::*` 这套老路径。
+pub use xime_config::speech_config::{
+    config_path, language_label, read_config, write_config, CommitMode, SpeechConfig, SpeechMode,
+    LANGUAGES,
+};
 
 /// 一个可选的在线语音插件。
 #[derive(Clone, Debug, PartialEq)]
@@ -242,6 +96,8 @@ static OUTCOME: Mutex<Option<Result<Outcome, String>>> = Mutex::new(None);
 /// 语音输入页的在线侧状态（本地侧在 [`crate::speech_models::SpeechModelState`]）。
 #[derive(Clone, Debug)]
 pub struct SpeechUiState {
+    /// 语音输入总开关（写进 `speech.toml` 的 `enabled`，输入法按 mtime 热加载）。
+    pub enabled: bool,
     pub mode: SpeechMode,
     /// 已安装的 speech 插件（顺序稳定）。
     pub plugins: Vec<SpeechPluginInfo>,
@@ -266,6 +122,7 @@ impl Default for SpeechUiState {
             .position(|p| p.id == cfg.plugin_id)
             .unwrap_or(0);
         let mut state = Self {
+            enabled: cfg.enabled,
             mode: cfg.mode,
             plugins,
             plugin_index,
@@ -284,7 +141,8 @@ impl Default for SpeechUiState {
             }
         }
         // 在线模式且已有插件：进页面就把表单拉出来，别让用户先点一下才看到。
-        if state.mode == SpeechMode::Online && state.selected_plugin().is_some() {
+        // 总开关关着时页面只显示开关本身，不必白读一次插件 schema。
+        if state.enabled && state.mode == SpeechMode::Online && state.selected_plugin().is_some() {
             state.start_schema_load();
         }
         state
@@ -324,6 +182,24 @@ impl SpeechUiState {
     fn set_message(&mut self, message: impl Into<String>) {
         self.message = Some(message.into());
         self.message_at = Some(Instant::now());
+    }
+
+    /// 语音输入总开关：一键关闭后，快捷键、候选栏 🎙️、菜单栏「语音输入」
+    /// 一起失效（输入法读同一份 `speech.toml`），本页也不再拉起语音服务。
+    pub fn set_enabled(&mut self, enabled: bool) {
+        if enabled == self.enabled {
+            return;
+        }
+        self.enabled = enabled;
+        // 读-改-写只动 `enabled` 一个键：模式 / 插件 / 语种不能因为关一次开关丢掉。
+        let mut cfg = read_config();
+        cfg.enabled = enabled;
+        write_config(&cfg);
+        self.set_message(if enabled {
+            "语音输入已开启：按住 Fn / Option 即可说话"
+        } else {
+            "语音输入已关闭：快捷键与菜单入口同时失效"
+        });
     }
 
     /// 切换本地 / 在线并落盘。
@@ -511,6 +387,7 @@ mod tests {
             plugin_id: "com.example.asr".into(),
             language: "zh".into(),
             commit: CommitMode::Candidate,
+            ..SpeechConfig::default()
         };
         let text = toml::to_string(&cfg).unwrap();
         let back: SpeechConfig = toml::from_str(&text).unwrap();

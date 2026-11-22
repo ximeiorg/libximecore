@@ -15,7 +15,7 @@
 use crate::components::settings::{settings_group, settings_item, settings_page};
 use crate::components::widgets::{
     badge, button_disabled, button_primary, button_secondary, card_style, pick_list_style,
-    progress, semibold, tab_bar, text_button, text_input_style, UI_FONT,
+    progress, semibold, switch, tab_bar, text_button, text_input_style, UI_FONT,
 };
 use crate::speech_mode::{language_label, CommitMode, SpeechMode, SpeechUiState, LANGUAGES};
 use crate::speech_models::{SpeechModelEntry, SpeechStatusKind};
@@ -31,8 +31,16 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     let server = &settings.speech_server;
     let ui = &settings.speech_mode;
 
-    let mut groups: Vec<Element<'a, Message>> =
-        vec![mode_card(ui, colors), hero(ui, server, colors)];
+    // 总开关是页面的第一道门：关着时只留开关与一句说明。已经不录音了，
+    // 让用户继续在这里配模型/插件只会误导（他以为还有东西在跑）。
+    let mut groups: Vec<Element<'a, Message>> = vec![enable_card(ui, colors)];
+    if !ui.enabled {
+        groups.push(off_card(colors));
+        return settings_page("语音输入", colors, groups);
+    }
+
+    groups.push(mode_card(ui, colors));
+    groups.push(hero(ui, server, colors));
 
     match ui.mode {
         SpeechMode::Local => {
@@ -49,6 +57,60 @@ pub fn view<'a>(settings: &'a SettingsState, colors: &'a ThemeColors) -> Element
     groups.push(help_card(ui.mode, colors));
 
     settings_page("语音输入", colors, groups)
+}
+
+/// 总开关：一键开启 / 关闭语音输入。
+///
+/// 开关值写进 `speech.toml` 的 `enabled`，输入法按 mtime 热加载——关闭后
+/// 按住 Fn/Option、候选栏 🎙️、菜单栏「语音输入」一起失效，也不会再拉起
+/// 语音服务进程。这是**唯一**的开关入口（菜单只反映状态，不提供切换）。
+fn enable_card<'a>(ui: &'a SpeechUiState, colors: &'a ThemeColors) -> Element<'a, Message> {
+    settings_group(
+        "语音输入",
+        Some("关闭后所有入口一起失效：快捷键、候选栏 🎙️、菜单栏；也不再启动语音服务"),
+        colors,
+        vec![settings_item(
+            "启用语音输入",
+            Some(if ui.enabled {
+                "按住 Fn / Option 说话，说完松手即可上屏"
+            } else {
+                "当前已关闭：不会录音，也不会启动语音服务"
+            }),
+            colors,
+            switch(ui.enabled, colors, Message::SpeechEnabledChanged),
+        )],
+    )
+}
+
+/// 关闭态的说明卡：把「关了什么」和「怎么再打开」写清楚，不留悬空页。
+fn off_card<'a>(colors: &'a ThemeColors) -> Element<'a, Message> {
+    let rows: Vec<Element<'a, Message>> = [
+        ("快捷键", "按住 Fn / 左 Option 不再开始录音"),
+        ("候选栏", "面板里的「语音输入」入口不再出现"),
+        ("菜单栏", "输入法菜单里的「语音输入」不再出现"),
+        ("语音服务", "不再按需拉起 xime-speechd，不占内存"),
+    ]
+    .into_iter()
+    .map(|(name, desc)| {
+        row![
+            text(name)
+                .size(13)
+                .font(semibold())
+                .color(colors.foreground)
+                .width(Length::Fixed(72.0)),
+            text(desc).size(13).color(colors.foreground_muted),
+        ]
+        .spacing(8)
+        .into()
+    })
+    .collect();
+
+    settings_group(
+        "当前状态",
+        Some("重新打开上面的开关即可恢复，模型与插件配置都还在"),
+        colors,
+        rows,
+    )
 }
 
 /// 输入方式卡：本地 / 在线二选一。
