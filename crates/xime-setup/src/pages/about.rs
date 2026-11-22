@@ -30,8 +30,8 @@ pub fn view<'a>(_settings: &'a SettingsState, colors: &'a ThemeColors) -> Elemen
 fn hero_card<'a>(colors: ThemeColors) -> Element<'a, Message> {
     let meta = xime_config::app_metadata();
 
-    let logo: Element<'a, Message> = match crate::Assets::get("icons/xime.svg") {
-        Some(f) => svg(svg::Handle::from_memory(f.data))
+    let logo: Element<'a, Message> = match crate::brand_assets() {
+        Some(b) => svg(svg::Handle::from_memory(b.logo_svg))
             .width(52)
             .height(52)
             .into(),

@@ -49,10 +49,36 @@ pub use xime_config::{
     RimePaths,
 };
 
+use std::sync::OnceLock;
+
 use rust_embed::RustEmbed;
 
+/// 本库自带的通用图标（侧栏导航等），与具体产品无关。
 #[derive(RustEmbed)]
 #[folder = "$CARGO_MANIFEST_DIR/assets"]
 #[include = "icons/*.svg"]
-#[include = "image/*.png"]
 pub struct Assets;
+
+/// 设置界面的品牌素材：窗口图标 + 侧栏/关于页 logo。
+///
+/// 品牌属于产品仓库（如 XimeChe 的 `resources/`），本库不自带任何品牌图，
+/// 由宿主在启动时通过 [`set_brand_assets`] 注入；未注入时界面不画 logo。
+#[derive(Clone, Copy)]
+pub struct BrandAssets {
+    /// 窗口图标（PNG 字节）。
+    pub app_icon_png: &'static [u8],
+    /// 侧栏品牌区与关于页用的 logo（SVG 字节）。
+    pub logo_svg: &'static [u8],
+}
+
+static BRAND_ASSETS: OnceLock<BrandAssets> = OnceLock::new();
+
+/// 注入品牌素材。重复调用保留第一份（与 `set_app_metadata` 同语义）。
+pub fn set_brand_assets(assets: BrandAssets) {
+    let _ = BRAND_ASSETS.set(assets);
+}
+
+/// 已注入的品牌素材；宿主没注入时为 `None`。
+pub fn brand_assets() -> Option<&'static BrandAssets> {
+    BRAND_ASSETS.get()
+}

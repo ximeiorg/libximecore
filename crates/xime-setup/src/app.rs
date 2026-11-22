@@ -80,8 +80,8 @@ pub fn run_with(meta: xime_config::AppMetadata) -> iced::Result {
     // 大头（约 1 秒量级），与业务数据加载无关。
     BOOT_AT.get_or_init(std::time::Instant::now);
     tracing::info!("run(): iced 初始化开始（图形后端 + 窗口 + 字体）");
-    let icon = crate::Assets::get("image/icon.png")
-        .and_then(|f| iced::window::icon::from_file_data(&f.data, None).ok());
+    let icon = crate::brand_assets()
+        .and_then(|b| iced::window::icon::from_file_data(b.app_icon_png, None).ok());
     let meta = xime_config::app_metadata();
     let title: &'static str = Box::leak(meta.settings_name.to_string().into_boxed_str());
     iced::application(SettingsApp::new, update, view)

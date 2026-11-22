@@ -181,8 +181,8 @@ pub fn sidebar(current: usize, colors: &ThemeColors) -> Element<'static, Message
 
 /// 品牌区：应用图标 + 名称 + 副标题。
 fn brand(colors: &ThemeColors) -> Element<'static, Message> {
-    let logo: Element<'static, Message> = match crate::Assets::get("icons/xime.svg") {
-        Some(f) => svg(svg::Handle::from_memory(f.data))
+    let logo: Element<'static, Message> = match crate::brand_assets() {
+        Some(b) => svg(svg::Handle::from_memory(b.logo_svg))
             .width(28)
             .height(28)
             .into(),
