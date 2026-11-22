@@ -138,7 +138,9 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
             #[cfg(feature = "voice-page")]
             {
                 // 在线模式下不需要轮询本地引擎：省掉每 250ms 一次无意义 IPC。
-                let on_voice_page = crate::pages::voice_page_index() == Some(i)
+                // 总开关关着时同样不轮询（页面只显示开关）。
+                let on_voice_page = state.settings.speech_mode.enabled
+                    && crate::pages::voice_page_index() == Some(i)
                     && state.settings.speech_mode.mode == crate::speech_mode::SpeechMode::Local;
                 state.settings.speech_server.set_active(on_voice_page);
             }
@@ -610,6 +612,29 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         #[cfg(feature = "voice-page")]
         Message::SpeechModelImport => {
             state.settings.speech_server.import();
+        }
+        #[cfg(feature = "voice-page")]
+        Message::SpeechEnabledChanged(enabled) => {
+            state.settings.speech_mode.set_enabled(enabled);
+            // 关掉时要顺手把正在进行的试听停掉：不能出现「开关已经关了、
+            // 麦克风还在录」。试听走 daemon 的 listen_stop，文本丢弃。
+            if !enabled {
+                let listening = state
+                    .settings
+                    .speech_server
+                    .status
+                    .as_ref()
+                    .map(|status| status.is_listening())
+                    .unwrap_or(false);
+                if listening {
+                    state.settings.speech_server.toggle_preview();
+                }
+            }
+            // 关闭后不再轮询本地引擎状态（页面此时也只显示开关本身）。
+            let on_page = enabled
+                && crate::pages::voice_page_index() == Some(state.settings.current_page)
+                && state.settings.speech_mode.mode == crate::speech_mode::SpeechMode::Local;
+            state.settings.speech_server.set_active(on_page);
         }
         #[cfg(feature = "voice-page")]
         Message::SpeechModeChanged(mode) => {

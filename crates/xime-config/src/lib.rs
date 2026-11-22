@@ -7,6 +7,7 @@ pub mod rime_deploy;
 pub mod schema_config;
 pub mod schema_manager;
 pub mod schema_manifest;
+pub mod speech_config;
 pub mod style;
 pub mod user_config;
 pub mod wubi_radicals;

@@ -984,6 +984,9 @@ pub enum Message {
     /// 本地模型：导入用户自己的模型权重（宿主弹目录选择并落盘）。
     #[cfg(feature = "voice-page")]
     SpeechModelImport,
+    /// 语音输入：总开关（一键开关语音功能）。
+    #[cfg(feature = "voice-page")]
+    SpeechEnabledChanged(bool),
     /// 语音输入：切换本地 / 在线模式。
     #[cfg(feature = "voice-page")]
     SpeechModeChanged(crate::speech_mode::SpeechMode),
@@ -1296,7 +1299,8 @@ impl SettingsState {
         // 就会这样），页面会一直停在"正在读取…"。这里补一次初始置位，条件
         // 与 `PageSelected` 里的判定保持一致。
         #[cfg(feature = "voice-page")]
-        if crate::pages::voice_page_index() == Some(state.current_page)
+        if state.speech_mode.enabled
+            && crate::pages::voice_page_index() == Some(state.current_page)
             && state.speech_mode.mode == crate::speech_mode::SpeechMode::Local
         {
             state.speech_server.set_active(true);

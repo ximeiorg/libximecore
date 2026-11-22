@@ -10,6 +10,8 @@ repository.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+# 语音配置 speech.toml（xime_config::speech_config）
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
