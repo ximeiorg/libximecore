@@ -15,10 +15,10 @@
 
 use crate::components::settings::{settings_group, settings_item, settings_page};
 use crate::components::widgets::{
-    button_disabled, button_primary, button_secondary, label, medium, progress, semibold, tab_bar,
-    text_button, text_input_style,
+    badge, button_disabled, button_primary, button_secondary, label, medium, progress, semibold,
+    tab_bar, text_button, text_input_style,
 };
-use crate::state::{Message, PairState, PairTab, SettingsState};
+use crate::state::{Message, P2pPeerState, PairState, PairTab, SettingsState};
 use crate::theme::ThemeColors;
 use iced::widget::{column, container, row, text, text_input, Space};
 use iced::{border, Alignment, Background, Element, Length};
@@ -307,10 +307,43 @@ fn peers_group<'a>(pair: &'a PairState, colors: &'a ThemeColors) -> Element<'a, 
         } else {
             text_button("移除", colors, Message::PairRemoveRequest(did)).into()
         };
-        let desc = match &peer.last_addr {
-            Some(addr) => format!("{} · 最近地址 {addr}", peer.short),
-            None => format!("{} · 尚未连接过", peer.short),
+        // 状态胶囊：在线 / 附近 / 离线 / 未知。拿不到输入法快照时是「未知」，
+        // 不能画成「离线」——「输入法没开」和「对方不在」是两件事。
+        let (badge_label, fg, bg) = match peer.state {
+            P2pPeerState::Online => ("在线", colors.success, colors.success_dim),
+            P2pPeerState::Nearby => ("附近", colors.tertiary, colors.tertiary_dim),
+            P2pPeerState::Offline => ("离线", colors.foreground_muted, colors.surface_variant),
+            P2pPeerState::Unknown => ("未知", colors.foreground_faint, colors.surface_variant),
         };
+        let desc = match (&peer.state, &peer.last_addr) {
+            (P2pPeerState::Online, _) => format!("{} · 已连接，剪贴板会立即同步", peer.short),
+            (P2pPeerState::Nearby, _) => format!("{} · 在局域网内，但没连上本机", peer.short),
+            (P2pPeerState::Offline, _) => match peer.last_seen {
+                Some(ts) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(ts);
+                    let ago = (now.saturating_sub(ts).max(0)) as u64;
+                    format!(
+                        "{} · 离线，上次在线 {}",
+                        peer.short,
+                        crate::state::relative_time_ago(std::time::Duration::from_secs(ago))
+                    )
+                }
+                None => match &peer.last_addr {
+                    Some(addr) => format!("{} · 离线 · 最近地址 {addr}", peer.short),
+                    None => format!("{} · 离线（还没有连上过）", peer.short),
+                },
+            },
+            (P2pPeerState::Unknown, _) => {
+                format!("{} · 输入法没在运行，看不到状态", peer.short)
+            }
+        };
+        let control = row![badge(badge_label, fg, bg), control]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into();
         items.push(settings_item(
             peer.name.clone(),
             Some(desc),

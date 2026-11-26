@@ -1862,6 +1862,9 @@ impl SettingsState {
         self.clipboard.poll();
         #[cfg(feature = "clipboard-page")]
         self.sync_plugin.poll();
+        // 设备关联页：状态每 2 秒刷一次，别让界面停在一打开时的那一刻。
+        #[cfg(feature = "pair-page")]
+        self.pair.poll_peers();
         #[cfg(feature = "backup-page")]
         self.backup.poll();
         #[cfg(feature = "backup-page")]
@@ -3234,8 +3237,10 @@ pub struct SmartSuggestionState {
 ///
 /// 存储归客户端：协议库只定义 `PeerBook`，桌面端实现在 `xime-config`。
 #[cfg(feature = "pair-page")]
-fn peer_book() -> Result<std::sync::Arc<dyn xime_p2p::PeerBook>, xime_p2p::Error> {
-    xime_config::p2p_peers::SqlitePeerBook::open_default()
+fn peer_book_at(
+    db_path: &std::path::Path,
+) -> Result<std::sync::Arc<dyn xime_p2p::PeerBook>, xime_p2p::Error> {
+    xime_config::p2p_peers::SqlitePeerBook::open(db_path)
         .map(|book| std::sync::Arc::new(book) as std::sync::Arc<dyn xime_p2p::PeerBook>)
         .map_err(|e| xime_p2p::Error::Store(format!("打开设备库失败：{e}")))
 }
@@ -3259,7 +3264,7 @@ fn device_file(dir: &std::path::Path) -> std::path::PathBuf {
 /// 快照每 2 秒刷新一次；超过 [`P2P_STATUS_TTL`] 没更新就当作没有——宁可显示
 /// 「未知」，也别拿十分钟前的「在线」骗人。节点没启动时输入法会写
 /// `running: false`，这种情况同样返回 `None`。
-#[cfg(feature = "clipboard-page")]
+#[cfg(any(feature = "clipboard-page", feature = "pair-page"))]
 fn read_p2p_status(
     dir: &std::path::Path,
 ) -> Option<std::collections::HashMap<String, (P2pPeerState, Option<i64>)>> {
@@ -3294,7 +3299,7 @@ fn read_p2p_status(
 }
 
 /// 状态快照的新鲜度上限（秒）。输入法每 2 秒写一次，留 5 倍余量。
-#[cfg(feature = "clipboard-page")]
+#[cfg(any(feature = "clipboard-page", feature = "pair-page"))]
 const P2P_STATUS_TTL: i64 = 10;
 
 #[cfg(feature = "pair-page")]
@@ -3425,6 +3430,10 @@ pub struct PeerRow {
     /// did 前 8 位：同名设备靠它区分。
     pub short: String,
     pub last_addr: Option<String>,
+    /// 实时状态：在线 / 附近 / 离线 / 未知（拿不到输入法的快照）。
+    pub state: P2pPeerState,
+    /// 最后一次确认在线的时间（Unix 秒），来自状态快照。
+    pub last_seen: Option<i64>,
 }
 
 #[cfg(feature = "pair-page")]
@@ -3452,6 +3461,10 @@ pub struct PairState {
     pub peer_error: Option<String>,
     /// 等待二次确认移除的 did。
     pub remove_confirm: Option<String>,
+    /// 统一库路径（设备表所在）。
+    db_path: std::path::PathBuf,
+    /// 上次刷新设备状态的时刻（2 秒节流）。
+    last_peer_poll: Option<std::time::Instant>,
     /// 页面内状态消息（文案, 是否错误）。
     pub message: Option<(String, bool)>,
     /// 后台线程 → UI 的事件队列。
@@ -3476,12 +3489,24 @@ impl Default for PairState {
 #[cfg(feature = "pair-page")]
 impl PairState {
     pub fn new() -> Self {
-        Self::with_dir(p2p_dir())
+        let dir = p2p_dir();
+        let db_path = dir
+            .parent()
+            .map(|root| root.join(xime_config::app_db::DB_FILE))
+            .unwrap_or_else(|| dir.join(xime_config::app_db::DB_FILE));
+        Self::with_paths(dir, db_path)
     }
 
     /// 指定数据目录构造。测试与需要自定义路径的宿主用；
     /// 界面侧一律走 [`Self::new`]，避免同一台机器上出现两份身份。
     pub fn with_dir(dir: std::path::PathBuf) -> Self {
+        // 测试/自定义路径：库放在该目录里，免得两套测试共用一个库。
+        let db_path = dir.join(xime_config::app_db::DB_FILE);
+        Self::with_paths(dir, db_path)
+    }
+
+    /// 同时指定数据目录与统一库路径。
+    pub fn with_paths(dir: std::path::PathBuf, db_path: std::path::PathBuf) -> Self {
         let mut state = Self {
             device_name: read_device_name(&dir),
             tab: PairTab::default(),
@@ -3494,16 +3519,26 @@ impl PairState {
             peers: Vec::new(),
             peer_error: None,
             remove_confirm: None,
+            last_peer_poll: None,
             message: None,
             events: std::sync::Arc::new(Mutex::new(Vec::new())),
             display_stop: None,
             dir,
             display_session: 0,
             join_session: 0,
+            db_path,
         };
         state.refresh_did();
         state.refresh_peers();
         state
+    }
+
+    /// 统一库路径（`xime.db`，设备表在里面）。
+    ///
+    /// 与 [`Self::dir`]（`p2p/`）分开：真实运行时库在 p2p 目录的**上一级**，
+    /// 测试则把库放进各自的临时目录，互不干扰。
+    pub fn db_path(&self) -> &std::path::Path {
+        &self.db_path
     }
 
     /// 数据目录（界面排障时展示用）。
@@ -3531,17 +3566,44 @@ impl PairState {
     ///
     /// 配对表损坏时不能静默当空表——那会让用户以为设备丢了而重新配对，
     /// 掩盖真正的文件问题。
+    /// 设备关联页的定时刷新（2 秒）。
+    ///
+    /// 页面停在设备列表上时，状态要跟着变（对方开键盘 → 附近 → 在线），
+    /// 否则用户会以为「一直离线」。节流放在这里，`BackgroundPoll` 是 250ms 一跳。
+    pub fn poll_peers(&mut self) {
+        let now = std::time::Instant::now();
+        if self
+            .last_peer_poll
+            .is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(2))
+        {
+            return;
+        }
+        self.last_peer_poll = Some(now);
+        self.refresh_peers();
+    }
+
     pub fn refresh_peers(&mut self) {
-        match peer_book() {
+        // 在线状态来自输入法写的快照（节点只能有一个主人，设置程序只读）。
+        // 快照缺失/过期时是 `Unknown`，不能画成「离线」。
+        let live = read_p2p_status(&p2p_dir());
+        match peer_book_at(&self.db_path) {
             Ok(book) => {
                 self.peers = book
                     .all()
                     .into_iter()
-                    .map(|peer| PeerRow {
-                        did: peer.did.clone(),
-                        name: peer.name.clone(),
-                        short: peer.did.chars().take(8).collect(),
-                        last_addr: peer.last_addr.clone(),
+                    .map(|peer| {
+                        let (state, last_seen) = live
+                            .as_ref()
+                            .and_then(|m| m.get(&peer.did).copied())
+                            .unwrap_or((P2pPeerState::Unknown, None));
+                        PeerRow {
+                            did: peer.did.clone(),
+                            name: peer.name.clone(),
+                            short: peer.did.chars().take(8).collect(),
+                            last_addr: peer.last_addr.clone(),
+                            state,
+                            last_seen,
+                        }
                     })
                     .collect();
                 self.peer_error = None;
@@ -3586,7 +3648,7 @@ impl PairState {
             self.message = Some(("身份不可用（系统随机源异常）".to_string(), true));
             return;
         };
-        let book = match peer_book() {
+        let book = match peer_book_at(&self.db_path) {
             Ok(book) => book,
             Err(e) => {
                 self.message = Some((e.user_hint(), true));
@@ -3706,7 +3768,7 @@ impl PairState {
             self.message = Some(("身份不可用（系统随机源异常）".to_string(), true));
             return;
         };
-        let book = match peer_book() {
+        let book = match peer_book_at(&self.db_path) {
             Ok(book) => book,
             Err(e) => {
                 self.message = Some((e.user_hint(), true));
@@ -3756,7 +3818,7 @@ impl PairState {
 
     /// 二次确认后移除一台设备。
     pub fn remove_peer(&mut self, did: &str) {
-        let outcome = peer_book().and_then(|book| book.remove(did));
+        let outcome = peer_book_at(&self.db_path).and_then(|book| book.remove(did));
         self.remove_confirm = None;
         match outcome {
             Ok(_) => {
@@ -4665,7 +4727,11 @@ impl RimeSyncState {
 }
 
 /// 距今时长 → 人话（刚刚 / N 分钟前 / N 小时前 / N 天前）。
-#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
+#[cfg(any(
+    feature = "backup-page",
+    feature = "clipboard-page",
+    feature = "pair-page"
+))]
 pub(crate) fn relative_time_ago(elapsed: std::time::Duration) -> String {
     let mins = elapsed.as_secs() / 60;
     if mins < 1 {
@@ -5782,7 +5848,7 @@ pub struct SyncPluginUiState {
 ///
 /// 节点只能在输入法进程里跑（端口、连接、配对表都归它），设置程序不持有节点，
 /// 只读它写的 `p2p/status.json` 快照。
-#[cfg(feature = "clipboard-page")]
+#[cfg(any(feature = "clipboard-page", feature = "pair-page"))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum P2pPeerState {
     /// 有活跃会话，能立刻同步。
@@ -5975,7 +6041,8 @@ impl SyncPluginUiState {
             let dir = p2p_dir();
             let live = read_p2p_status(&dir);
             self.p2p_running = live.is_some();
-            self.p2p_peers = peer_book()
+            let db_path = xime_config::app_db::default_db_path();
+            self.p2p_peers = peer_book_at(&db_path)
                 .map(|book| {
                     book.all()
                         .into_iter()
@@ -9623,7 +9690,8 @@ mod pair_tests {
         assert!(a.peers.is_empty());
         assert_eq!(a.message.as_ref().map(|m| m.1), Some(false));
         // 库里也不能留：否则重启设置器又「复活」。
-        assert!(peer_book().unwrap().all().is_empty());
+        let db_path = a.db_path().to_path_buf();
+        assert!(peer_book_at(&db_path).unwrap().all().is_empty());
     }
 }
 
