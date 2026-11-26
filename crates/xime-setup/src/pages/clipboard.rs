@@ -7,7 +7,6 @@ use crate::components::widgets::{
     text_input_style,
 };
 use crate::state::{ClipboardState, Message, SettingsState, CLIPBOARD_PAGE_SIZE};
-use crate::state::{P2pPeerState, P2pPeerUi};
 use crate::theme::ThemeColors;
 use iced::widget::{button, column, container, pick_list, row, text, text_input};
 use iced::{border, Background, Border, Color, Element, Length};
@@ -156,23 +155,7 @@ fn sync_groups<'a>(
         Some(if sp.p2p_peers.is_empty() {
             "还没有已配对设备，先到「设备关联」配对".to_string()
         } else {
-            let online = sp
-                .p2p_peers
-                .iter()
-                .filter(|p| p.state == P2pPeerState::Online)
-                .count();
-            if sp.p2p_running {
-                format!(
-                    "已配对 {} 台 · {} 台在线，不经过任何服务器",
-                    sp.p2p_peers.len(),
-                    online
-                )
-            } else {
-                format!(
-                    "已配对 {} 台（输入法未运行，状态未知），不经过任何服务器",
-                    sp.p2p_peers.len()
-                )
-            }
+            format!("已配对 {} 台，不经过任何服务器", sp.p2p_peers.len())
         }),
         colors,
         switch(p2p_on, colors, move |_| {
@@ -214,7 +197,7 @@ fn sync_groups<'a>(
         ));
     } else {
         if p2p_on {
-            sync_items.extend(p2p_peer_items(sp, colors));
+            sync_items.push(p2p_peers_item(sp, colors));
         }
         if plugin_on {
             sync_items.extend(plugin_items(sp, colors));
@@ -240,77 +223,22 @@ fn sync_groups<'a>(
     groups
 }
 
-/// 设备互传：每台设备一行（名字 + 实时状态），末尾是去配对入口。
+/// 设备互传：已配对设备一览 + 去配对入口。
 ///
-/// 状态来自输入法写的快照，不是设置程序自己探活：节点只能在输入法进程里跑。
-/// 拿不到快照时显示「未知」而不是「离线」——「输入法没开」和「对方不在」
-/// 是两件事，混成一个灯等于骗人。
-fn p2p_peer_items<'a>(
+/// 这里只报个数量：谁在线、谁离线属于「设备关联」页的事，通道开关页不重复显示。
+fn p2p_peers_item<'a>(
     sp: &'a crate::state::SyncPluginUiState,
     colors: &'a ThemeColors,
-) -> Vec<Element<'a, Message>> {
-    if sp.p2p_peers.is_empty() {
-        return vec![settings_item(
-            "已配对设备",
-            Some(p2p_empty_hint().to_string()),
-            colors,
-            pair_entry_button(colors),
-        )];
-    }
-
-    let mut items: Vec<Element<'a, Message>> = sp
-        .p2p_peers
-        .iter()
-        .map(|peer| {
-            let (badge_label, fg, bg) = match peer.state {
-                P2pPeerState::Online => ("在线", colors.success, colors.success_dim),
-                P2pPeerState::Nearby => ("附近", colors.tertiary, colors.tertiary_dim),
-                P2pPeerState::Offline => {
-                    ("离线", colors.foreground_muted, colors.surface_variant)
-                }
-                P2pPeerState::Unknown => {
-                    ("未知", colors.foreground_faint, colors.surface_variant)
-                }
-            };
-            settings_item(
-                peer.name.clone(),
-                Some(p2p_state_hint(peer, sp.p2p_running)),
-                colors,
-                badge(badge_label, fg, bg),
-            )
-        })
-        .collect();
-
-    items.push(settings_item(
-        "添加设备",
-        Some("在对方设备上打开配对、显示动态码".to_string()),
-        colors,
-        pair_entry_button(colors),
-    ));
-    items
-}
-
-/// 一台设备的状态说明。说法要能对上「在线 / 附近 / 离线 / 未知」的差别。
-fn p2p_state_hint(peer: &P2pPeerUi, running: bool) -> String {
-    match peer.state {
-        P2pPeerState::Online => "已连接，剪贴板会立即同步".to_string(),
-        P2pPeerState::Nearby => "在局域网内，但没和本机建立连接".to_string(),
-        P2pPeerState::Offline => match peer.last_seen {
-            Some(ts) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(ts);
-                let ago = now.saturating_sub(ts) as u64;
-                format!("离线 · 上次在线 {}", crate::state::relative_time_ago(
-                    std::time::Duration::from_secs(ago)
-                ))
-            }
-            None => "离线（还没有连上过）".to_string(),
-        },
-        P2pPeerState::Unknown if !running => "输入法没在运行，看不到状态".to_string(),
-        P2pPeerState::Unknown => "暂时拿不到状态".to_string(),
-    }
+) -> Element<'a, Message> {
+    let (title, desc) = if sp.p2p_peers.is_empty() {
+        ("已配对设备".to_string(), p2p_empty_hint().to_string())
+    } else {
+        (
+            format!("已配对 {} 台设备", sp.p2p_peers.len()),
+            sp.p2p_peers.join("、"),
+        )
+    };
+    settings_item(title, Some(desc), colors, pair_entry_button(colors))
 }
 
 /// 没有配对设备时的说明。编入了设备关联页才能真的去配对，否则得说清原因。

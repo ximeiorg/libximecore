@@ -5831,13 +5831,10 @@ pub struct SyncPluginUiState {
     pub plugin_index: usize,
     /// 插件配置表单（schema + 当前值）。
     pub fields: Vec<(xime_plugin::SettingField, String)>,
-    /// 已配对设备（仅局域网直连模式用；每帧读盘太贵，见 `poll_p2p_peers`）。
-    pub p2p_peers: Vec<P2pPeerUi>,
-    /// 输入法是否在跑局域网直连节点（状态快照新鲜且 `running`）。
+    /// 已配对设备名（仅局域网直连模式用；每帧读盘太贵，见 `poll_p2p_peers`）。
     ///
-    /// 为 false 时所有设备的 `state` 都是 [`P2pPeerState::Unknown`]——不是「离线」，
-    /// 而是「没人告诉我们」。这两个要分开，否则界面会把「输入法没开」说成「设备不在」。
-    pub p2p_running: bool,
+    /// 这一页只回答「有几种通道、配了几台」；每台的在线状态在「设备关联」页看。
+    pub p2p_peers: Vec<String>,
     pub message: Option<String>,
     pub busy: Option<&'static str>,
     /// 上次刷新配对表的时刻（1 秒节流）。
@@ -5861,16 +5858,6 @@ pub enum P2pPeerState {
     Unknown,
 }
 
-/// 一台已配对设备在界面上的样子。
-#[cfg(feature = "clipboard-page")]
-#[derive(Clone, Debug)]
-pub struct P2pPeerUi {
-    pub did: String,
-    pub name: String,
-    pub state: P2pPeerState,
-    /// 最后一次确认在线的时间（Unix 秒），来自配对表。
-    pub last_seen: Option<i64>,
-}
 
 #[cfg(feature = "clipboard-page")]
 static SYNC_PLUGIN_OUTCOME: std::sync::Mutex<Option<Result<SyncPluginOutcome, String>>> =
@@ -5898,7 +5885,6 @@ impl Default for SyncPluginUiState {
             plugin_index,
             fields: Vec::new(),
             p2p_peers: Vec::new(),
-            p2p_running: false,
             message: None,
             busy: None,
             last_peer_check: None,
@@ -6038,30 +6024,8 @@ impl SyncPluginUiState {
     fn refresh_p2p_peers(&mut self) {
         #[cfg(feature = "pair-page")]
         {
-            let dir = p2p_dir();
-            let live = read_p2p_status(&dir);
-            self.p2p_running = live.is_some();
-            let db_path = xime_config::app_db::default_db_path();
-            self.p2p_peers = peer_book_at(&db_path)
-                .map(|book| {
-                    book.all()
-                        .into_iter()
-                        .map(|p| {
-                            // 状态与最近在线时间都取自快照：配对表里的 last_seen
-                            // 要靠新版本 xime-p2p，设置程序不该为了显示而绑死版本。
-                            let (state, last_seen) = live
-                                .as_ref()
-                                .and_then(|m| m.get(&p.did).copied())
-                                .unwrap_or((P2pPeerState::Unknown, None));
-                            P2pPeerUi {
-                                did: p.did.clone(),
-                                name: p.name.clone(),
-                                state,
-                                last_seen,
-                            }
-                        })
-                        .collect()
-                })
+            self.p2p_peers = peer_book_at(&xime_config::app_db::default_db_path())
+                .map(|book| book.all().into_iter().map(|p| p.name).collect())
                 .unwrap_or_default();
         }
     }
