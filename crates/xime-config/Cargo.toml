@@ -19,6 +19,8 @@ librime = { path = "../librime" }
 # 外部词库解析（搜狗/百度/fcitx5 等格式）：词库导入页与导入管线共用。
 xime-lexicon = { path = "../xime-lexicon" }
 rusqlite.workspace = true
+# 已配对设备的读写接口（trait + PairedPeer 类型），存储在 xime.db 的 p2p_peers 表。
+xime-p2p = { workspace = true }
 once_cell.workspace = true
 thiserror.workspace = true
 # 方案包清单：文件内容 sha256（冲突检测/共享判断）与十六进制编码

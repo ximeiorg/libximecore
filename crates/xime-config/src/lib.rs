@@ -3,6 +3,7 @@ pub mod calculator;
 pub mod clipboard_store;
 pub mod imported_dict;
 pub mod metadata;
+pub mod p2p_peers;
 pub mod rime_deploy;
 pub mod schema_config;
 pub mod schema_manager;

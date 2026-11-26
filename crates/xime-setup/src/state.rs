@@ -3230,6 +3230,16 @@ pub struct SmartSuggestionState {
 /// `~/Library/Application Support/XimeYi`，rime 用户目录在其下的 `rime/`）。
 /// 两端必须指向同一个 `p2p/`——各写各的，就成了「设置里配对成功、输入法
 /// 仍认为没配对」，而界面上看不出任何异常。
+/// 打开已配对设备表（`xime.db` 的 `p2p_peers`）。
+///
+/// 存储归客户端：协议库只定义 `PeerBook`，桌面端实现在 `xime-config`。
+#[cfg(feature = "pair-page")]
+fn peer_book() -> Result<std::sync::Arc<dyn xime_p2p::PeerBook>, xime_p2p::Error> {
+    xime_config::p2p_peers::SqlitePeerBook::open_default()
+        .map(|book| std::sync::Arc::new(book) as std::sync::Arc<dyn xime_p2p::PeerBook>)
+        .map_err(|e| xime_p2p::Error::Store(format!("打开设备库失败：{e}")))
+}
+
 #[cfg(feature = "pair-page")]
 pub fn p2p_dir() -> std::path::PathBuf {
     let (_, user_data_dir) = get_data_dirs();
@@ -3243,6 +3253,49 @@ pub fn p2p_dir() -> std::path::PathBuf {
 fn device_file(dir: &std::path::Path) -> std::path::PathBuf {
     dir.join("device.json")
 }
+
+/// 读输入法写的实时状态快照（`p2p/status.json`）。
+///
+/// 快照每 2 秒刷新一次；超过 [`P2P_STATUS_TTL`] 没更新就当作没有——宁可显示
+/// 「未知」，也别拿十分钟前的「在线」骗人。节点没启动时输入法会写
+/// `running: false`，这种情况同样返回 `None`。
+#[cfg(feature = "clipboard-page")]
+fn read_p2p_status(
+    dir: &std::path::Path,
+) -> Option<std::collections::HashMap<String, (P2pPeerState, Option<i64>)>> {
+    let raw = std::fs::read_to_string(dir.join("status.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let ts = value.get("ts")?.as_i64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    if now.saturating_sub(ts) > P2P_STATUS_TTL {
+        return None;
+    }
+    if !value.get("running")?.as_bool()? {
+        return None;
+    }
+    let mut map = std::collections::HashMap::new();
+    for peer in value.get("peers")?.as_array()? {
+        let Some(did) = peer.get("did").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let state = match peer.get("state").and_then(|v| v.as_str()) {
+            Some("online") => P2pPeerState::Online,
+            Some("nearby") => P2pPeerState::Nearby,
+            Some("offline") => P2pPeerState::Offline,
+            _ => P2pPeerState::Unknown,
+        };
+        let last_seen = peer.get("last_seen").and_then(|v| v.as_i64());
+        map.insert(did.to_string(), (state, last_seen));
+    }
+    Some(map)
+}
+
+/// 状态快照的新鲜度上限（秒）。输入法每 2 秒写一次，留 5 倍余量。
+#[cfg(feature = "clipboard-page")]
+const P2P_STATUS_TTL: i64 = 10;
 
 #[cfg(feature = "pair-page")]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -3479,10 +3532,11 @@ impl PairState {
     /// 配对表损坏时不能静默当空表——那会让用户以为设备丢了而重新配对，
     /// 掩盖真正的文件问题。
     pub fn refresh_peers(&mut self) {
-        match xime_p2p::PeerStore::load(self.dir.join("peers.json")) {
-            Ok(store) => {
-                self.peers = store
+        match peer_book() {
+            Ok(book) => {
+                self.peers = book
                     .all()
+                    .into_iter()
                     .map(|peer| PeerRow {
                         did: peer.did.clone(),
                         name: peer.name.clone(),
@@ -3532,10 +3586,16 @@ impl PairState {
             self.message = Some(("身份不可用（系统随机源异常）".to_string(), true));
             return;
         };
-        let store_path = dir.join("peers.json");
+        let book = match peer_book() {
+            Ok(book) => book,
+            Err(e) => {
+                self.message = Some((e.user_hint(), true));
+                return;
+            }
+        };
         let name = self.device_name_for_pairing();
 
-        let mut display = match xime_p2p::DisplaySession::start(identity, store_path, name) {
+        let mut display = match xime_p2p::DisplaySession::start(identity, book, name) {
             Ok(session) => session,
             Err(e) => {
                 self.message = Some((format!("无法开始配对：{}", e.user_hint()), true));
@@ -3646,7 +3706,13 @@ impl PairState {
             self.message = Some(("身份不可用（系统随机源异常）".to_string(), true));
             return;
         };
-        let store_path = dir.join("peers.json");
+        let book = match peer_book() {
+            Ok(book) => book,
+            Err(e) => {
+                self.message = Some((e.user_hint(), true));
+                return;
+            }
+        };
         let name = self.device_name_for_pairing();
         let events = std::sync::Arc::clone(&self.events);
 
@@ -3662,7 +3728,7 @@ impl PairState {
                 // 手填地址时不必等发现，10 秒足够判连不通。
                 xime_p2p::join_at(
                     std::sync::Arc::clone(&identity),
-                    store_path.clone(),
+                    std::sync::Arc::clone(&book),
                     &code,
                     name.clone(),
                     addr,
@@ -3670,7 +3736,7 @@ impl PairState {
                 )
             } else {
                 // 自动发现：最长等一个码的有效期（对端可能刚点开显示）。
-                xime_p2p::join(identity, store_path, &code, name, PAIR_TIMEOUT_AUTO)
+                xime_p2p::join(identity, book, &code, name, PAIR_TIMEOUT_AUTO)
             };
             let kind = match result {
                 Ok(public) => PairKind::JoinPaired {
@@ -3690,8 +3756,7 @@ impl PairState {
 
     /// 二次确认后移除一台设备。
     pub fn remove_peer(&mut self, did: &str) {
-        let path = self.dir.join("peers.json");
-        let outcome = xime_p2p::PeerStore::load(&path).and_then(|mut store| store.remove(did));
+        let outcome = peer_book().and_then(|book| book.remove(did));
         self.remove_confirm = None;
         match outcome {
             Ok(_) => {
@@ -4600,8 +4665,8 @@ impl RimeSyncState {
 }
 
 /// 距今时长 → 人话（刚刚 / N 分钟前 / N 小时前 / N 天前）。
-#[cfg(feature = "backup-page")]
-fn relative_time_ago(elapsed: std::time::Duration) -> String {
+#[cfg(any(feature = "backup-page", feature = "clipboard-page"))]
+pub(crate) fn relative_time_ago(elapsed: std::time::Duration) -> String {
     let mins = elapsed.as_secs() / 60;
     if mins < 1 {
         "刚刚".to_string()
@@ -5700,12 +5765,45 @@ pub struct SyncPluginUiState {
     pub plugin_index: usize,
     /// 插件配置表单（schema + 当前值）。
     pub fields: Vec<(xime_plugin::SettingField, String)>,
-    /// 已配对设备名（仅局域网直连模式用；每帧读盘太贵，见 `poll_p2p_peers`）。
-    pub p2p_peers: Vec<String>,
+    /// 已配对设备（仅局域网直连模式用；每帧读盘太贵，见 `poll_p2p_peers`）。
+    pub p2p_peers: Vec<P2pPeerUi>,
+    /// 输入法是否在跑局域网直连节点（状态快照新鲜且 `running`）。
+    ///
+    /// 为 false 时所有设备的 `state` 都是 [`P2pPeerState::Unknown`]——不是「离线」，
+    /// 而是「没人告诉我们」。这两个要分开，否则界面会把「输入法没开」说成「设备不在」。
+    pub p2p_running: bool,
     pub message: Option<String>,
     pub busy: Option<&'static str>,
     /// 上次刷新配对表的时刻（1 秒节流）。
     last_peer_check: Option<std::time::Instant>,
+}
+
+/// 设置程序看到的单台设备状态。
+///
+/// 节点只能在输入法进程里跑（端口、连接、配对表都归它），设置程序不持有节点，
+/// 只读它写的 `p2p/status.json` 快照。
+#[cfg(feature = "clipboard-page")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum P2pPeerState {
+    /// 有活跃会话，能立刻同步。
+    Online,
+    /// 最近收到过公告，但没连上（对端在跑，只是没连本机）。
+    Nearby,
+    /// 既没会话也没公告。
+    Offline,
+    /// 拿不到输入法的状态（进程没运行、或快照过期）。
+    Unknown,
+}
+
+/// 一台已配对设备在界面上的样子。
+#[cfg(feature = "clipboard-page")]
+#[derive(Clone, Debug)]
+pub struct P2pPeerUi {
+    pub did: String,
+    pub name: String,
+    pub state: P2pPeerState,
+    /// 最后一次确认在线的时间（Unix 秒），来自配对表。
+    pub last_seen: Option<i64>,
 }
 
 #[cfg(feature = "clipboard-page")]
@@ -5734,6 +5832,7 @@ impl Default for SyncPluginUiState {
             plugin_index,
             fields: Vec::new(),
             p2p_peers: Vec::new(),
+            p2p_running: false,
             message: None,
             busy: None,
             last_peer_check: None,
@@ -5863,13 +5962,39 @@ impl SyncPluginUiState {
         self.mode.enabled()
     }
 
-    /// 读已配对设备名。配对表损坏时按「没有设备」处理——
-    /// 这里只是给界面看个数量，真正的拒绝发生在 IME 侧握手。
+    /// 读已配对设备与它们的状态。
+    ///
+    /// 配对表来自磁盘，在线状态来自输入法写的 `status.json` 快照——设置程序和
+    /// 输入法是两个进程，节点只能有一个主人。快照缺失/过期时状态一律
+    /// [`P2pPeerState::Unknown`]，不能默认成「离线」：那是两种不同的事。
+    /// 配对表损坏时按「没有设备」处理——这里只是给界面看个数量，
+    /// 真正的拒绝发生在 IME 侧握手。
     fn refresh_p2p_peers(&mut self) {
         #[cfg(feature = "pair-page")]
         {
-            self.p2p_peers = xime_p2p::PeerStore::load(p2p_dir().join("peers.json"))
-                .map(|store| store.all().map(|p| p.name.clone()).collect())
+            let dir = p2p_dir();
+            let live = read_p2p_status(&dir);
+            self.p2p_running = live.is_some();
+            self.p2p_peers = peer_book()
+                .map(|book| {
+                    book.all()
+                        .into_iter()
+                        .map(|p| {
+                            // 状态与最近在线时间都取自快照：配对表里的 last_seen
+                            // 要靠新版本 xime-p2p，设置程序不该为了显示而绑死版本。
+                            let (state, last_seen) = live
+                                .as_ref()
+                                .and_then(|m| m.get(&p.did).copied())
+                                .unwrap_or((P2pPeerState::Unknown, None));
+                            P2pPeerUi {
+                                did: p.did.clone(),
+                                name: p.name.clone(),
+                                state,
+                                last_seen,
+                            }
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
         }
     }
@@ -8272,6 +8397,49 @@ fn extract_tar_gz(archive_path: &std::path::Path, dest: &std::path::Path) -> any
 mod tests {
     use super::*;
 
+    /// 输入法写的快照：只认新鲜的、且节点确实在跑的那份。
+    ///
+    /// 过期或 `running: false` 时必须返回 `None`（界面显示「未知」），
+    /// 否则设备早关机了，界面还挂着十分钟前的「在线」。
+    #[cfg(feature = "clipboard-page")]
+    #[test]
+    fn p2p_status_snapshot_requires_fresh_running_file() {
+        let dir = std::env::temp_dir().join(format!("xime_p2p_status_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let write = |ts: i64, running: bool| {
+            let body = format!(
+                r#"{{"ts":{ts},"running":{running},"peers":[
+                    {{"did":"aa","state":"online","last_seen":{ts}}},
+                    {{"did":"bb","state":"nearby"}},
+                    {{"did":"cc","state":"offline"}}
+                ]}}"#
+            );
+            std::fs::write(dir.join("status.json"), body).unwrap();
+        };
+
+        write(now, true);
+        let map = read_p2p_status(&dir).expect("新鲜快照应可读");
+        assert_eq!(map["aa"], (P2pPeerState::Online, Some(now)));
+        assert_eq!(map["bb"].0, P2pPeerState::Nearby);
+        assert_eq!(map["cc"].0, P2pPeerState::Offline);
+
+        // 节点没跑：不能拿旧状态冒充在线。
+        write(now, false);
+        assert!(read_p2p_status(&dir).is_none());
+
+        // 过期：输入法进程可能已经没了。
+        write(now - P2P_STATUS_TTL - 1, true);
+        assert!(read_p2p_status(&dir).is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn downloaded_schema_ids_ignore_empty_placeholder_dirs() {
         let dir = std::env::temp_dir().join(format!(
@@ -9454,10 +9622,8 @@ mod pair_tests {
         a.remove_peer(&did);
         assert!(a.peers.is_empty());
         assert_eq!(a.message.as_ref().map(|m| m.1), Some(false));
-        // 磁盘上也不能留：否则重启设置器又「复活」。
-        assert!(xime_p2p::PeerStore::load(a.dir.join("peers.json"))
-            .unwrap()
-            .is_empty());
+        // 库里也不能留：否则重启设置器又「复活」。
+        assert!(peer_book().unwrap().all().is_empty());
     }
 }
 

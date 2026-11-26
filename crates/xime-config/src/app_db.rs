@@ -1,6 +1,6 @@
 //! 统一应用数据库（`xime.db`）：一个文件装下全部「非 Rime 配置」的应用数据。
 //!
-//! 与 Android `XimeDatabase` 对齐到**同一 schema 版本（v7）**：
+//! 与 Android `XimeDatabase` 对齐到**同一 schema 版本（v8）**：
 //!
 //! | 表 | 用途 |
 //! | --- | --- |
@@ -8,6 +8,7 @@
 //! | `imported_lexicons` | 外部词库导入记录（原来是 `imported_dicts/manifest.json`） |
 //! | `user_ngrams` | 联想引擎的 n 元组计数（PC 端暂无写入方，建表占位） |
 //! | `installed_items` | 方案包 / 方案 / 模型安装元数据（PC 端暂无写入方，建表占位） |
+//! | `p2p_peers` | 局域网直连的已配对设备（信任锚 + 上次地址） |
 //!
 //! **为什么统一成一个文件**：以前按功能各写各的——剪贴板进 `clipboard.db`，
 //! 词库导入进 `manifest.json`，联想缓存在另一个 JSON。于是一份用户数据散在
@@ -29,8 +30,10 @@ use rusqlite::Connection;
 pub const DB_FILE: &str = "xime.db";
 /// 旧版剪贴板库文件名（与 Android `LEGACY_DATABASE_NAME` 一致）。
 pub const LEGACY_DB_FILE: &str = "clipboard.db";
-/// schema 版本：对齐 Android `XimeDatabase.version = 7`。
-pub const SCHEMA_VERSION: i64 = 7;
+/// schema 版本：对齐 Android `XimeDatabase.version = 8`。
+///
+/// v8 只加了 `p2p_peers`（局域网直连的已配对设备）。
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// 剪贴板表（v4 全列；与 Android `ClipboardEntry` 逐列对齐）。
 ///
@@ -92,6 +95,21 @@ CREATE TABLE IF NOT EXISTS installed_items (
     name TEXT NOT NULL DEFAULT '',
     version TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(kind, id)
+);";
+
+/// 已配对设备（v8）。
+///
+/// 从 `xime-p2p` 的 JSON 文件搬过来的：那本来该归客户端存，协议库只认
+/// `PeerBook` 这个读接口。与 Android 的 `P2pPeerEntity` 逐列对齐。
+const CREATE_P2P_PEERS: &str = "
+CREATE TABLE IF NOT EXISTS p2p_peers (
+    did TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    pub_ed TEXT NOT NULL,
+    pub_x25519 TEXT NOT NULL,
+    last_addr TEXT,
+    last_seen INTEGER,
+    paired_at INTEGER NOT NULL DEFAULT 0
 );";
 
 /// 统一库的默认路径：Rime 用户目录的**同级**（`~/Library/Application Support/XimeYi/xime.db`）。
@@ -225,7 +243,7 @@ fn import_attached(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute(&sql, [])
 }
 
-/// 建齐四张表并把 `user_version` 抬到 [`SCHEMA_VERSION`]（幂等）。
+/// 建齐全部表并把 `user_version` 抬到 [`SCHEMA_VERSION`]（幂等）。
 ///
 /// 只做「表存在性」与版本号，不做列演进：老库缺列由各业务模块自己补
 /// （剪贴板在 `clipboard_store::migrate_to_v4`），避免这里了解每张表的
@@ -235,6 +253,7 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(CREATE_LEXICONS)?;
     conn.execute_batch(CREATE_NGRAMS)?;
     conn.execute_batch(CREATE_INSTALLED)?;
+    conn.execute_batch(CREATE_P2P_PEERS)?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
