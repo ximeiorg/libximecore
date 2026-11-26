@@ -3,9 +3,11 @@
 //! ```text
 //! asr/
 //!   mod.rs        家族识别、进程级单实例闸门、权重分片发现（与模型无关的部分）
-//!   audio.rs      PCM 输入输出：WAV 解码 + 重采样（两族共用）
+//!   audio.rs      PCM 输入输出：WAV 解码 + 重采样（各家族共用）
 //!   qwen3_asr/    Qwen3-ASR：Whisper 式 log-mel + 18 层音频塔 + 输出「语种 + 文本」
 //!   fun_asr/      Fun-ASR-Nano：Kaldi fbank + LFR + 70 层 SAN-M + 纯文本输出
+//!   whisper/      原生 Whisper（small / large-v3-turbo）：30 s 定长 log-mel
+//!                 + 编码器-解码器 + 交叉注意力
 //! ```
 //!
 //! **每族目录自成一体**：config / 前处理 / 编码器 / 文本解码器 / 分词器 / prompt
@@ -20,10 +22,11 @@
 //! match family {
 //!     AsrFamily::Qwen3Asr => { let mut asr = qwen3_asr::Qwen3Asr::from_dir(dir)?; /* … */ }
 //!     AsrFamily::FunAsrNano => { let mut asr = fun_asr::FunAsrNano::from_dir(dir)?; /* … */ }
+//!     AsrFamily::Whisper => { let mut asr = whisper::Whisper::from_dir(dir)?; /* … */ }
 //! }
 //! ```
 //!
-//! 两族的公共约束：
+//! 各家族的公共约束：
 //!
 //! - 权重都是 `model.safetensors`（可分片 + index），目录里另有 `config.json` 与分词器；
 //! - 识别器持有 KV cache，`transcribe` 需要 `&mut self`，由宿主单线程 worker 独占；
@@ -33,6 +36,7 @@
 pub mod audio;
 pub mod fun_asr;
 pub mod qwen3_asr;
+pub mod whisper;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,10 +49,11 @@ use crate::InferError;
 /// 便于既有调用方继续写 `asr::Qwen3Asr`；新代码建议直接用 [`qwen3_asr::Qwen3Asr`]。
 pub use qwen3_asr::Qwen3Asr;
 
-/// 装载与解码选项（与模型族无关，两族共用同一份）。
+/// 装载与解码选项（与模型族无关，各家族共用同一份）。
 ///
-/// 字段语义两族都适用，只是 `language` 的落点不同：Qwen3-ASR 用它预填
-/// `language X<asr_text>`，Fun-ASR 用它拼进「语音转写成 X：」这句指令。
+/// 字段语义各家族都适用，只是 `language` 的落点不同：Qwen3-ASR 用它预填
+/// `language X<asr_text>`，Fun-ASR 用它拼进「语音转写成 X：」这句指令，Whisper 用它选
+/// `<|zh|>` 这种语种 token（`None` 时自动判）。
 #[derive(Debug, Clone)]
 pub struct AsrOptions {
     /// 执行后端，默认 [`DeviceKind::detect`]。
@@ -89,7 +94,7 @@ fn default_device() -> DeviceKind {
     }
 }
 
-/// 一次识别结果（两族共用）。
+/// 一次识别结果（各家族共用）。
 #[derive(Debug, Clone)]
 pub struct Transcript {
     /// 识别文本（不带任何头部标记）。
@@ -115,12 +120,15 @@ impl Transcript {
 
 /// 模型目录属于哪个 ASR 家族（看 `config.json`）。
 ///
-/// 两族目录里都有 `config.json` / `model.safetensors` / `tokenizer.json`，光看文件名
-/// 分不出来；判据是 `model_type`，老配置没有该字段时再看有没有 `adaptor_config`。
+/// 各家族目录里都有 `config.json` / `model.safetensors` / `tokenizer.json`，光看文件名
+/// 分不出来。判据依次是：`model_type == "whisper"`；`model_type == "fun_asr_nano"`
+/// 或老配置里的 `adaptor_config`；剩下的看有没有 `audio_config`（Qwen3-ASR）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrFamily {
     Qwen3Asr,
     FunAsrNano,
+    /// 原生 Whisper（OpenAI 的编码器-解码器，不是 Qwen3-ASR 的 Whisper 式前端）。
+    Whisper,
 }
 
 impl AsrFamily {
@@ -135,6 +143,11 @@ impl AsrFamily {
     }
 
     pub fn from_json(root: &serde_json::Value) -> Result<Self, InferError> {
+        // whisper 的 config.json 是自有格式（`model_type: "whisper"`、`d_model`、
+        // `num_mel_bins`），与另两族没有交集，先认它。
+        if root.get("model_type").and_then(|v| v.as_str()) == Some("whisper") {
+            return Ok(Self::Whisper);
+        }
         if fun_asr::FunAsrConfig::is_fun_asr(root) {
             return Ok(Self::FunAsrNano);
         }
@@ -147,8 +160,8 @@ impl AsrFamily {
             return Ok(Self::Qwen3Asr);
         }
         Err(InferError::Config(
-            "config.json 既不是 Qwen3-ASR 也不是 Fun-ASR-Nano\
-             （顶层与 thinker_config 里都没有 audio_config）"
+            "config.json 不是 Qwen3-ASR / Fun-ASR-Nano / Whisper 中任何一种\
+             （没有 model_type=whisper，也没有 audio_config）"
                 .into(),
         ))
     }
@@ -168,7 +181,7 @@ fn has_qwen3_audio_config(root: &serde_json::Value) -> bool {
 ///
 /// 每个实例在 GPU 上要常驻 1.2–1.6 GB 权重 + KV cache；两个实例并发装载会在
 /// macOS 上触发 `IOGPUGroupMemory` 断言（内核 panic）。输入法本来就只需要一个
-/// 识别器，这里直接挡死第二个——两族共用同一道闸门，切换模型必须先卸载。
+/// 识别器，这里直接挡死第二个——各家族共用同一道闸门，切换模型必须先卸载。
 static ASR_INSTANCE: AtomicBool = AtomicBool::new(false);
 
 /// 单实例闸门的持有凭证，随识别器一起释放。
@@ -258,6 +271,11 @@ mod tests {
             AsrFamily::from_json(&legacy).unwrap(),
             AsrFamily::FunAsrNano
         );
+
+        let whisper = serde_json::json!({
+            "model_type": "whisper", "d_model": 1280, "num_mel_bins": 128
+        });
+        assert_eq!(AsrFamily::from_json(&whisper).unwrap(), AsrFamily::Whisper);
 
         let none = serde_json::json!({ "model_type": "foo" });
         assert!(AsrFamily::from_json(&none).is_err());

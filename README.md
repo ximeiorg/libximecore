@@ -39,7 +39,7 @@ XimeYi · XimeYao · Linux 桌面组件 · ximed
 | `xime-setup-lib` | iced 跨平台设置界面（页面按 feature 门控） |
 | `xime-plugin` | QuickJS 插件运行时：`.xipk` 包、manifest、能力白名单、超时熔断 |
 | `xime-lexicon` | 外部词库解析：搜狗 `.scel` / 百度 `.bdict` / fcitx5 libime / 搜狗拼音备份等格式 |
-| `xime-infer` | 基于 candle 的本地模型推理：笔画手写识别、Qwen3-ASR 语音识别（CPU / Metal / CUDA，按 feature 分包） |
+| `xime-infer` | 基于 candle 的本地模型推理：笔画手写识别、Qwen3-ASR / Fun-ASR-Nano / Whisper 语音识别（CPU / Metal / CUDA，按 feature 分包） |
 | `xime-speech-service` | 本地语音识别服务内核：模型目录、会话状态机、录音、Unix socket 协议 |
 | `xime-speechd` | 语音守护进程入口（独立进程持有模型与麦克风） |
 | `xime-sync-store` | 同步存储后端（本地、历史） |

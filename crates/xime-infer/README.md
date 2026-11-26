@@ -1,21 +1,24 @@
 # xime-infer
 
-基于 [candle](https://github.com/huggingface/candle) 的本地模型推理，当前有两个模型族、三个模型：
+基于 [candle](https://github.com/huggingface/candle) 的本地模型推理，当前有三个模型族：
 
 | 模块 | 模型 | 用途 |
 | --- | --- | --- |
 | [`stroke`] | StrokeTransformer（1.72M） | 笔画手写识别 |
 | [`asr::qwen3_asr`] | Qwen3-ASR-0.6B / 1.7B | 离线语音识别（支持按秒分块编码） |
 | [`asr::fun_asr`] | Fun-ASR-Nano-2512（800M） | 离线语音识别（中文方言更强，只能整段） |
+| [`asr::whisper`] | Whisper small（244M）/ large-v3-turbo（809M） | 离线语音识别 + 翻译（80+ 语种，只能整段） |
 
 [`stroke`]: src/stroke
 [`asr::qwen3_asr`]: src/asr/qwen3_asr
 [`asr::fun_asr`]: src/asr/fun_asr
+[`asr::whisper`]: src/asr/whisper
 
-两个语音模型族**各自一套代码**（config / 前处理 / 编码器 / 文本解码器 / 分词器都在自己的
+三个语音模型族**各自一套代码**（config / 前处理 / 编码器 / 文本解码器 / 分词器都在自己的
 目录里），只在 `asr::AsrOptions`、`asr::Transcript`、家族识别、单实例闸门、WAV I/O 这些
 与模型无关的部分共用。前处理与 prompt 约定差异太大（log-mel vs fbank、
-`<|audio_pad|>` vs 纯文本指令），共享实现只会让改一边必须验证另一边。
+`<|audio_pad|>` vs 纯文本指令 vs `<|startoftranscript|>`），共享实现只会让改一边必须
+验证另一边。
 
 设计边界：本 crate 只做**推理**（装载、前处理、解码），模型下载/校验/解压归宿主；
 不依赖 librime；识别器由调用方 worker 线程独占（`transcribe` 需要 `&mut self`，内部有 KV cache）。
@@ -313,6 +316,139 @@ GPU 上 7 倍实时很宽裕。CUDA 路径与 CPU 路径输出的 token 序列�
 - fbank 不乘 32768（官方 FunASR 前端乘、HF 前端不乘）：log 域整体平移会在第一层
   LayerNorm 减均值时消掉。
 
+## 语音识别（Whisper）
+
+第三族，代码在 `src/asr/whisper/`，与前两族**零共享**。模型目录用 transformers 布局
+（ModelScope 的 `openai-mirror/whisper-small`、`openai-mirror/whisper-large-v3-turbo`
+就是这种）：
+
+```text
+config.json              ← 结构超参（d_model / 层数 / num_mel_bins）
+generation_config.json   ← 语种表、task、<|notimestamps|>、抑制表
+tokenizer.json           ← byte-level BPE + 全部特殊 token
+model.safetensors        ← transformers 权重（proj_out 与 embed_tokens 绑定，不单独存）
+```
+
+```rust
+use std::path::Path;
+use xime_infer::asr::whisper::Whisper;
+
+let mut asr = Whisper::from_dir(Path::new("/path/to/whisper-small"))?;
+asr.set_language(Some("zh".into()));      // None / "auto" = 自动判语种
+asr.set_task("transcribe")?;              // 或 "translate"（译成英文）
+asr.warmup()?;                            // 固定 30 s 编码器，别放按键路径
+let out = asr.transcribe_wav(Path::new("a.wav"))?;
+println!("[{:?}] {}", out.language, out.text);
+```
+
+```bash
+# 参数：模型目录 wav [语种]；XIME_ASR_TASK=translate 走翻译
+cargo run --release -p xime-infer --example whisper_transcribe -- /path/to/model a.wav zh
+```
+
+同一套代码吃整个 Whisper 家族：`d_model` / 层数 / mel 维度 / 位置表长度全部读
+`config.json`，特殊 token 全部从 `generation_config.json` + `tokenizer.json` 解析。
+
+| | small | large-v3-turbo |
+| --- | --- | --- |
+| 参数 / 权重 | 244M / 967 MB f32 | 809M / 1.6 GB **f16** |
+| mel / 编码器 / 解码器层 | 80 / 12 / 12 | 128 / 32 / 4 |
+| 语种数 | 99 | 100（多 `<|yue|>`） |
+| `<|transcribe|>` / `<|notimestamps|>` | 50359 / 50363 | 50360 / 50364 |
+
+> 最后一行是重点：large-v3 因为多一个语种，`<|translate|>` / `<|transcribe|>` /
+> `<|notimestamps|>` 全部 +1。**特殊 token 的 id 不能写死**，否则换一代模型「能跑但
+> 输出全错」。
+
+### 管线与关键取舍
+
+```text
+PCM(16 kHz) → log-mel(80/128) 补满 30 s → [mel, 3000]
+  → conv1(k3) + GELU → conv2(k3,s2) + GELU → [d, 1500]
+  → + 正弦位置表（权重里存着，不重算）→ N 层双向 transformer → 交叉注意力 K/V
+
+prompt: <|startoftranscript|> <|语种|> <|transcribe|> <|notimestamps|>
+  → 学习位置表 + 因果自注意力 + 交叉注意力（贪心，带抑制表）
+  → 纯文本，遇 <|endoftext|> 停
+```
+
+- **必须补满 30 s**，不能像 Qwen3-ASR 那样「补到整秒」：编码器是整段双向注意力，补出来
+  的静音帧会作为 key/value 参与真实帧的注意力；位置表也固定 1500 格。官方实现、
+  whisper.cpp、faster-whisper 都是补满 30 s。
+- **输出投影与 `embed_tokens` 共享权重**。HF 的 `proj_out` 是绑定权重，safetensors 里
+  没有独立张量；自己实现时漏了就等于随机初始化 66M 参数。
+- **key 投影没有 bias**（`k_proj` 只有 weight，q/v/out 都有 bias）——这是 OpenAI 原版
+  `MultiHeadAttention` 的约定，按「所有 Linear 都有 bias」装载会直接报缺张量。
+- **交叉注意力的 K/V 只算一次**：同一个 30 s 窗口内编码器输出是常量，prefill 时投影好
+  缓存，逐 token 解码不再重算（官方实现每步都重算 1500 个位置，纯浪费）。
+- 语种自动判定：只用 `[<|startoftranscript|>]` 预填一次，在语种 token 上取 argmax
+  （与 transformers `detect_language` 同做法），然后再拿判定的语种拼正式 prompt。
+- 抑制表：`suppress_tokens` 每步压、`begin_suppress_tokens` 只在第一步压；另外把
+  `<|notimestamps|>` 之后的**全部时间戳 token** 压掉（对齐官方
+  `without_timestamps=True`）。
+- **不支持流式**：交叉注意力要看整段音频，改一个窗口就得重跑编码器（CPU 上 small 1.4 s /
+  turbo 7 s），做不了逐字预览。`WhisperRecognizer::supports_streaming()` 返回 `false`，
+  服务层录音期间不出预览、松手后一次上屏。
+
+### 边界
+
+- 单次 ≤ 30 秒（与另两族一致），更长的音频由宿主切段。
+- 不做时间戳、不做说话人分离；要流式请用 Qwen3-ASR。
+- **turbo 的翻译能力明显弱于 small**（OpenAI 的已知取舍）：中文语音 + `translate` 时
+  turbo 会原样输出中文，small 能译成英文。这不是实现问题，transformers 参考实现同样如此。
+
+### 与官方对拍
+
+同一份权重、同一段音频，与 transformers `WhisperForConditionalGeneration` 逐层比：
+
+```bash
+# 1) Rust 侧导出 log-mel / 编码器输出 / prompt id / 生成 id
+XIME_ASR_DUMP=/tmp/wd XIME_ASR_DUMP_IDS=/tmp/wd/ids.txt \
+  cargo run --release -p xime-infer --example whisper_transcribe -- <模型目录> a.wav en
+
+# 2) 参考实现（需要 pip install torch transformers）
+python3 tools/whisper_reference.py <模型目录> a.wav --dump /tmp/wd --language en
+```
+
+| 层 | small（jfk 11 s / 中文 3.3 s） | large-v3-turbo（jfk 11 s） |
+| --- | --- | --- |
+| 前处理 log-mel | 相对 RMS 6.3e-7 / 3.7e-7 | 1.8e-6（滤波器现场算） |
+| 编码器输出 | 6.9e-6 / 6.9e-6（余弦 1.000000） | 6.9e-4（f16 权重的累加顺序差） |
+| 贪心 token | 25/25、11/11 逐位相同 | 26/26 逐位相同 |
+| 文本 | 与参考逐字相同 | 与参考逐字相同 |
+
+- small 的 mel 还能与 `preprocessor_config.json` 里存着的 librosa 滤波器组逐点对：
+  80×201 最大误差 < 2e-6（`mel_filters_match_stored_reference`）。turbo 这份配置
+  （transformers 4.46+）已经删掉 `mel_filters`，改成现场算，所以只能比 mel 输出。
+- 回归用 `whisper_parity`（7 条，`#[ignore]`，small 与 turbo 都跑过）：
+  语种检测、强制语种、非法语种报错、30 s 上限、空音频、第二实例被闸门挡下、
+  mel 滤波器对拍。
+
+```bash
+XIME_WHISPER_MODEL_DIR=/path/to/whisper-small \
+  cargo test --release -p xime-infer --test whisper_parity -- --ignored --test-threads=1
+```
+
+### 实测（release，f32，贪心解码，Ryzen 5 7600X 6 核 / 12 线程）
+
+| 模型 | 音频 | 装载 | 预热 | 编码 | 解码 | 合计 / 实时率 |
+| --- | --- | --- | --- | --- | --- | --- |
+| small | 英文 11 s | 0.5 s（缓存热） | 1.5 s | 1.33 s | 1.63 s | 2.96 s / **0.27×** |
+| small | 中文 3.3 s | — | — | 1.37 s | 0.76 s | 2.13 s / **0.65×** |
+| large-v3-turbo | 英文 11 s | 1.9 s（缓存热） | 7.2 s | 7.1 s | 1.04 s | 8.1 s / **0.74×** |
+| large-v3-turbo | 中文 3.3 s | — | — | 7.15 s | 0.44 s | 7.6 s / **2.33×** |
+
+- **编码是大头**：turbo 32 层 × 1500 位置 × 20 头的整段注意力约 190 GFLOP，CPU 上
+  7 s；GPU（`--features cuda`）会快一个量级，路径与另两族共用 `DeviceKind`。
+- 编码固定 30 s：3 秒音频也要付 7 s 的编码成本，所以「松手后上屏」才划算，别做逐秒预览。
+- 解码那一列是整句 25/26（或 10/11）个 token 的总和（turbo 只有 4 层，但 lm_head 是
+  51866×1280）。自动判语种会多一次 `[sot]` 预填，随后的正式 prompt 靠
+  `continue_prefill` 续写，**不重算** 1500 个位置的交叉注意力 K/V（turbo 上省约 2 s）。
+- 装载耗时受磁盘影响很大：冷缓存读 967 MB / 1.6 GB 会到 20–50 s，热缓存 0.5–2 s
+  （small 的 f32 权重不用转换，比 turbo 的 f16→f32 快一个量级）。
+- 内存：small f32 约 1 GB，turbo f32 约 3.2 GB（f16 权重会展开）。显存紧时
+  `AsrOptions::dtype = F16` + GPU 后端。
+
 ## 移植踩过的坑
 
 1. **fp16 权重统一按 f32 装载**（笔画模型）：CPU 的 f16 算子支持不完整。ASR 则相反——
@@ -333,6 +469,13 @@ GPU 上 7 倍实时很宽裕。CUDA 路径与 CPU 路径输出的 token 序列�
 11. **不要并发装载多个实例**：`cargo test` 默认多线程，每测试各装一份 1.6 GB 模型，
     4 个测试并行就是 6 GB GPU 内存，macOS 会在 `IOGPUGroupMemory.cpp` 断言 panic。
     测试必须 `--test-threads=1` 且共享同一实例；库内用进程级闸门兜底。
+12. **Whisper 的 `k_proj` 没有 bias**（q/v/out 都有），输出投影与 `embed_tokens` 绑定；
+    特殊 token 的 id 每代差 1（large-v3 起 `<|transcribe|>` 50359→50360）。三件事都只能
+    靠真实权重/文件发现，写死任何一个都会「能跑但全错」。
+13. **Whisper 的 mel 必须补满 30 s**：它的编码器是整段双向注意力，补出来的帧会参与真实帧
+    的注意力；「按有效帧截断」那种在 Qwen3-ASR 上成立的省算力技巧在这里会改变结果。
+14. **f16 权重（turbo）按 f32 装载会翻倍**：809M 参数 × 4 B ≈ 3.2 GB，再加编码器中间量。
+    显存/内存紧就显式 `DType::F16`（GPU）。
 
 ## 对拍（笔画模型）
 

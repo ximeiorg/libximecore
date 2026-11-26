@@ -446,7 +446,7 @@ impl SpeechService {
     /// 起流式 worker。引擎不支持流式（或已被占用）时静默跳过，`listen_stop`
     /// 会退回整段识别。
     fn spawn_stream(self: &Arc<Self>) {
-        // 已知不支持流式的引擎（如 Fun-ASR-Nano）连线程都不必起：整段识别更快，
+        // 已知不支持流式的引擎（Fun-ASR-Nano、Whisper）连线程都不必起：整段识别更快，
         // 也避免录音期间反复报「不支持分块编码」。模型还在装载时先照常起线程，
         // worker 会在装载结束后自行判断并退出。
         if self.engine.streaming_capability() == Some(false) {

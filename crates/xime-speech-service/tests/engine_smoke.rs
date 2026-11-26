@@ -1,7 +1,7 @@
 //! 真实权重下的引擎派发验证（默认 `#[ignore]`）。
 //!
 //! 覆盖的是 [`xime_speech_service::engine::load`] 这一层：只给一个模型目录，它要
-//! 自己从 `config.json` 认出是 Fun-ASR 还是 Qwen3-ASR，并返回能用的
+//! 自己从 `config.json` 认出是 Fun-ASR / Qwen3-ASR / Whisper，并返回能用的
 //! [`Recognizer`]。单元测试用的是假引擎，验不到这条真实路径。
 //!
 //! 两族的目录都能跑（环境变量名沿用历史的 `XIME_FUNASR_*`，指向 Qwen3 目录同样有效）。
@@ -31,7 +31,7 @@ fn wav() -> Option<PathBuf> {
 
 /// 装载 + 转写：证明「目录 → 引擎 → 文本」这条链在真实权重下是通的。
 ///
-/// 两族都能用：`AsrFamily::detect` 认出是哪一族，再按该族应有的流式能力断言。
+/// 三族都能用：`AsrFamily::detect` 认出是哪一族，再按该族应有的流式能力断言。
 /// 之前这里写死「不支持流式」，拿 Qwen3 目录跑会误报失败。
 #[test]
 #[ignore = "需要真实权重，设 XIME_FUNASR_MODEL_DIR"]
@@ -48,6 +48,10 @@ fn fun_asr_dir_dispatches_and_transcribes() {
         }
         xime_infer::asr::AsrFamily::Qwen3Asr => {
             assert!(recognizer.supports_streaming(), "Qwen3-ASR 应支持流式")
+        }
+        // Whisper 的编码器固定 30 s、整段双向注意力，也只能整段识别。
+        xime_infer::asr::AsrFamily::Whisper => {
+            assert!(!recognizer.supports_streaming(), "Whisper 应声明不支持流式")
         }
     }
 

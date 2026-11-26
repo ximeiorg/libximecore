@@ -1,8 +1,10 @@
 //! 识别引擎抽象。
 //!
-//! 生产实现有两个：`candle` 侧的 [`xime_infer::asr::Qwen3Asr`]（流式友好）与
-//! [`xime_infer::asr::fun_asr::FunAsrNano`]（中文方言更强，只能整段识别）。
-//! 用 [`load`] 按模型目录的 `config.json` 自动选，宿主不需要知道型号差异。
+//! 生产实现有三个：`candle` 侧的 [`xime_infer::asr::Qwen3Asr`]（流式友好）、
+//! [`xime_infer::asr::fun_asr::FunAsrNano`]（中文方言更强）与
+//! [`xime_infer::asr::whisper::Whisper`]（80+ 语种，编码器-解码器）。
+//! 后两者只能整段识别。用 [`load`] 按模型目录的 `config.json` 自动选，宿主不需要
+//! 知道型号差异。
 //! 测试可以塞一个假引擎，这样状态机、协议、模型目录都能在没有 1.6 GB 权重的情况下测。
 //!
 //! 引擎有两种工作方式，服务层按能力择优：
@@ -15,7 +17,7 @@
 use std::path::Path;
 
 use candle_core::{DType, Tensor};
-use xime_infer::asr::{fun_asr::FunAsrNano, AsrFamily, AsrOptions, Qwen3Asr};
+use xime_infer::asr::{fun_asr::FunAsrNano, whisper::Whisper, AsrFamily, AsrOptions, Qwen3Asr};
 use xime_infer::DeviceKind;
 
 /// 一段已编码的音频特征，`[tokens, d_model]`。
@@ -54,6 +56,7 @@ pub fn load(dir: &Path, device: DeviceKind, dtype: DType) -> Result<Box<dyn Reco
     match family {
         AsrFamily::Qwen3Asr => Ok(Box::new(QwenRecognizer::load(dir, device, dtype)?)),
         AsrFamily::FunAsrNano => Ok(Box::new(FunAsrRecognizer::load(dir, device, dtype)?)),
+        AsrFamily::Whisper => Ok(Box::new(WhisperRecognizer::load(dir, device, dtype)?)),
     }
 }
 
@@ -126,6 +129,37 @@ impl FunAsrRecognizer {
 }
 
 impl Recognizer for FunAsrRecognizer {
+    fn transcribe(&mut self, pcm: &[f32]) -> Result<String, String> {
+        self.asr
+            .transcribe(pcm)
+            .map(|out| out.text)
+            .map_err(|e| format!("识别失败：{e}"))
+    }
+}
+
+/// Whisper 实现（OpenAI 编码器-解码器，80+ 语种）。
+///
+/// **只做整段识别**：编码器固定吃满 30 s、全段双向注意力，分块编码没有意义；
+/// 解码器还要交叉注意力看整段音频。服务层据此在录音期间不出预览。
+/// 语种交给模型自己判（`<|startoftranscript|>` 位置 argmax），宿主不需要懂 whisper
+/// 的语种代码；要强制语种就在 [`AsrOptions::language`] 里给 `zh` / `Chinese` 之类。
+pub struct WhisperRecognizer {
+    asr: Whisper,
+}
+
+impl WhisperRecognizer {
+    pub fn load(dir: &Path, device: DeviceKind, dtype: DType) -> Result<Self, String> {
+        let options = AsrOptions {
+            device,
+            dtype,
+            ..Default::default()
+        };
+        let asr = Whisper::from_dir_with(dir, options).map_err(|e| format!("装载模型失败：{e}"))?;
+        Ok(Self { asr })
+    }
+}
+
+impl Recognizer for WhisperRecognizer {
     fn transcribe(&mut self, pcm: &[f32]) -> Result<String, String> {
         self.asr
             .transcribe(pcm)

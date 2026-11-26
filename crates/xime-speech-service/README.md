@@ -14,7 +14,9 @@ XimeYi（IME）────────┐
                      ├── Unix socket（JSON 行）──► xime-speechd
 XimeYiSettings ──────┘                            ├─ 麦克风（cpal）
                                                    ├─ 模型目录
-                                                   └─ xime-infer（Qwen3-ASR）
+                                                   └─ xime-infer
+                                                      （Qwen3-ASR /
+                                                       Fun-ASR-Nano / Whisper）
 ```
 
 - 本 crate 不含平台代码：设备、dtype、目录、空闲卸载时长都由参数传入。
