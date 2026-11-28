@@ -615,9 +615,10 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
         }
         #[cfg(feature = "voice-page")]
         Message::SpeechEnabledChanged(enabled) => {
-            state.settings.speech_mode.set_enabled(enabled);
-            // 关掉时要顺手把正在进行的试听停掉：不能出现「开关已经关了、
-            // 麦克风还在录」。试听走 daemon 的 listen_stop，文本丢弃。
+            // 关掉时先把正在进行的试听停掉：不能出现「开关已经关了、麦克风还在
+            // 录」。必须在**写配置之前**停——写完之后总开关已经是关闭态，
+            // 宿主侧「关掉就不拉起语音服务」的判定会让这次 `listen_stop`
+            // 连不上，界面上还会误报一句「服务未运行」。
             if !enabled {
                 let listening = state
                     .settings
@@ -630,6 +631,7 @@ pub fn update(state: &mut SettingsApp, message: Message) -> Task<Message> {
                     state.settings.speech_server.toggle_preview();
                 }
             }
+            state.settings.speech_mode.set_enabled(enabled);
             // 关闭后不再轮询本地引擎状态（页面此时也只显示开关本身）。
             let on_page = enabled
                 && crate::pages::voice_page_index() == Some(state.settings.current_page)
