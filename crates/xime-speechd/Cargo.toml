@@ -18,4 +18,10 @@ accelerate = ["xime-speech-service/accelerate"]
 
 [dependencies]
 xime-speech-service = { path = "../xime-speech-service" }
+# 读 `speech.toml` 的总开关：关掉语音后进程要自己退出，不能把 1–2 GB 的
+# 模型内存一直占着（宿主也不一定还活着来发 Shutdown）。
+xime-config = { path = "../xime-config" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
